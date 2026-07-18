@@ -59,3 +59,19 @@ pub fn write_pdf(path: &Path, pages: &[String]) {
         .save(path)
         .expect("deterministic PDF fixture saves");
 }
+
+#[test]
+fn fixture_bytes_are_deterministic() {
+    let root = tempfile::tempdir().unwrap();
+    let first = root.path().join("first.pdf");
+    let second = root.path().join("second.pdf");
+    let pages = vec!["First page".into(), "Second page".into()];
+
+    write_pdf(&first, &pages);
+    write_pdf(&second, &pages);
+
+    assert_eq!(
+        std::fs::read(first).unwrap(),
+        std::fs::read(second).unwrap()
+    );
+}

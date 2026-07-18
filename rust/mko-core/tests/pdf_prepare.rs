@@ -69,7 +69,8 @@ impl TestEnv {
 
     fn output(&self) -> PathBuf {
         self.repository
-            .join(".knowledge-os/runtime/prepared-source.json")
+            .join(".knowledge-os/runtime/prepared")
+            .join(format!("{}.json", self.asset_id))
     }
 
     fn request(&self) -> PrepareRequest {
@@ -137,18 +138,18 @@ fn rejects_more_than_one_thousand_pages_without_publishing_or_transitioning() {
 }
 
 #[test]
-fn page_limit_is_checked_before_the_extraction_worker_runs() {
+fn page_limit_is_enforced_by_the_extraction_worker() {
     let env = TestEnv::with_pdf_pages(1001);
     let mut called = false;
 
     let error = prepare_source_with_extractor(env.request(), |_| {
         called = true;
-        Ok(Vec::new())
+        extract_pdf_pages(&env.provider.join("paper.pdf"))
     })
     .unwrap_err();
 
     assert_eq!(error.code(), "page_limit_exceeded");
-    assert!(!called);
+    assert!(called);
     assert!(!env.output().exists());
 }
 
@@ -177,9 +178,88 @@ fn rejects_output_outside_runtime_without_extracting() {
     })
     .unwrap_err();
 
-    assert_eq!(error.code(), "outside_allowed_root");
+    assert_eq!(error.code(), "runtime_output_invalid");
     assert!(!called);
     assert!(!outside.exists());
+}
+
+#[test]
+fn rejects_runtime_lock_path_as_a_prepared_output() {
+    let env = TestEnv::with_pdf(&["small"]);
+    let lock_path = env
+        .repository
+        .join(".knowledge-os/runtime/locks")
+        .join(format!("{}.lock", env.asset_id));
+    let request = PrepareRequest::new(&env.repository, &env.asset_id, lock_path)
+        .with_local_config(&env.local_config);
+
+    let error = prepare_source_with_extractor(request, |_| Ok(vec!["small".into()])).unwrap_err();
+
+    assert_eq!(error.code(), "runtime_output_invalid");
+}
+
+#[test]
+fn rejects_prepared_output_named_for_a_different_asset() {
+    let env = TestEnv::with_pdf(&["small"]);
+    let wrong = env
+        .repository
+        .join(".knowledge-os/runtime/prepared")
+        .join(format!("personal-asset-{}.json", "a".repeat(64)));
+    let request = PrepareRequest::new(&env.repository, &env.asset_id, wrong)
+        .with_local_config(&env.local_config);
+
+    let error = prepare_source_with_extractor(request, |_| Ok(vec!["small".into()])).unwrap_err();
+
+    assert_eq!(error.code(), "runtime_output_invalid");
+}
+
+#[test]
+fn two_assets_cannot_publish_to_the_same_prepared_output() {
+    let env = TestEnv::with_pdf(&["first"]);
+    let shared_output = env.output();
+    env.prepare().unwrap();
+    let second_pdf = env.provider.join("second.pdf");
+    write_pdf(&second_pdf, &["second".into()]);
+    let second_id = capture_asset(
+        CaptureRequest::new(&env.repository, &second_pdf).with_local_config(&env.local_config),
+    )
+    .unwrap()
+    .asset_id;
+    let request = PrepareRequest::new(&env.repository, &second_id, shared_output)
+        .with_local_config(&env.local_config);
+
+    let error = prepare_source_with_extractor(request, extract_pdf_pages).unwrap_err();
+
+    assert_eq!(error.code(), "runtime_output_invalid");
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_a_runtime_root_symlink_that_escapes_the_repository() {
+    let env = TestEnv::with_pdf(&["small"]);
+    let outside = env._root.path().join("outside");
+    fs::create_dir_all(outside.join("runtime/prepared")).unwrap();
+    std::os::unix::fs::symlink(&outside, env.repository.join(".knowledge-os")).unwrap();
+
+    let error = env.prepare().unwrap_err();
+
+    assert_eq!(error.code(), "runtime_path_invalid");
+    assert!(
+        !outside
+            .join("runtime/prepared")
+            .join(format!("{}.json", env.asset_id))
+            .exists()
+    );
+}
+
+#[test]
+fn rejects_a_non_directory_runtime_component() {
+    let env = TestEnv::with_pdf(&["small"]);
+    fs::write(env.repository.join(".knowledge-os"), b"not a directory").unwrap();
+
+    let error = env.prepare().unwrap_err();
+
+    assert_eq!(error.code(), "runtime_path_invalid");
 }
 
 #[test]
@@ -189,7 +269,7 @@ fn failed_atomic_publication_leaves_asset_registered() {
 
     let error = env.prepare().unwrap_err();
 
-    assert_eq!(error.code(), "runtime_destination_invalid");
+    assert_eq!(error.code(), "runtime_output_invalid");
     assert_eq!(
         read_asset(&env.repository, &env.asset_id)
             .unwrap()

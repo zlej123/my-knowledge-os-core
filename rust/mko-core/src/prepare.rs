@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::{Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -12,13 +12,12 @@ use crate::{
     CORE_VERSION,
     config::load_capture_config,
     error::MkoError,
-    fingerprint::{fingerprint_open_file, validate_pdf_content},
+    fingerprint::{FileSnapshot, fingerprint_file, fingerprint_open_file, validate_pdf_content},
     lock::AssetLock,
     model::{AssetStatus, Fingerprint},
     path_policy::provider_path,
     pdf::{
         EXTRACTOR_NAME, EXTRACTOR_VERSION, extract_pdf_pages_in_child, validate_extracted_pages,
-        validate_pdf_page_limit,
     },
     registry::{mark_asset_extracted, read_asset},
 };
@@ -107,7 +106,13 @@ where
         &request.repository_root,
         request.local_config_path.as_deref(),
     )?;
-    let output = runtime_output_path(&config.repository_root, &request.output)?;
+    let source_id = source_id(&request.asset_id)?;
+    let runtime = runtime_paths(
+        &config.repository_root,
+        &request.repository_root,
+        &request.asset_id,
+        &request.output,
+    )?;
     let _lock = AssetLock::acquire(
         &config.repository_root,
         &request.asset_id,
@@ -141,10 +146,15 @@ where
             "provider content no longer matches the registered asset",
         ));
     }
-    let snapshot = Snapshot::copy_from(&output, &request.asset_id, &mut provider)?;
-    validate_pdf_page_limit(&snapshot.path)?;
+    let snapshot = Snapshot::copy_from(
+        &runtime.snapshot_directory,
+        &request.asset_id,
+        &mut provider,
+        &before,
+    )?;
     let pages = extractor(&snapshot.path)?;
     validate_extracted_pages(&pages)?;
+    snapshot.verify(&before)?;
 
     let retained_after = fingerprint_open_file(&mut provider)?;
     let mut reopened = provider_path(&config.provider_root, &candidate)?.file;
@@ -159,7 +169,7 @@ where
     let bundle = PreparedSourceBundle {
         schema_version: 1,
         asset_id: asset.id.clone(),
-        source_id: source_id(&asset.id)?,
+        source_id,
         fingerprint: asset.fingerprint.clone(),
         title_hint: asset.title.clone(),
         logical_path: asset.provider.locator.clone(),
@@ -184,9 +194,9 @@ where
             "prepared source bundle failed deterministic validation",
         ));
     }
-    write_runtime(&output, &bytes)?;
+    write_runtime(&runtime.output, &bytes)?;
     let published: PreparedSourceBundle = serde_json::from_slice(
-        &fs::read(&output)
+        &fs::read(&runtime.output)
             .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))?,
     )
     .map_err(|error| MkoError::new("bundle_invalid", error.to_string()))?;
@@ -206,48 +216,114 @@ fn source_id(asset_id: &str) -> Result<String, MkoError> {
     let hash = asset_id
         .strip_prefix("personal-asset-")
         .ok_or_else(|| MkoError::new("asset_id_invalid", "asset ID must be content addressed"))?;
+    if hash.len() != 64
+        || !hash
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(MkoError::new(
+            "asset_id_invalid",
+            "asset ID must contain a full lowercase SHA-256 fingerprint",
+        ));
+    }
     Ok(format!("personal-source-{hash}"))
 }
 
-fn runtime_output_path(repository_root: &Path, requested: &Path) -> Result<PathBuf, MkoError> {
-    let runtime = repository_root.join(".knowledge-os").join("runtime");
-    fs::create_dir_all(&runtime)
-        .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))?;
-    let runtime = fs::canonicalize(&runtime)
-        .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))?;
-    let candidate = if requested.is_absolute() {
-        requested.to_path_buf()
+struct RuntimePaths {
+    output: PathBuf,
+    snapshot_directory: PathBuf,
+}
+
+fn runtime_paths(
+    repository_root: &Path,
+    requested_repository_root: &Path,
+    asset_id: &str,
+    requested: &Path,
+) -> Result<RuntimePaths, MkoError> {
+    let expected_relative = PathBuf::from(".knowledge-os")
+        .join("runtime")
+        .join("prepared")
+        .join(format!("{asset_id}.json"));
+    let requested_relative = if requested.is_absolute() {
+        requested
+            .strip_prefix(requested_repository_root)
+            .or_else(|_| requested.strip_prefix(repository_root))
+            .map_err(|_| runtime_output_error())?
     } else {
-        repository_root.join(requested)
+        requested
     };
-    if candidate
+    if requested_relative
         .components()
         .any(|component| component == Component::ParentDir)
     {
-        return Err(MkoError::new(
-            "outside_allowed_root",
-            "prepared output must not contain path traversal",
-        ));
+        return Err(runtime_output_error());
     }
-    let parent = candidate
-        .parent()
-        .ok_or_else(|| MkoError::new("outside_allowed_root", "prepared output has no parent"))?;
-    let parent = fs::canonicalize(parent).map_err(|error| {
-        MkoError::new(
-            "outside_allowed_root",
-            format!("prepared output parent is unavailable: {error}"),
-        )
-    })?;
-    if !parent.starts_with(&runtime) {
-        return Err(MkoError::new(
-            "outside_allowed_root",
-            "prepared output must be under .knowledge-os/runtime",
-        ));
+    if requested_relative != expected_relative {
+        return Err(runtime_output_error());
     }
-    let filename = candidate
-        .file_name()
-        .ok_or_else(|| MkoError::new("outside_allowed_root", "prepared output must name a file"))?;
-    Ok(parent.join(filename))
+
+    let knowledge = ensure_real_child_directory(repository_root, ".knowledge-os")?;
+    let runtime = ensure_real_child_directory(&knowledge, "runtime")?;
+    let prepared = ensure_real_child_directory(&runtime, "prepared")?;
+    let snapshots = ensure_real_child_directory(&runtime, "snapshots")?;
+    if !knowledge.starts_with(repository_root)
+        || !runtime.starts_with(repository_root)
+        || !prepared.starts_with(repository_root)
+        || !snapshots.starts_with(repository_root)
+    {
+        return Err(runtime_path_error());
+    }
+    let output = prepared.join(format!("{asset_id}.json"));
+    match fs::symlink_metadata(&output) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => return Err(runtime_output_error()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(runtime_path_error()),
+    }
+    Ok(RuntimePaths {
+        output,
+        snapshot_directory: snapshots,
+    })
+}
+
+fn ensure_real_child_directory(parent: &Path, name: &str) -> Result<PathBuf, MkoError> {
+    let path = parent.join(name);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => return Err(runtime_path_error()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match fs::create_dir(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(_) => return Err(runtime_path_error()),
+            }
+            let metadata = fs::symlink_metadata(&path).map_err(|_| runtime_path_error())?;
+            if !metadata.file_type().is_dir() {
+                return Err(runtime_path_error());
+            }
+        }
+        Err(_) => return Err(runtime_path_error()),
+    }
+    let canonical = fs::canonicalize(&path).map_err(|_| runtime_path_error())?;
+    let canonical_parent = fs::canonicalize(parent).map_err(|_| runtime_path_error())?;
+    if canonical.parent() != Some(canonical_parent.as_path()) {
+        return Err(runtime_path_error());
+    }
+    Ok(canonical)
+}
+
+fn runtime_output_error() -> MkoError {
+    MkoError::new(
+        "runtime_output_invalid",
+        "output must be .knowledge-os/runtime/prepared/<asset-id>.json for the requested asset",
+    )
+}
+
+fn runtime_path_error() -> MkoError {
+    MkoError::new(
+        "runtime_path_invalid",
+        "runtime directories must be real directories inside the repository",
+    )
 }
 
 fn write_runtime(path: &Path, bytes: &[u8]) -> Result<(), MkoError> {
@@ -270,20 +346,32 @@ fn write_runtime(path: &Path, bytes: &[u8]) -> Result<(), MkoError> {
         .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))
 }
 
+#[derive(Debug)]
 struct Snapshot {
     path: PathBuf,
 }
 
 impl Snapshot {
     fn copy_from(
-        output: &Path,
+        directory: &Path,
         asset_id: &str,
         provider: &mut cap_std::fs::File,
+        expected: &FileSnapshot,
     ) -> Result<Self, MkoError> {
-        let parent = output.parent().ok_or_else(|| {
-            MkoError::new("runtime_write_failed", "prepared output has no parent")
-        })?;
-        let path = parent.join(format!(
+        Self::copy_from_with_hook(directory, asset_id, provider, expected, |_| {})
+    }
+
+    fn copy_from_with_hook<F>(
+        directory: &Path,
+        asset_id: &str,
+        provider: &mut cap_std::fs::File,
+        expected: &FileSnapshot,
+        mut after_chunk: F,
+    ) -> Result<Self, MkoError>
+    where
+        F: FnMut(usize),
+    {
+        let path = directory.join(format!(
             ".{asset_id}.{}.{}.pdf",
             std::process::id(),
             NEXT_SNAPSHOT.fetch_add(1, Ordering::Relaxed)
@@ -296,9 +384,26 @@ impl Snapshot {
         provider
             .seek(SeekFrom::Start(0))
             .map_err(|error| MkoError::new("file_unreadable", error.to_string()))?;
-        let result = std::io::copy(provider, &mut snapshot)
-            .and_then(|_| snapshot.sync_all())
-            .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()));
+        let result: Result<(), MkoError> = (|| {
+            let mut buffer = [0_u8; 64 * 1024];
+            let mut chunk = 0_usize;
+            loop {
+                let read = provider
+                    .read(&mut buffer)
+                    .map_err(|error| MkoError::new("file_unreadable", error.to_string()))?;
+                if read == 0 {
+                    break;
+                }
+                snapshot
+                    .write_all(&buffer[..read])
+                    .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))?;
+                chunk += 1;
+                after_chunk(chunk);
+            }
+            snapshot
+                .sync_all()
+                .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))
+        })();
         provider
             .seek(SeekFrom::Start(0))
             .map_err(|error| MkoError::new("file_unreadable", error.to_string()))?;
@@ -306,12 +411,73 @@ impl Snapshot {
             let _ = fs::remove_file(&path);
             return Err(error);
         }
-        Ok(Self { path })
+        let result = Self { path };
+        result.verify(expected)?;
+        Ok(result)
+    }
+
+    fn verify(&self, expected: &FileSnapshot) -> Result<(), MkoError> {
+        let fingerprint = fingerprint_file(&self.path)?;
+        let size_bytes = fs::metadata(&self.path)
+            .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))?
+            .len();
+        if fingerprint != expected.fingerprint || size_bytes != expected.size_bytes {
+            return Err(MkoError::new(
+                "fingerprint_changed",
+                "runtime PDF snapshot does not match the registered fingerprint and size",
+            ));
+        }
+        Ok(())
     }
 }
 
 impl Drop for Snapshot {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, sync::Arc};
+
+    use cap_std::{ambient_authority, fs::Dir};
+
+    use super::Snapshot;
+    use crate::fingerprint::fingerprint_open_file;
+
+    #[test]
+    fn snapshot_copy_rejects_mutation_that_is_restored_before_final_provider_check() {
+        let root = tempfile::tempdir().unwrap();
+        let source_path = root.path().join("paper.pdf");
+        let original = Arc::new(vec![b'a'; 4 * 64 * 1024]);
+        fs::write(&source_path, &*original).unwrap();
+        let directory = Dir::open_ambient_dir(root.path(), ambient_authority()).unwrap();
+        let mut provider = directory.open("paper.pdf").unwrap();
+        let expected = fingerprint_open_file(&mut provider).unwrap();
+        let prepared = root.path().join("prepared");
+        fs::create_dir(&prepared).unwrap();
+        let output = prepared.clone();
+        let source_for_hook = source_path.clone();
+        let original_for_hook = Arc::clone(&original);
+
+        let error = Snapshot::copy_from_with_hook(
+            &output,
+            &format!("personal-asset-{}", "a".repeat(64)),
+            &mut provider,
+            &expected,
+            move |chunk| {
+                if chunk == 1 {
+                    fs::write(&source_for_hook, vec![b'b'; original_for_hook.len()]).unwrap();
+                } else if chunk == 2 {
+                    fs::write(&source_for_hook, &*original_for_hook).unwrap();
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "fingerprint_changed");
+        assert_eq!(fs::read(source_path).unwrap(), *original);
+        assert_eq!(fs::read_dir(prepared).unwrap().count(), 0);
     }
 }

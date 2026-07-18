@@ -214,7 +214,8 @@ fn source_prepare_uses_the_hidden_worker_and_publishes_a_runtime_bundle() {
     let asset_id = captured["asset_id"].as_str().unwrap();
     let output = env
         .repository
-        .join(".knowledge-os/runtime/prepared-source.json");
+        .join(".knowledge-os/runtime/prepared")
+        .join(format!("{asset_id}.json"));
 
     Command::cargo_bin("mko")
         .unwrap()
@@ -251,7 +252,8 @@ fn source_prepare_preserves_the_worker_page_limit_error() {
     let asset_id = captured["asset_id"].as_str().unwrap();
     let output = env
         .repository
-        .join(".knowledge-os/runtime/prepared-source.json");
+        .join(".knowledge-os/runtime/prepared")
+        .join(format!("{asset_id}.json"));
 
     Command::cargo_bin("mko")
         .unwrap()

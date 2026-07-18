@@ -83,16 +83,20 @@ fn extract_pdf_pages_in_child_with_timeout(
     let mut command = Command::new(executable);
     command.arg("__extract-pdf").arg("--file").arg(snapshot);
     let output = run_child_with_timeout(&mut command, timeout)?;
-    if !output.status.success() {
-        return Err(MkoError::new(
-            "pdf_extraction_failed",
-            "PDF extraction worker failed",
-        ));
-    }
+    decode_worker_output(output)
+}
+
+fn decode_worker_output(output: ChildOutput) -> Result<Vec<String>, MkoError> {
     if output.stdout.len() as u64 > MAX_WORKER_OUTPUT_BYTES {
         return Err(MkoError::new(
             "extracted_text_too_large",
             "extraction worker output exceeds the bounded response limit",
+        ));
+    }
+    if !output.status.success() {
+        return Err(MkoError::new(
+            "pdf_extraction_failed",
+            "PDF extraction worker failed",
         ));
     }
     let output: ExtractionWorkerResponse = serde_json::from_slice(&output.stdout)
@@ -173,9 +177,9 @@ pub fn worker_executable() -> Result<PathBuf, MkoError> {
 
 #[cfg(test)]
 mod tests {
-    use std::{process::Command, time::Duration};
+    use std::{io::Write, process::Command, time::Duration};
 
-    use super::run_child_with_timeout;
+    use super::{MAX_WORKER_OUTPUT_BYTES, decode_worker_output, run_child_with_timeout};
 
     #[test]
     fn timeout_terminates_the_extraction_child() {
@@ -194,6 +198,39 @@ mod tests {
     fn sleeping_child() {
         if std::env::var_os("MKO_TEST_SLEEPING_CHILD").is_some() {
             std::thread::sleep(Duration::from_secs(10));
+        }
+    }
+
+    #[test]
+    fn oversized_worker_output_wins_over_a_failed_exit_status() {
+        let executable = std::env::current_exe().unwrap();
+        let mut command = Command::new(executable);
+        command
+            .args([
+                "--exact",
+                "pdf::tests::oversized_failed_child",
+                "--nocapture",
+            ])
+            .env("MKO_TEST_OVERSIZED_CHILD", "1");
+
+        let output = run_child_with_timeout(&mut command, Duration::from_secs(5)).unwrap();
+        let error = decode_worker_output(output).unwrap_err();
+
+        assert_eq!(error.code(), "extracted_text_too_large");
+    }
+
+    #[test]
+    fn oversized_failed_child() {
+        if std::env::var_os("MKO_TEST_OVERSIZED_CHILD").is_some() {
+            let block = vec![b'x'; 64 * 1024];
+            let mut stdout = std::io::stdout().lock();
+            for _ in 0..=((MAX_WORKER_OUTPUT_BYTES / block.len() as u64) + 1) {
+                if stdout.write_all(&block).is_err() {
+                    break;
+                }
+            }
+            let _ = stdout.flush();
+            std::process::exit(7);
         }
     }
 }
