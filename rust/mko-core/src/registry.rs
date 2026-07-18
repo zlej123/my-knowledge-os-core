@@ -153,7 +153,6 @@ where
     let registry_path = format!("assets/registry/{id}.md");
     let registry_directory = registry_directory(&config.repository_root)?;
     let destination = registry_directory.join(format!("{id}.md"));
-    let destination_exists = destination.exists();
     let body = registry_body(request.captured_at, &record.provider.locator);
     let document = render_markdown(&record, &body)?;
     before_verify();
@@ -164,27 +163,27 @@ where
             "file changed during capture; no registry record was published",
         ));
     }
-    if destination_exists {
-        return existing_result(&destination, &id, &record.fingerprint.value, registry_path);
-    }
-    match write_new(&destination, document.as_bytes())? {
+    match write_new(&destination, document.as_bytes(), |existing| {
+        validate_existing(existing, &id, &record.fingerprint.value)
+    })? {
         AtomicWriteResult::Created => Ok(CaptureResult {
             result: "created".into(),
             asset_id: id,
             registry_path,
         }),
-        AtomicWriteResult::Existing => {
-            existing_result(&destination, &id, &record.fingerprint.value, registry_path)
-        }
+        AtomicWriteResult::Existing => Ok(CaptureResult {
+            result: "existing".into(),
+            asset_id: id,
+            registry_path,
+        }),
     }
 }
 
-fn existing_result(
+fn validate_existing(
     path: &Path,
     expected_id: &str,
     expected_fingerprint: &str,
-    registry_path: String,
-) -> Result<CaptureResult, MkoError> {
+) -> Result<(), MkoError> {
     let input = fs::read_to_string(path)
         .map_err(|error| MkoError::new("registry_unreadable", error.to_string()))?;
     let record: AssetRecord = parse_markdown(&input)?.metadata;
@@ -197,11 +196,7 @@ fn existing_result(
             "deterministic registry path contains a different asset",
         ));
     }
-    Ok(CaptureResult {
-        result: "existing".into(),
-        asset_id: expected_id.into(),
-        registry_path,
-    })
+    Ok(())
 }
 
 fn title_from_logical_path(path: &str, id: &str) -> String {

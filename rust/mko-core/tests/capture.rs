@@ -1,13 +1,18 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, Barrier,
+        atomic::{AtomicU64, Ordering},
+    },
+    thread,
 };
 
 use chrono::{DateTime, Utc};
 use mko_core::{
-    fingerprint::asset_id,
-    model::Fingerprint,
+    fingerprint::{asset_id, fingerprint_file},
+    front_matter::parse_markdown,
+    model::{AssetRecord, Fingerprint},
     registry::{CaptureRequest, CaptureResult, capture_asset},
 };
 
@@ -173,4 +178,64 @@ fn symlinked_files_cannot_escape_provider_root() {
         env.capture(&linked).unwrap_err().code(),
         "outside_allowed_root"
     );
+}
+
+#[test]
+fn stale_publication_lock_blocks_capture_without_writing_a_registry_record() {
+    let env = TestEnv::new();
+    let file = env.write_provider_file("paper.pdf", b"%PDF-1.7\nfixture");
+    let id = asset_id(&fingerprint_file(&file).unwrap()).unwrap();
+    let registry = env.repository.join("assets/registry");
+    fs::create_dir_all(&registry).unwrap();
+    fs::write(registry.join(format!(".{id}.md.publish.lock")), b"stale").unwrap();
+
+    let error = env.capture(&file).unwrap_err();
+
+    assert_eq!(error.code(), "registry_locked");
+    assert!(
+        env.registry_files()
+            .iter()
+            .all(|path| path.extension() != Some("md".as_ref()))
+    );
+}
+
+#[test]
+fn concurrent_capture_creates_one_intact_registry_record() {
+    let env = Arc::new(TestEnv::new());
+    let file = env.write_provider_file("paper.pdf", b"%PDF-1.7\nfixture");
+    let barrier = Arc::new(Barrier::new(8));
+    let results = thread::scope(|scope| {
+        let mut results = Vec::new();
+        for _ in 0..8 {
+            let env = Arc::clone(&env);
+            let file = file.clone();
+            let barrier = Arc::clone(&barrier);
+            results.push(scope.spawn(move || {
+                barrier.wait();
+                env.capture(&file).unwrap()
+            }));
+        }
+        results
+            .into_iter()
+            .map(|result| result.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result.result == "created")
+            .count(),
+        1
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result.result == "existing")
+            .count(),
+        7
+    );
+    assert_eq!(env.registry_files().len(), 1);
+    let record = fs::read_to_string(&env.registry_files()[0]).unwrap();
+    let record: AssetRecord = parse_markdown(&record).unwrap().metadata;
+    assert!(results.iter().all(|result| result.asset_id == record.id));
 }

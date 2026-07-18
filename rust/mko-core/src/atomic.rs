@@ -3,11 +3,15 @@ use std::{
     io::Write,
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
+    thread,
+    time::{Duration, Instant},
 };
 
 use crate::error::MkoError;
 
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
+const LOCK_WAIT: Duration = Duration::from_secs(1);
+const LOCK_RETRY: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AtomicWriteResult {
@@ -15,7 +19,14 @@ pub enum AtomicWriteResult {
     Existing,
 }
 
-pub fn write_new(path: &Path, bytes: &[u8]) -> Result<AtomicWriteResult, MkoError> {
+pub fn write_new<F>(
+    path: &Path,
+    bytes: &[u8],
+    validate_existing: F,
+) -> Result<AtomicWriteResult, MkoError>
+where
+    F: FnOnce(&Path) -> Result<(), MkoError>,
+{
     let parent = path.parent().ok_or_else(|| {
         MkoError::new(
             "registry_write_failed",
@@ -31,6 +42,11 @@ pub fn write_new(path: &Path, bytes: &[u8]) -> Result<AtomicWriteResult, MkoErro
                 "registry filename must be valid UTF-8",
             )
         })?;
+    let _lock = PublicationLock::acquire(parent, filename)?;
+    if path.exists() {
+        validate_existing(path)?;
+        return Ok(AtomicWriteResult::Existing);
+    }
     let temporary = parent.join(format!(
         ".{filename}.{}.{}.tmp",
         std::process::id(),
@@ -47,9 +63,6 @@ pub fn write_new(path: &Path, bytes: &[u8]) -> Result<AtomicWriteResult, MkoErro
         file.sync_all()
             .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
         drop(file);
-        if path.exists() {
-            return Ok(AtomicWriteResult::Existing);
-        }
         fs::rename(&temporary, path)
             .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
         sync_directory(parent)?;
@@ -57,6 +70,46 @@ pub fn write_new(path: &Path, bytes: &[u8]) -> Result<AtomicWriteResult, MkoErro
     })();
     let _ = fs::remove_file(&temporary);
     write_result
+}
+
+struct PublicationLock {
+    path: std::path::PathBuf,
+}
+
+impl PublicationLock {
+    fn acquire(parent: &Path, filename: &str) -> Result<Self, MkoError> {
+        let path = parent.join(format!(".{filename}.publish.lock"));
+        let deadline = Instant::now() + LOCK_WAIT;
+        loop {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    writeln!(file, "pid={}", std::process::id()).map_err(lock_error)?;
+                    file.sync_all().map_err(lock_error)?;
+                    return Ok(Self { path });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if Instant::now() >= deadline {
+                        return Err(MkoError::new(
+                            "registry_locked",
+                            "registry publication lock is held or stale; inspect and remove it manually after validating the destination",
+                        ));
+                    }
+                    thread::sleep(LOCK_RETRY);
+                }
+                Err(error) => return Err(lock_error(error)),
+            }
+        }
+    }
+}
+
+impl Drop for PublicationLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn lock_error(error: std::io::Error) -> MkoError {
+    MkoError::new("registry_write_failed", error.to_string())
 }
 
 #[cfg(unix)]
@@ -91,11 +144,11 @@ mod tests {
         let destination = directory.join("record.md");
 
         assert_eq!(
-            write_new(&destination, b"first").unwrap(),
+            write_new(&destination, b"first", |_| Ok(())).unwrap(),
             AtomicWriteResult::Created
         );
         assert_eq!(
-            write_new(&destination, b"second").unwrap(),
+            write_new(&destination, b"second", |_| Ok(())).unwrap(),
             AtomicWriteResult::Existing
         );
         assert_eq!(fs::read(&destination).unwrap(), b"first");
