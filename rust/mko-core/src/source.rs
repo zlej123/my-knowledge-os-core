@@ -25,7 +25,7 @@ use crate::{
     prepare::{
         PROCESSOR_VERSION, PROMPT_VERSION, PreparedSourceBundle, load_prepared_source_bundle,
     },
-    registry::{mark_asset_review_pending_with_clock, read_asset},
+    registry::{mark_asset_processed_with_clock, mark_asset_review_pending_with_clock, read_asset},
     revision::calculate_source_revision,
 };
 
@@ -157,7 +157,7 @@ pub fn write_source_draft_with_clock(
     validate_bundle_against_asset(&bundle, &asset)?;
     if !matches!(
         asset.asset_status,
-        AssetStatus::Extracted | AssetStatus::ReviewPending
+        AssetStatus::Extracted | AssetStatus::ReviewPending | AssetStatus::Processed
     ) {
         return Err(MkoError::new(
             "invalid_state_transition",
@@ -266,24 +266,38 @@ pub fn source_state_mismatches(
     };
     let mut mismatches = Vec::new();
     for document in read_source_documents(&sources)? {
-        if document.record.status != SourceStatus::ReviewPending {
+        if !matches!(
+            document.record.status,
+            SourceStatus::ReviewPending | SourceStatus::Approved
+        ) {
             continue;
         }
         let Some(asset_id) = document.record.relations.asset_ids.first() else {
-            return Err(existing_source_error("pending Source relation is missing"));
+            return Err(existing_source_error(
+                "canonical Source relation is missing",
+            ));
         };
         let asset = read_asset(&repository_root, asset_id)
             .map_err(|error| existing_source_error(error.message()))?;
         validate_existing_source_document(&document, &asset)
             .map_err(|error| existing_source_error(error.message()))?;
-        if asset.asset_status == AssetStatus::Extracted {
+        let expected = match document.record.status {
+            SourceStatus::ReviewPending => AssetStatus::ReviewPending,
+            SourceStatus::Approved => AssetStatus::Processed,
+            _ => unreachable!(),
+        };
+        if asset.asset_status != expected {
             mismatches.push(SourceStateMismatch {
                 code: "source_state_mismatch".into(),
                 source_id: document.record.id,
                 asset_id: asset.id.clone(),
                 current_state: asset_status_name(&asset.asset_status).into(),
-                expected_state: "review_pending".into(),
-                safe_action: format!("mko source repair-state --asset-id {}", asset.id),
+                expected_state: asset_status_name(&expected).into(),
+                safe_action: format!(
+                    "mko source repair-state --repo \"{}\" --asset-id {}",
+                    repository_root.display(),
+                    asset.id
+                ),
             });
         }
     }
@@ -312,40 +326,50 @@ pub fn repair_source_state_with_clock(
     let asset = read_asset(&repository_root, &request.asset_id)?;
     if !matches!(
         asset.asset_status,
-        AssetStatus::Extracted | AssetStatus::ReviewPending
+        AssetStatus::Extracted | AssetStatus::ReviewPending | AssetStatus::Processed
     ) {
         return Err(MkoError::new(
             "invalid_state_transition",
-            "source state repair is limited to extracted or review_pending assets",
+            "source state repair is limited to extracted, review_pending, or processed assets",
         ));
     }
     let sources = existing_sources_directory(&repository_root)?.ok_or_else(|| {
         MkoError::new(
             "relation_missing",
-            "no canonical pending Source exists for this Asset",
+            "no canonical Source exists for this Asset",
         )
     })?;
     let source_id = asset.id.replacen("asset", "source", 1);
     let document = find_source(&sources, &source_id)?.ok_or_else(|| {
         MkoError::new(
             "relation_missing",
-            "no canonical pending Source exists for this Asset",
+            "no canonical Source exists for this Asset",
         )
     })?;
     validate_existing_source_document(&document, &asset)
         .map_err(|error| existing_source_error(error.message()))?;
-    if document.record.status != SourceStatus::ReviewPending
-        || document.record.review.status != ReviewStatus::Pending
-    {
-        return Err(existing_source_error(
-            "state repair requires a valid pending Source",
-        ));
-    }
-    let result = if asset.asset_status == AssetStatus::ReviewPending {
-        "already_consistent"
-    } else {
-        mark_asset_review_pending_with_clock(&repository_root, &asset.id, clock)?;
-        "repaired"
+    let result = match document.record.status {
+        SourceStatus::ReviewPending if document.record.review.status == ReviewStatus::Pending => {
+            if asset.asset_status == AssetStatus::ReviewPending {
+                "already_consistent"
+            } else {
+                mark_asset_review_pending_with_clock(&repository_root, &asset.id, clock)?;
+                "repaired"
+            }
+        }
+        SourceStatus::Approved if document.record.review.status == ReviewStatus::Approved => {
+            if asset.asset_status == AssetStatus::Processed {
+                "already_consistent"
+            } else {
+                mark_asset_processed_with_clock(&repository_root, &asset.id, clock)?;
+                "repaired"
+            }
+        }
+        _ => {
+            return Err(existing_source_error(
+                "state repair requires a valid pending or approved Source",
+            ));
+        }
     };
     Ok(RepairSourceStateResult {
         result: result.into(),

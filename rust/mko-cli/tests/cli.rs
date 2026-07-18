@@ -190,18 +190,18 @@ fn check_reports_interrupted_asset_lineage_that_needs_repair() {
         .unwrap()
         .args(env.check_arguments())
         .assert()
-        .success()
+        .failure()
         .get_output()
         .stdout
         .clone();
-
-    assert_eq!(
-        parse_json(&output),
-        json!({
-            "result": "repair_needed",
-            "asset_ids": [old_asset_id],
-        })
-    );
+    let report = parse_json(&output);
+    assert_eq!(report["result"], "failed");
+    assert!(report["issues"].as_array().unwrap().iter().any(|issue| {
+        issue["code"] == "lineage_repair_needed"
+            && issue["safe_action"]
+                .as_str()
+                .is_some_and(|action| action.contains(old_asset_id) && action.contains("--repo"))
+    }));
 }
 
 #[test]
@@ -370,13 +370,134 @@ fn source_write_draft_rejects_a_bundle_outside_the_canonical_runtime_path() {
 
 #[test]
 #[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
+fn hook_install_writes_the_versioned_hook_and_configures_git() {
+    let env = CliTestEnv::new();
+    assert!(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&env.repository)
+            .arg("init")
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let output = Command::cargo_bin("mko")
+        .unwrap()
+        .args([
+            "hooks",
+            "install",
+            "--repo",
+            &env.repository.display().to_string(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(parse_json(&output)["result"], "installed");
+    assert_eq!(
+        fs::read_to_string(env.repository.join(".githooks/pre-commit")).unwrap(),
+        mko_core::hooks::PRE_COMMIT_SCRIPT
+    );
+    let configured = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&env.repository)
+        .args(["config", "--local", "--get", "core.hooksPath"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(configured.stdout).unwrap().trim(),
+        ".githooks"
+    );
+    Command::cargo_bin("mko")
+        .unwrap()
+        .args(env.check_arguments())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"result\":\"ok\""));
+}
+
+#[test]
+#[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
+fn hook_install_preserves_a_materially_different_existing_hook() {
+    let env = CliTestEnv::new();
+    assert!(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&env.repository)
+            .arg("init")
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::create_dir(env.repository.join(".githooks")).unwrap();
+    let hook = env.repository.join(".githooks/pre-commit");
+    fs::write(&hook, "#!/bin/sh\necho user-hook\n").unwrap();
+
+    Command::cargo_bin("mko")
+        .unwrap()
+        .args([
+            "hooks",
+            "install",
+            "--repo",
+            &env.repository.display().to_string(),
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("hook_conflict"));
+
+    assert_eq!(
+        fs::read_to_string(hook).unwrap(),
+        "#!/bin/sh\necho user-hook\n"
+    );
+}
+
+#[test]
+#[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
+fn human_approval_command_rejects_non_terminal_stdio_before_mutation() {
+    let env = CliTestEnv::new();
+    Command::cargo_bin("mko")
+        .unwrap()
+        .args([
+            "human",
+            "approve-source",
+            "--repo",
+            &env.repository.display().to_string(),
+            "--source-id",
+            "personal-source-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("human_confirmation_required"));
+}
+
+#[test]
+#[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
+fn check_uses_exit_two_for_configuration_or_execution_errors() {
+    let env = CliTestEnv::new();
+    let missing = env.root.join("missing-repository");
+
+    Command::cargo_bin("mko")
+        .unwrap()
+        .args(["check", "--repo", &missing.display().to_string(), "--json"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("repository_root_invalid"));
+}
+
+#[test]
+#[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
 fn check_reports_structured_source_mismatch_and_repair_state_is_idempotent() {
     let env = CliTestEnv::new();
     let pdf = env.provider.join("paper.pdf");
     write_pdf(&pdf, &["Fixture page"]);
     let captured = env.capture_json(&pdf);
     let asset_id = captured["asset_id"].as_str().unwrap();
-    let source_id = asset_id.replacen("asset", "source", 1);
     let bundle = env.prepare_bundle(asset_id);
     let response = env.semantic_response();
     let publication_lock = env
@@ -395,25 +516,20 @@ fn check_reports_structured_source_mismatch_and_repair_state_is_idempotent() {
         .unwrap()
         .args(env.check_arguments())
         .assert()
-        .success()
+        .failure()
         .get_output()
         .stdout
         .clone();
-    assert_eq!(
-        parse_json(&output),
-        json!({
-            "result": "repair_needed",
-            "asset_ids": [asset_id],
-            "issues": [{
-                "code": "source_state_mismatch",
-                "source_id": source_id,
-                "asset_id": asset_id,
-                "current_state": "extracted",
-                "expected_state": "review_pending",
-                "safe_action": format!("mko source repair-state --asset-id {asset_id}"),
-            }],
-        })
-    );
+    let report = parse_json(&output);
+    assert_eq!(report["result"], "failed");
+    assert!(report["issues"].as_array().unwrap().iter().any(|issue| {
+        issue["code"] == "source_state_mismatch"
+            && issue["safe_action"].as_str().is_some_and(|action| {
+                action.contains(asset_id)
+                    && action.contains("--repo")
+                    && action.contains("repair-state")
+            })
+    }));
 
     for expected in ["repaired", "already_consistent"] {
         let output = Command::cargo_bin("mko")

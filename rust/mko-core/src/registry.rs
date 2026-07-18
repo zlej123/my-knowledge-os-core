@@ -519,6 +519,25 @@ pub(crate) fn mark_asset_review_pending_with_clock(
     write_asset(&path, &asset, &body)
 }
 
+pub(crate) fn mark_asset_processed_with_clock(
+    repository_root: &Path,
+    asset_id: &str,
+    clock: &dyn Clock,
+) -> Result<(), MkoError> {
+    let (mut asset, body, path) = read_asset_document(repository_root, asset_id)?;
+    if asset.asset_status == AssetStatus::Processed {
+        return Ok(());
+    }
+    if asset.asset_status != AssetStatus::ReviewPending {
+        return Err(MkoError::new(
+            "invalid_state_transition",
+            "only a review_pending asset can become processed",
+        ));
+    }
+    transition_asset(&mut asset, AssetStatus::Processed, clock.now_utc())?;
+    write_asset(&path, &asset, &body)
+}
+
 fn validate_asset_id(asset_id: &str) -> Result<(), MkoError> {
     let hash = asset_id.strip_prefix("personal-asset-");
     if hash.is_none_or(|hash| {

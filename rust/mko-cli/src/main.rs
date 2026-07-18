@@ -2,16 +2,18 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use mko_core::{
+    approve::{ApproveSourceRequest, approve_source},
+    check::{CheckRequest, check_repository},
+    hooks::install_hooks,
     model::AssetStatus,
     pdf::{ExtractionWorkerResponse, extract_pdf_pages_from_reader, worker_executable},
     prepare::{PrepareRequest, prepare_source},
     registry::{
         AssetOperationRequest, CaptureRequest, accept_changed_asset, capture_asset, inspect_asset,
-        lineage_repair_needed, repair_lineage,
+        repair_lineage,
     },
     source::{
-        RepairSourceStateRequest, WriteSourceRequest, repair_source_state, source_state_mismatches,
-        write_source_draft,
+        RepairSourceStateRequest, WriteSourceRequest, repair_source_state, write_source_draft,
     },
 };
 
@@ -33,8 +35,14 @@ enum Command {
         command: SourceCommand,
     },
     Check(CheckArgs),
-    Human,
-    Hooks,
+    Human {
+        #[command(subcommand)]
+        command: HumanCommand,
+    },
+    Hooks {
+        #[command(subcommand)]
+        command: HooksCommand,
+    },
     #[command(name = "__extract-pdf", hide = true)]
     ExtractPdf,
 }
@@ -52,6 +60,16 @@ enum AssetCommand {
     Inspect(AssetOperationArgs),
     AcceptChange(AssetOperationArgs),
     RepairLineage(AssetOperationArgs),
+}
+
+#[derive(Subcommand)]
+enum HumanCommand {
+    ApproveSource(ApproveSourceArgs),
+}
+
+#[derive(Subcommand)]
+enum HooksCommand {
+    Install(HookInstallArgs),
 }
 
 #[derive(Args)]
@@ -88,6 +106,26 @@ struct AssetOperationArgs {
 
 #[derive(Args)]
 struct CheckArgs {
+    #[arg(long)]
+    repo: PathBuf,
+    #[arg(long)]
+    json: bool,
+    #[arg(long)]
+    staged: bool,
+}
+
+#[derive(Args)]
+struct ApproveSourceArgs {
+    #[arg(long)]
+    repo: PathBuf,
+    #[arg(long)]
+    source_id: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct HookInstallArgs {
     #[arg(long)]
     repo: PathBuf,
     #[arg(long)]
@@ -143,9 +181,14 @@ fn main() {
     match Cli::try_parse() {
         Ok(cli) => {
             let json = cli_requests_json(&cli);
-            if let Err(error) = run(cli) {
-                emit_error(error.code(), error.message(), json);
-                std::process::exit(1);
+            let check_requested = matches!(&cli.command, Command::Check(_));
+            match run(cli) {
+                Ok(RunOutcome::Success) => {}
+                Ok(RunOutcome::ValidationFailed) => std::process::exit(1),
+                Err(error) => {
+                    emit_error(error.code(), error.message(), json);
+                    std::process::exit(if check_requested { 2 } else { 1 });
+                }
             }
         }
         Err(error)
@@ -176,6 +219,12 @@ fn cli_requests_json(cli: &Cli) -> bool {
         } | Command::Source {
             command: SourceCommand::RepairState(RepairStateArgs { json: true, .. }),
         } | Command::Check(CheckArgs { json: true, .. })
+            | Command::Human {
+                command: HumanCommand::ApproveSource(ApproveSourceArgs { json: true, .. }),
+            }
+            | Command::Hooks {
+                command: HooksCommand::Install(HookInstallArgs { json: true, .. }),
+            }
     )
 }
 
@@ -196,32 +245,42 @@ fn emit_error(code: &str, message: &str, json: bool) {
     }
 }
 
-fn run(cli: Cli) -> Result<(), mko_core::error::MkoError> {
+enum RunOutcome {
+    Success,
+    ValidationFailed,
+}
+
+fn run(cli: Cli) -> Result<RunOutcome, mko_core::error::MkoError> {
     match cli.command {
         Command::Asset {
             command: AssetCommand::Capture(arguments),
-        } => capture(arguments),
+        } => capture(arguments).map(|_| RunOutcome::Success),
         Command::Asset {
             command: AssetCommand::Inspect(arguments),
-        } => inspect(arguments),
+        } => inspect(arguments).map(|_| RunOutcome::Success),
         Command::Asset {
             command: AssetCommand::AcceptChange(arguments),
-        } => accept_change(arguments),
+        } => accept_change(arguments).map(|_| RunOutcome::Success),
         Command::Asset {
             command: AssetCommand::RepairLineage(arguments),
-        } => repair_asset_lineage(arguments),
+        } => repair_asset_lineage(arguments).map(|_| RunOutcome::Success),
         Command::Check(arguments) => check(arguments),
         Command::Source {
             command: SourceCommand::Prepare(arguments),
-        } => prepare(arguments),
+        } => prepare(arguments).map(|_| RunOutcome::Success),
         Command::Source {
             command: SourceCommand::WriteDraft(arguments),
-        } => write_draft(arguments),
+        } => write_draft(arguments).map(|_| RunOutcome::Success),
         Command::Source {
             command: SourceCommand::RepairState(arguments),
-        } => repair_source(arguments),
-        Command::ExtractPdf => extract_pdf(),
-        Command::Human | Command::Hooks => Ok(()),
+        } => repair_source(arguments).map(|_| RunOutcome::Success),
+        Command::ExtractPdf => extract_pdf().map(|_| RunOutcome::Success),
+        Command::Human {
+            command: HumanCommand::ApproveSource(arguments),
+        } => approve(arguments).map(|_| RunOutcome::Success),
+        Command::Hooks {
+            command: HooksCommand::Install(arguments),
+        } => install_hook(arguments).map(|_| RunOutcome::Success),
     }
 }
 
@@ -387,39 +446,71 @@ fn repair_asset_lineage(arguments: AssetOperationArgs) -> Result<(), mko_core::e
     Ok(())
 }
 
-fn check(arguments: CheckArgs) -> Result<(), mko_core::error::MkoError> {
-    let asset_ids = lineage_repair_needed(&arguments.repo)?;
-    let issues = source_state_mismatches(&arguments.repo)?;
-    let result = if asset_ids.is_empty() {
-        "ok"
-    } else {
-        "repair_needed"
-    };
+fn check(arguments: CheckArgs) -> Result<RunOutcome, mko_core::error::MkoError> {
+    let report =
+        check_repository(CheckRequest::new(&arguments.repo).with_staged(arguments.staged))?;
     if arguments.json {
-        let mut output = serde_json::json!({
-            "result": result,
-            "asset_ids": asset_ids,
-        });
-        if !issues.is_empty() {
-            output["issues"] = serde_json::to_value(&issues).map_err(|error| {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| {
                 mko_core::error::MkoError::new("check_failed", error.to_string())
-            })?;
-        }
-        println!("{output}");
-    } else if asset_ids.is_empty() {
+            })?
+        );
+    } else if report.is_ok() {
         println!("ok");
     } else {
-        println!("repair_needed {}", asset_ids.join(","));
-        for issue in issues {
+        for issue in &report.issues {
             println!(
-                "{} {} {} -> {}: {}",
+                "{} {}: {}",
                 issue.code,
-                issue.source_id,
-                issue.current_state,
-                issue.expected_state,
-                issue.safe_action
+                issue.path.as_deref().unwrap_or("-"),
+                issue.message
             );
+            if let Some(action) = &issue.safe_action {
+                println!("  repair: {action}");
+            }
         }
+    }
+    Ok(if report.is_ok() {
+        RunOutcome::Success
+    } else {
+        RunOutcome::ValidationFailed
+    })
+}
+
+fn approve(arguments: ApproveSourceArgs) -> Result<(), mko_core::error::MkoError> {
+    let result = approve_source(ApproveSourceRequest::new(
+        &arguments.repo,
+        &arguments.source_id,
+    ))?;
+    if arguments.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "result": "approved",
+                "source_id": result.source_id,
+                "source_path": result.source_path,
+                "revision": result.revision,
+            })
+        );
+    } else {
+        println!("approved {} {}", result.source_id, result.revision);
+    }
+    Ok(())
+}
+
+fn install_hook(arguments: HookInstallArgs) -> Result<(), mko_core::error::MkoError> {
+    let result = install_hooks(&arguments.repo)?;
+    if arguments.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "result": result.result,
+                "hook_path": result.hook_path,
+            })
+        );
+    } else {
+        println!("{} {}", result.result, result.hook_path);
     }
     Ok(())
 }

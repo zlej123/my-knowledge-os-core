@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# My Knowledge OS pre-commit v0.1
+set -euo pipefail
+mko check --repo "$(git rev-parse --show-toplevel)" --staged
