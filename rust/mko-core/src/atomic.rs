@@ -43,9 +43,19 @@ where
             )
         })?;
     let _lock = PublicationLock::acquire(parent, filename)?;
-    if path.exists() {
-        validate_existing(path)?;
-        return Ok(AtomicWriteResult::Existing);
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            validate_existing(path)?;
+            return Ok(AtomicWriteResult::Existing);
+        }
+        Ok(_) => {
+            return Err(MkoError::new(
+                "registry_destination_invalid",
+                "registry destination exists but is not a regular file",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(MkoError::new("registry_write_failed", error.to_string())),
     }
     let temporary = parent.join(format!(
         ".{filename}.{}.{}.tmp",
@@ -83,9 +93,10 @@ impl PublicationLock {
         loop {
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(mut file) => {
+                    let lock = Self { path };
                     writeln!(file, "pid={}", std::process::id()).map_err(lock_error)?;
                     file.sync_all().map_err(lock_error)?;
-                    return Ok(Self { path });
+                    return Ok(lock);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     if Instant::now() >= deadline {
@@ -154,5 +165,45 @@ mod tests {
         assert_eq!(fs::read(&destination).unwrap(), b"first");
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_dangling_symlink_destination_without_replacing_it() {
+        let directory = test_directory();
+        let destination = directory.join("record.md");
+        std::os::unix::fs::symlink(directory.join("missing.md"), &destination).unwrap();
+
+        let error = write_new(&destination, b"replacement", |_| Ok(())).unwrap_err();
+
+        assert_eq!(error.code(), "registry_destination_invalid");
+        assert!(
+            fs::symlink_metadata(&destination)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn rejects_a_directory_destination_without_replacing_it() {
+        let directory = test_directory();
+        let destination = directory.join("record.md");
+        fs::create_dir(&destination).unwrap();
+
+        let error = write_new(&destination, b"replacement", |_| Ok(())).unwrap_err();
+
+        assert_eq!(error.code(), "registry_destination_invalid");
+        assert!(destination.is_dir());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    fn test_directory() -> std::path::PathBuf {
+        let unique = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
+        let directory =
+            std::env::temp_dir().join(format!("mko-atomic-test-{}-{unique}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        directory
     }
 }
