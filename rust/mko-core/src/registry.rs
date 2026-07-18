@@ -11,7 +11,7 @@ use crate::{
     atomic::{AtomicWriteResult, write_new},
     config::load_capture_config,
     error::MkoError,
-    fingerprint::{asset_id, fingerprint_file},
+    fingerprint::{asset_id, fingerprint_open_file, validate_pdf_content},
     front_matter::{parse_markdown, render_markdown},
     model::{AssetRecord, AssetStatus, Classification, LastError, LastSuccessfulStep, Provider},
     path_policy::{provider_path, registry_directory, validate_ascii_slug},
@@ -75,6 +75,16 @@ pub struct CaptureResult {
 }
 
 pub fn capture_asset(request: CaptureRequest) -> Result<CaptureResult, MkoError> {
+    capture_asset_with_before_verify(request, || {})
+}
+
+fn capture_asset_with_before_verify<F>(
+    request: CaptureRequest,
+    before_verify: F,
+) -> Result<CaptureResult, MkoError>
+where
+    F: FnOnce(),
+{
     if let Some(slug) = &request.slug {
         validate_ascii_slug(slug)?;
     }
@@ -94,8 +104,7 @@ pub fn capture_asset(request: CaptureRequest) -> Result<CaptureResult, MkoError>
         request.local_config_path.as_deref(),
     )?;
     let provider_path = provider_path(&config.provider_root, &request.file)?;
-    let extension_is_pdf = provider_path
-        .canonical_file
+    let extension_is_pdf = Path::new(&provider_path.logical_path)
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"));
@@ -106,25 +115,14 @@ pub fn capture_asset(request: CaptureRequest) -> Result<CaptureResult, MkoError>
         ));
     }
 
-    let fingerprint = fingerprint_file(&provider_path.canonical_file)?;
-    let id = asset_id(&fingerprint)?;
-    let registry_path = format!("assets/registry/{id}.md");
-    let registry_directory = registry_directory(&config.repository_root)?;
-    let destination = registry_directory.join(format!("{id}.md"));
-    if destination.exists() {
-        return existing_result(&destination, &id, &fingerprint.value, registry_path);
-    }
-
-    let metadata = fs::metadata(&provider_path.canonical_file)
-        .map_err(|error| MkoError::new("file_unreadable", error.to_string()))?;
-    let modified_at = metadata
-        .modified()
-        .map(DateTime::<Utc>::from)
-        .map_err(|error| MkoError::new("file_unreadable", error.to_string()))?;
+    let mut file = provider_path.file;
+    let before = fingerprint_open_file(&mut file)?;
+    validate_pdf_content(&mut file)?;
+    let id = asset_id(&before.fingerprint)?;
     let title = request
         .title
         .filter(|title| !title.trim().is_empty())
-        .unwrap_or_else(|| title_from_path(&provider_path.canonical_file, &id));
+        .unwrap_or_else(|| title_from_logical_path(&provider_path.logical_path, &id));
     let record = AssetRecord {
         id: id.clone(),
         record_type: "asset".into(),
@@ -139,9 +137,9 @@ pub fn capture_asset(request: CaptureRequest) -> Result<CaptureResult, MkoError>
             locator: provider_path.logical_path,
             revision: None,
         },
-        size_bytes: metadata.len(),
-        modified_at,
-        fingerprint,
+        size_bytes: before.size_bytes,
+        modified_at: DateTime::<Utc>::from(before.modified_at.into_std()),
+        fingerprint: before.fingerprint.clone(),
         asset_status: AssetStatus::Registered,
         supersedes: None,
         last_successful_step: LastSuccessfulStep::Registered,
@@ -152,8 +150,23 @@ pub fn capture_asset(request: CaptureRequest) -> Result<CaptureResult, MkoError>
         created_at: request.captured_at,
         updated_at: request.captured_at,
     };
+    let registry_path = format!("assets/registry/{id}.md");
+    let registry_directory = registry_directory(&config.repository_root)?;
+    let destination = registry_directory.join(format!("{id}.md"));
+    let destination_exists = destination.exists();
     let body = registry_body(request.captured_at, &record.provider.locator);
     let document = render_markdown(&record, &body)?;
+    before_verify();
+    let after = fingerprint_open_file(&mut file)?;
+    if before != after {
+        return Err(MkoError::new(
+            "fingerprint_changed",
+            "file changed during capture; no registry record was published",
+        ));
+    }
+    if destination_exists {
+        return existing_result(&destination, &id, &record.fingerprint.value, registry_path);
+    }
     match write_new(&destination, document.as_bytes())? {
         AtomicWriteResult::Created => Ok(CaptureResult {
             result: "created".into(),
@@ -191,8 +204,9 @@ fn existing_result(
     })
 }
 
-fn title_from_path(path: &Path, id: &str) -> String {
-    path.file_stem()
+fn title_from_logical_path(path: &str, id: &str) -> String {
+    Path::new(path)
+        .file_stem()
         .and_then(|stem| stem.to_str())
         .filter(|title| !title.trim().is_empty())
         .map(|title| title.nfc().collect())
@@ -202,4 +216,64 @@ fn title_from_path(path: &Path, id: &str) -> String {
 fn registry_body(captured_at: DateTime<Utc>, locator: &str) -> String {
     let date = captured_at.with_timezone(&Seoul).format("%Y-%m-%d");
     format!("# Asset Registry\n\nCaptured: {date}\n\nProvider locator: `{locator}`\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use chrono::{DateTime, Utc};
+
+    use super::{CaptureRequest, capture_asset_with_before_verify};
+
+    static NEXT_TEST_ENV: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn mutation_before_final_fingerprint_is_not_published() {
+        let unique = NEXT_TEST_ENV.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "mko-registry-mutation-test-{}-{unique}",
+            std::process::id()
+        ));
+        let repository = root.join("repository");
+        let provider = root.join("provider");
+        let local_config = root.join("local-config.yaml");
+        fs::create_dir_all(&repository).unwrap();
+        fs::create_dir_all(&provider).unwrap();
+        fs::write(
+            repository.join("knowledge-os.yaml"),
+            "system: my-knowledge-os\nscope: personal\ncore_version: 0.1.0\nschema_version: 1\nprovider:\n  name: personal_google_drive\n  type: google-drive-stream\n  root_env: MKO_PERSONAL_PROVIDER_ROOT\n",
+        )
+        .unwrap();
+        fs::write(
+            &local_config,
+            format!("provider_root: {}\n", provider.display()),
+        )
+        .unwrap();
+        let pdf = provider.join("paper.pdf");
+        fs::write(&pdf, b"%PDF-1.7\nfirst version").unwrap();
+        let timestamp = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let error = capture_asset_with_before_verify(
+            CaptureRequest::new(&repository, &pdf)
+                .with_local_config(&local_config)
+                .with_captured_at(timestamp),
+            || fs::write(&pdf, b"%PDF-1.7\nsecond version").unwrap(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "fingerprint_changed");
+        assert!(
+            fs::read_dir(repository.join("assets/registry"))
+                .map(|entries| entries.count())
+                .unwrap_or_default()
+                == 0
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 }

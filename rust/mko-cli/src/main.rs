@@ -46,9 +46,53 @@ struct CaptureArgs {
 }
 
 fn main() {
-    if let Err(error) = run(Cli::parse()) {
-        eprintln!("{error}");
-        std::process::exit(1);
+    let json_requested = std::env::args_os().any(|argument| argument == "--json");
+    match Cli::try_parse() {
+        Ok(cli) => {
+            let json = cli_requests_json(&cli);
+            if let Err(error) = run(cli) {
+                emit_error(error.code(), error.message(), json);
+                std::process::exit(1);
+            }
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) =>
+        {
+            let _ = error.print();
+        }
+        Err(error) => {
+            emit_error("usage", &error.to_string(), json_requested);
+            std::process::exit(2);
+        }
+    }
+}
+
+fn cli_requests_json(cli: &Cli) -> bool {
+    matches!(
+        &cli.command,
+        Command::Asset {
+            command: AssetCommand::Capture(CaptureArgs { json: true, .. }),
+        }
+    )
+}
+
+fn emit_error(code: &str, message: &str, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "result": "error",
+                "error": {
+                    "code": code,
+                    "message": message,
+                },
+            })
+        );
+    } else {
+        eprintln!("{code}: {message}");
     }
 }
 

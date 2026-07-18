@@ -149,6 +149,17 @@ fn rejects_files_larger_than_fifty_mib() {
 }
 
 #[test]
+fn rejects_non_pdf_content_with_a_pdf_suffix() {
+    let env = TestEnv::new();
+    let file = env.write_provider_file("not-a-pdf.pdf", b"plain text disguised as a PDF");
+
+    let error = env.capture(&file).unwrap_err();
+
+    assert_eq!(error.code(), "invalid_pdf");
+    assert!(env.registry_files().is_empty());
+}
+
+#[test]
 fn symlinked_files_cannot_escape_provider_root() {
     let env = TestEnv::new();
     let outside = env.write_outside_file("paper.pdf", b"%PDF-fixture");

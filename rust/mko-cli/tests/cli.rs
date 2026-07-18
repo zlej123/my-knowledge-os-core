@@ -6,6 +6,7 @@ use std::{
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use serde_json::{Value, json};
 
 static NEXT_TEST_ENV: AtomicU64 = AtomicU64::new(0);
 
@@ -26,31 +27,88 @@ fn help_exposes_v01_command_groups() {
 
 #[test]
 #[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
-fn asset_capture_emits_the_documented_json_result() {
+fn asset_capture_emits_complete_json_for_created_and_existing_results() {
     let env = CliTestEnv::new();
     let pdf = env.provider.join("paper.pdf");
-    fs::write(&pdf, b"%PDF-fixture").unwrap();
+    fs::write(&pdf, b"%PDF-1.7\nfixture").unwrap();
 
-    Command::cargo_bin("mko")
+    let created = env.capture_json(&pdf);
+    let existing = env.capture_json(&pdf);
+
+    let id = created["asset_id"].as_str().unwrap();
+    assert_eq!(
+        created,
+        json!({
+            "result": "created",
+            "asset_id": id,
+            "registry_path": format!("assets/registry/{id}.md"),
+        })
+    );
+    assert_eq!(
+        existing,
+        json!({
+            "result": "existing",
+            "asset_id": id,
+            "registry_path": format!("assets/registry/{id}.md"),
+        })
+    );
+}
+
+#[test]
+#[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
+fn asset_capture_emits_complete_json_for_runtime_errors() {
+    let env = CliTestEnv::new();
+    let pdf = env.provider.join("not-a-pdf.pdf");
+    fs::write(&pdf, b"not a PDF").unwrap();
+
+    let output = Command::cargo_bin("mko")
         .unwrap()
-        .args([
-            "asset",
-            "capture",
-            "--repo",
-            env.repository.to_str().unwrap(),
-            "--local-config",
-            env.local_config.to_str().unwrap(),
-            "--file",
-            pdf.to_str().unwrap(),
-            "--json",
-        ])
+        .args(env.capture_arguments(&pdf))
         .assert()
-        .success()
-        .stdout(predicate::str::contains("\"result\":\"created\""))
-        .stdout(predicate::str::contains("\"asset_id\":\"personal-asset-"))
-        .stdout(predicate::str::contains(
-            "\"registry_path\":\"assets/registry/personal-asset-",
-        ));
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(
+        parse_json(&output),
+        json!({
+            "result": "error",
+            "error": {
+                "code": "invalid_pdf",
+                "message": "file does not have a PDF signature",
+            }
+        })
+    );
+}
+
+#[test]
+#[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
+fn asset_capture_emits_complete_json_for_usage_errors() {
+    let output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["asset", "capture", "--json"])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value = parse_json(&output);
+    let message = value["error"]["message"]
+        .as_str()
+        .filter(|message| !message.is_empty())
+        .unwrap();
+    assert_eq!(
+        value,
+        json!({
+            "result": "error",
+            "error": {
+                "code": "usage",
+                "message": message,
+            }
+        })
+    );
 }
 
 struct CliTestEnv {
@@ -87,10 +145,41 @@ impl CliTestEnv {
             local_config,
         }
     }
+
+    #[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
+    fn capture_json(&self, pdf: &std::path::Path) -> Value {
+        let output = Command::cargo_bin("mko")
+            .unwrap()
+            .args(self.capture_arguments(pdf))
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        parse_json(&output)
+    }
+
+    fn capture_arguments(&self, pdf: &std::path::Path) -> Vec<String> {
+        vec![
+            "asset".into(),
+            "capture".into(),
+            "--repo".into(),
+            self.repository.display().to_string(),
+            "--local-config".into(),
+            self.local_config.display().to_string(),
+            "--file".into(),
+            pdf.display().to_string(),
+            "--json".into(),
+        ]
+    }
 }
 
 impl Drop for CliTestEnv {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+fn parse_json(output: &[u8]) -> Value {
+    serde_json::from_slice(output).unwrap()
 }

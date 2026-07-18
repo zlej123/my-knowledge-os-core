@@ -4,13 +4,16 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use cap_std::{
+    ambient_authority,
+    fs::{Dir, File},
+};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::error::MkoError;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderPath {
-    pub canonical_file: PathBuf,
+    pub file: File,
     pub logical_path: String,
 }
 
@@ -31,13 +34,56 @@ pub fn canonical_directory(path: &Path, error_code: &str) -> Result<PathBuf, Mko
 }
 
 pub fn provider_path(provider_root: &Path, file: &Path) -> Result<ProviderPath, MkoError> {
-    let canonical_file = fs::canonicalize(file).map_err(|error| {
+    provider_path_with_before_open(provider_root, file, || {})
+}
+
+fn provider_path_with_before_open<F>(
+    provider_root: &Path,
+    file: &Path,
+    before_open: F,
+) -> Result<ProviderPath, MkoError>
+where
+    F: FnOnce(),
+{
+    let absolute_file = absolute_path(file)?;
+    let resolved_file = fs::canonicalize(&absolute_file).map_err(|error| {
         MkoError::new(
             "file_unreadable",
-            format!("cannot canonicalize {}: {error}", file.display()),
+            format!("cannot resolve {}: {error}", absolute_file.display()),
         )
     })?;
-    if !fs::metadata(&canonical_file)
+    let relative = resolved_file.strip_prefix(provider_root).map_err(|_| {
+        MkoError::new(
+            "outside_allowed_root",
+            "file is outside the configured provider root",
+        )
+    })?;
+    let provider = Dir::open_ambient_dir(provider_root, ambient_authority()).map_err(|error| {
+        MkoError::new(
+            "file_unreadable",
+            format!(
+                "cannot open provider root {}: {error}",
+                provider_root.display()
+            ),
+        )
+    })?;
+    let canonical_relative = provider.canonicalize(relative).map_err(|_| {
+        MkoError::new(
+            "outside_allowed_root",
+            "file is outside the configured provider root",
+        )
+    })?;
+    let logical_path = normalized_logical_path(&canonical_relative)?;
+    reject_capability_collisions(&provider, &canonical_relative)?;
+    before_open();
+    let file = provider.open(&canonical_relative).map_err(|_| {
+        MkoError::new(
+            "outside_allowed_root",
+            "file could not be opened safely within the configured provider root",
+        )
+    })?;
+    if !file
+        .metadata()
         .map_err(|error| MkoError::new("file_unreadable", error.to_string()))?
         .is_file()
     {
@@ -46,19 +92,8 @@ pub fn provider_path(provider_root: &Path, file: &Path) -> Result<ProviderPath, 
             "capture input must be a regular file",
         ));
     }
-    let relative = canonical_file.strip_prefix(provider_root).map_err(|_| {
-        MkoError::new(
-            "outside_allowed_root",
-            "file is outside the configured provider root",
-        )
-    })?;
-    let logical_path = normalized_logical_path(relative)?;
-    reject_collisions(provider_root, relative)?;
 
-    Ok(ProviderPath {
-        canonical_file,
-        logical_path,
-    })
+    Ok(ProviderPath { file, logical_path })
 }
 
 pub fn registry_directory(repository_root: &Path) -> Result<PathBuf, MkoError> {
@@ -131,9 +166,12 @@ fn normalized_logical_path(path: &Path) -> Result<String, MkoError> {
     Ok(components.join("/"))
 }
 
-fn reject_collisions(root: &Path, relative: &Path) -> Result<(), MkoError> {
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
+fn reject_capability_collisions(root: &Dir, relative: &Path) -> Result<(), MkoError> {
+    let mut current = root
+        .open_dir(".")
+        .map_err(|error| MkoError::new("file_unreadable", error.to_string()))?;
+    let components = relative.components().collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
         let Component::Normal(name) = component else {
             return Err(MkoError::new(
                 "invalid_path",
@@ -141,7 +179,14 @@ fn reject_collisions(root: &Path, relative: &Path) -> Result<(), MkoError> {
             ));
         };
         reject_component_collision(&current, name)?;
-        current.push(name);
+        if index + 1 != components.len() {
+            current = current.open_dir(name).map_err(|_| {
+                MkoError::new(
+                    "outside_allowed_root",
+                    "provider path escapes the configured provider root",
+                )
+            })?;
+        }
     }
     Ok(())
 }
@@ -168,16 +213,14 @@ fn reject_directory_collisions(directory: &Path) -> Result<(), MkoError> {
     Ok(())
 }
 
-fn reject_component_collision(
-    directory: &Path,
-    expected: &std::ffi::OsStr,
-) -> Result<(), MkoError> {
+fn reject_component_collision(directory: &Dir, expected: &std::ffi::OsStr) -> Result<(), MkoError> {
     let expected = expected
         .to_str()
         .ok_or_else(|| MkoError::new("invalid_path", "provider filename must be valid UTF-8"))?;
     let expected_key = collision_key(expected);
     let mut matches = Vec::new();
-    for entry in fs::read_dir(directory)
+    for entry in directory
+        .entries()
         .map_err(|error| MkoError::new("file_unreadable", error.to_string()))?
     {
         let entry = entry.map_err(|error| MkoError::new("file_unreadable", error.to_string()))?;
@@ -196,6 +239,15 @@ fn reject_component_collision(
         ));
     }
     Ok(())
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf, MkoError> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|directory| directory.join(path))
+        .map_err(|error| MkoError::new("file_unreadable", error.to_string()))
 }
 
 fn collision_key(value: &str) -> String {
@@ -226,4 +278,41 @@ fn reject_windows_component(value: &str) -> Result<(), MkoError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::{
+        fs,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use super::provider_path_with_before_open;
+
+    static NEXT_TEST_ENV: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn swap_to_outside_symlink_cannot_redirect_capability_read() {
+        let unique = NEXT_TEST_ENV.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "mko-provider-swap-test-{}-{unique}",
+            std::process::id()
+        ));
+        let provider = root.join("provider");
+        let outside = root.join("outside.pdf");
+        let candidate = provider.join("paper.pdf");
+        fs::create_dir_all(&provider).unwrap();
+        fs::write(&candidate, b"%PDF-1.7\nsafe").unwrap();
+        fs::write(&outside, b"%PDF-1.7\noutside").unwrap();
+
+        let error = provider_path_with_before_open(&provider, &candidate, || {
+            fs::remove_file(&candidate).unwrap();
+            std::os::unix::fs::symlink(&outside, &candidate).unwrap();
+        })
+        .err()
+        .unwrap();
+
+        assert_eq!(error.code(), "outside_allowed_root");
+        let _ = fs::remove_dir_all(root);
+    }
 }

@@ -46,22 +46,17 @@ pub fn write_new(path: &Path, bytes: &[u8]) -> Result<AtomicWriteResult, MkoErro
             .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
         file.sync_all()
             .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
-        fs::hard_link(&temporary, path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::AlreadyExists {
-                MkoError::new("registry_exists", error.to_string())
-            } else {
-                MkoError::new("registry_write_failed", error.to_string())
-            }
-        })?;
+        drop(file);
+        if path.exists() {
+            return Ok(AtomicWriteResult::Existing);
+        }
+        fs::rename(&temporary, path)
+            .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
         sync_directory(parent)?;
         Ok(AtomicWriteResult::Created)
     })();
-    drop(file);
     let _ = fs::remove_file(&temporary);
-    match write_result {
-        Err(error) if error.code() == "registry_exists" => Ok(AtomicWriteResult::Existing),
-        result => result,
-    }
+    write_result
 }
 
 #[cfg(unix)]
@@ -74,4 +69,37 @@ fn sync_directory(path: &Path) -> Result<(), MkoError> {
 #[cfg(not(unix))]
 fn sync_directory(_path: &Path) -> Result<(), MkoError> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use super::{AtomicWriteResult, write_new};
+
+    static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn publish_uses_a_synced_temp_and_preserves_an_existing_destination() {
+        let unique = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
+        let directory =
+            std::env::temp_dir().join(format!("mko-atomic-test-{}-{unique}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let destination = directory.join("record.md");
+
+        assert_eq!(
+            write_new(&destination, b"first").unwrap(),
+            AtomicWriteResult::Created
+        );
+        assert_eq!(
+            write_new(&destination, b"second").unwrap(),
+            AtomicWriteResult::Existing
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"first");
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        let _ = fs::remove_dir_all(directory);
+    }
 }
