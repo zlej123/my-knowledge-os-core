@@ -48,8 +48,17 @@ where
 
     validate_yaml_input(yaml)?;
     reject_duplicate_top_level_keys(yaml)?;
-    let metadata = serde_saphyr::from_str(yaml)
-        .map_err(|error| MkoError::new("yaml_invalid", error.to_string()))?;
+    let metadata = serde_saphyr::from_str(yaml).map_err(|error| {
+        let category = error.to_string();
+        if category.contains("duplicate field") || category.contains("duplicate mapping key") {
+            MkoError::new("yaml_invalid", "front matter contains a duplicate YAML key")
+        } else {
+            MkoError::new(
+                "schema_invalid",
+                "front matter does not match the required schema",
+            )
+        }
+    })?;
 
     Ok(ParsedMarkdown {
         metadata,

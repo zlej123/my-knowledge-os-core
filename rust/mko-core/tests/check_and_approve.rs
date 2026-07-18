@@ -156,6 +156,35 @@ struct PublicationSymlinkSwap {
 }
 
 #[cfg(unix)]
+enum ParentSwapMode {
+    ExternalSymlink,
+    NewDirectory,
+}
+
+#[cfg(unix)]
+struct ParentDirectorySwap {
+    repository: PathBuf,
+    outside: PathBuf,
+    mode: ParentSwapMode,
+}
+
+#[cfg(unix)]
+impl ApprovalObserver for ParentDirectorySwap {
+    fn before_publication(&mut self) -> io::Result<()> {
+        fs::rename(
+            self.repository.join("sources"),
+            self.repository.join("retained-sources"),
+        )?;
+        match self.mode {
+            ParentSwapMode::ExternalSymlink => {
+                std::os::unix::fs::symlink(&self.outside, self.repository.join("sources"))
+            }
+            ParentSwapMode::NewDirectory => fs::create_dir(self.repository.join("sources")),
+        }
+    }
+}
+
+#[cfg(unix)]
 impl ApprovalObserver for PublicationSymlinkSwap {
     fn before_publication(&mut self) -> io::Result<()> {
         fs::remove_file(&self.source_path)?;
@@ -499,6 +528,93 @@ fn final_publication_rejects_a_source_symlink_swap_without_touching_outside() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn approval_parent_symlink_swap_never_writes_outside_and_keeps_asset_pending() {
+    let env = TestEnv::pending_source();
+    let outside = env._root.path().join("outside-sources");
+    fs::create_dir(&outside).unwrap();
+    let marker = outside.join("marker.txt");
+    fs::write(&marker, "outside unchanged\n").unwrap();
+    let outside_source = outside.join(env.source_path.file_name().unwrap());
+    fs::write(&outside_source, "outside source unchanged\n").unwrap();
+    let mut terminal = FakeTerminal {
+        stdin_tty: true,
+        stdout_tty: true,
+        input: format!("APPROVE {}\n", env.source_id),
+        output: String::new(),
+    };
+    let mut observer = ParentDirectorySwap {
+        repository: env.repository.clone(),
+        outside: outside.clone(),
+        mode: ParentSwapMode::ExternalSymlink,
+    };
+
+    let error = approve_source_with_terminal_clock_and_observer(
+        ApproveSourceRequest::new(&env.repository, &env.source_id),
+        &mut terminal,
+        &env.clock,
+        &mut observer,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "source_changed_during_approval");
+    assert_eq!(fs::read_to_string(marker).unwrap(), "outside unchanged\n");
+    assert_eq!(
+        fs::read_to_string(outside_source).unwrap(),
+        "outside source unchanged\n"
+    );
+    assert_eq!(fs::read_dir(outside).unwrap().count(), 2);
+    assert_eq!(
+        fs::read_dir(env.repository.join("retained-sources"))
+            .unwrap()
+            .count(),
+        1,
+        "capability-relative temporary and lock files must be cleaned up"
+    );
+    assert_eq!(
+        read_asset(&env.repository, &env.asset_id)
+            .unwrap()
+            .asset_status,
+        AssetStatus::ReviewPending
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn approval_parent_new_directory_swap_fails_before_asset_transition() {
+    let env = TestEnv::pending_source();
+    let outside = env._root.path().join("unused-outside");
+    fs::create_dir(&outside).unwrap();
+    let mut terminal = FakeTerminal {
+        stdin_tty: true,
+        stdout_tty: true,
+        input: format!("APPROVE {}\n", env.source_id),
+        output: String::new(),
+    };
+    let mut observer = ParentDirectorySwap {
+        repository: env.repository.clone(),
+        outside,
+        mode: ParentSwapMode::NewDirectory,
+    };
+
+    let error = approve_source_with_terminal_clock_and_observer(
+        ApproveSourceRequest::new(&env.repository, &env.source_id),
+        &mut terminal,
+        &env.clock,
+        &mut observer,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "source_changed_during_approval");
+    assert_eq!(
+        read_asset(&env.repository, &env.asset_id)
+            .unwrap()
+            .asset_status,
+        AssetStatus::ReviewPending
+    );
+}
+
 #[test]
 fn check_rejects_a_revision_consistent_noncanonical_body_shape() {
     let env = TestEnv::pending_source();
@@ -616,6 +732,190 @@ fn auth_configuration_filenames_are_secret_findings() {
             issue.code == "secret_detected" && issue.path.as_deref() == Some(name)
         }));
     }
+}
+
+#[test]
+fn approval_reports_an_untracked_source_with_full_line_and_byte_additions() {
+    let env = TestEnv::pending_source();
+    git(&env.repository, &["init"]);
+    let bytes = fs::read(&env.source_path).unwrap().len();
+    let lines = fs::read_to_string(&env.source_path)
+        .unwrap()
+        .lines()
+        .count();
+    let mut terminal = FakeTerminal {
+        stdin_tty: true,
+        stdout_tty: true,
+        input: "decline\n".into(),
+        output: String::new(),
+    };
+
+    approve_source_with_terminal_and_clock(
+        ApproveSourceRequest::new(&env.repository, &env.source_id),
+        &mut terminal,
+        &env.clock,
+    )
+    .unwrap_err();
+
+    assert!(terminal.output.contains("Git diff: untracked"));
+    assert!(terminal.output.contains(&format!("+{lines} lines")));
+    assert!(terminal.output.contains(&format!("+{bytes} bytes")));
+}
+
+#[test]
+fn approval_reports_staged_and_working_tree_line_counts_separately() {
+    let env = TestEnv::pending_source();
+    git(&env.repository, &["init"]);
+    let input = fs::read_to_string(&env.source_path).unwrap();
+    let parsed = parse_markdown::<SourceRecord>(&input).unwrap();
+    let mut source = parsed.metadata;
+    source.title.push_str(" updated");
+    source.content_revision = calculate_source_revision(&source, &parsed.body).unwrap();
+    fs::write(
+        &env.source_path,
+        render_markdown(&source, &parsed.body).unwrap(),
+    )
+    .unwrap();
+    git(
+        &env.repository,
+        &[
+            "add",
+            env.source_path
+                .strip_prefix(&env.repository)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+        ],
+    );
+    fs::write(&env.source_path, input).unwrap();
+    let mut terminal = FakeTerminal {
+        stdin_tty: true,
+        stdout_tty: true,
+        input: "decline\n".into(),
+        output: String::new(),
+    };
+
+    approve_source_with_terminal_and_clock(
+        ApproveSourceRequest::new(&env.repository, &env.source_id),
+        &mut terminal,
+        &env.clock,
+    )
+    .unwrap_err();
+
+    assert!(terminal.output.contains("Git diff: tracked"));
+    assert!(terminal.output.contains("working +"));
+    assert!(terminal.output.contains("staged +"));
+    assert!(terminal.output.contains("current bytes"));
+}
+
+#[test]
+fn check_redacts_untrusted_yaml_schema_values_from_issues() {
+    let env = TestEnv::pending_source();
+    let registry = env
+        .repository
+        .join("assets/registry")
+        .join(format!("{}.md", env.asset_id));
+    let secret_enum = "malformed-secret-enum-value";
+    let input = fs::read_to_string(&registry).unwrap();
+    fs::write(
+        &registry,
+        input.replace(
+            "classification: personal",
+            &format!("classification: {secret_enum}"),
+        ),
+    )
+    .unwrap();
+
+    let report = env.check();
+    let json = serde_json::to_string(&report).unwrap();
+
+    assert!(report.has_code("schema_invalid"));
+    assert!(!json.contains(secret_enum));
+}
+
+#[test]
+fn check_redacts_malformed_yaml_scalar_values_from_issues() {
+    let env = TestEnv::pending_source();
+    let registry = env
+        .repository
+        .join("assets/registry")
+        .join(format!("{}.md", env.asset_id));
+    let secret_scalar = "malformed-secret-scalar-value";
+    let input = fs::read_to_string(&registry).unwrap();
+    fs::write(
+        &registry,
+        input.replace(
+            "classification: personal",
+            &format!("classification: [{secret_scalar}"),
+        ),
+    )
+    .unwrap();
+
+    let report = env.check();
+    let json = serde_json::to_string(&report).unwrap();
+
+    assert!(report.has_code("yaml_invalid"));
+    assert!(!json.contains(secret_scalar));
+}
+
+#[test]
+fn approval_source_discovery_has_a_strict_entry_limit() {
+    let env = TestEnv::pending_source();
+    for index in 0..1_100 {
+        fs::write(
+            env.repository
+                .join("sources")
+                .join(format!("extra-{index:04}.txt")),
+            "ignored\n",
+        )
+        .unwrap();
+    }
+    let mut terminal = FakeTerminal {
+        stdin_tty: true,
+        stdout_tty: true,
+        input: format!("APPROVE {}\n", env.source_id),
+        output: String::new(),
+    };
+
+    let error = approve_source_with_terminal_and_clock(
+        ApproveSourceRequest::new(&env.repository, &env.source_id),
+        &mut terminal,
+        &env.clock,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "source_scan_limit");
+}
+
+#[test]
+fn approval_source_discovery_has_a_strict_aggregate_byte_limit() {
+    let env = TestEnv::pending_source();
+    let original = fs::read_to_string(&env.source_path).unwrap();
+    let padded = format!("{original}\n{}", "x".repeat(1024 * 1024));
+    for index in 0..9 {
+        fs::write(
+            env.repository
+                .join("sources")
+                .join(format!("bulk-{index:02}.md")),
+            &padded,
+        )
+        .unwrap();
+    }
+    let mut terminal = FakeTerminal {
+        stdin_tty: true,
+        stdout_tty: true,
+        input: format!("APPROVE {}\n", env.source_id),
+        output: String::new(),
+    };
+
+    let error = approve_source_with_terminal_and_clock(
+        ApproveSourceRequest::new(&env.repository, &env.source_id),
+        &mut terminal,
+        &env.clock,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "source_scan_limit");
 }
 
 #[test]

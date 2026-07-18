@@ -17,7 +17,7 @@ use mko_core::{
         AssetOperationRequest, CaptureRequest, accept_changed_asset_with_clock, capture_asset,
         inspect_asset_with_clock, lineage_repair_needed, read_asset, repair_lineage_with_clock,
     },
-    state::{transition_allowed, transition_asset},
+    state::{transition_allowed, transition_asset, validate_asset_state},
 };
 
 static NEXT_TEST_ENV: AtomicU64 = AtomicU64::new(0);
@@ -326,6 +326,29 @@ fn transition_matrix_accepts_only_durable_lifecycle_edges() {
         AssetStatus::Superseded,
         AssetStatus::Registered
     ));
+}
+
+#[test]
+fn validator_accepts_legitimate_nested_changed_and_missing_failures() {
+    let env = TestEnv::with_asset();
+
+    let mut changed = env.old_asset();
+    transition_asset(&mut changed, AssetStatus::Changed, fixed_time()).unwrap();
+    transition_asset(&mut changed, AssetStatus::Failed, fixed_time()).unwrap();
+    assert_eq!(
+        changed.durable_state_history,
+        vec![AssetStatus::Registered, AssetStatus::Changed]
+    );
+    validate_asset_state(&changed).unwrap();
+
+    let mut missing = env.old_asset();
+    transition_asset(&mut missing, AssetStatus::Missing, fixed_time()).unwrap();
+    transition_asset(&mut missing, AssetStatus::Failed, fixed_time()).unwrap();
+    assert_eq!(
+        missing.durable_state_history,
+        vec![AssetStatus::Registered, AssetStatus::Missing]
+    );
+    validate_asset_state(&missing).unwrap();
 }
 
 #[test]

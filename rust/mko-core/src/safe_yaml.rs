@@ -12,7 +12,9 @@ pub fn validate_yaml_input(input: &str) -> Result<(), MkoError> {
 
     let mut depth = 0usize;
     for event in Parser::new_from_str(input) {
-        let (event, _) = event.map_err(|error| MkoError::new("yaml_invalid", error.to_string()))?;
+        let (event, _) = event.map_err(|_| {
+            MkoError::new("yaml_invalid", "front matter contains invalid YAML syntax")
+        })?;
         match event {
             Event::Alias(_) => {
                 return Err(MkoError::new(

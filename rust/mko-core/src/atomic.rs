@@ -8,6 +8,7 @@ use std::{
 };
 
 use atomic_write_file::AtomicWriteFile;
+use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 
 use crate::error::MkoError;
 
@@ -136,6 +137,143 @@ where
     file.commit()
         .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
     sync_directory(parent)
+}
+
+/// Replaces a file using only paths relative to a retained directory capability.
+///
+/// This is used for security-sensitive publication where an ambient parent path
+/// may be renamed or replaced while approval is in progress.
+pub fn write_replace_capability_checked<F>(
+    directory: &Dir,
+    filename: &Path,
+    bytes: &[u8],
+    validate_current: F,
+) -> Result<(), MkoError>
+where
+    F: FnOnce() -> Result<(), MkoError>,
+{
+    let filename = capability_filename(filename)?;
+    let _lock = CapabilityPublicationLock::acquire(directory, filename)?;
+    match directory.symlink_metadata(filename) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(MkoError::new(
+                "registry_destination_invalid",
+                "registry destination exists but is not a regular file",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(MkoError::new(
+                "registry_not_found",
+                "registry record does not exist",
+            ));
+        }
+        Err(error) => return Err(MkoError::new("registry_write_failed", error.to_string())),
+    }
+    validate_current()?;
+
+    let temporary = format!(
+        ".{filename}.{}.{}.tmp",
+        std::process::id(),
+        NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut file = directory
+        .open_with(
+            &temporary,
+            CapOpenOptions::new().write(true).create_new(true),
+        )
+        .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+    let result = (|| {
+        file.write_all(bytes)
+            .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+        file.sync_all()
+            .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+        drop(file);
+        directory
+            .rename(&temporary, directory, filename)
+            .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+        sync_capability_directory(directory)
+    })();
+    let _ = directory.remove_file(&temporary);
+    result
+}
+
+fn capability_filename(path: &Path) -> Result<&str, MkoError> {
+    let mut components = path.components();
+    let Some(std::path::Component::Normal(filename)) = components.next() else {
+        return Err(MkoError::new(
+            "registry_write_failed",
+            "registry filename must be a single relative component",
+        ));
+    };
+    if components.next().is_some() {
+        return Err(MkoError::new(
+            "registry_write_failed",
+            "registry filename must be a single relative component",
+        ));
+    }
+    filename.to_str().ok_or_else(|| {
+        MkoError::new(
+            "registry_write_failed",
+            "registry filename must be valid UTF-8",
+        )
+    })
+}
+
+struct CapabilityPublicationLock<'a> {
+    directory: &'a Dir,
+    filename: String,
+}
+
+impl<'a> CapabilityPublicationLock<'a> {
+    fn acquire(directory: &'a Dir, filename: &str) -> Result<Self, MkoError> {
+        let lock_filename = format!(".{filename}.publish.lock");
+        let deadline = Instant::now() + LOCK_WAIT;
+        loop {
+            match directory.open_with(
+                &lock_filename,
+                CapOpenOptions::new().write(true).create_new(true),
+            ) {
+                Ok(mut file) => {
+                    writeln!(file, "pid={}", std::process::id()).map_err(lock_error)?;
+                    file.sync_all().map_err(lock_error)?;
+                    return Ok(Self {
+                        directory,
+                        filename: lock_filename,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if Instant::now() >= deadline {
+                        return Err(MkoError::new(
+                            "registry_locked",
+                            "registry publication lock is held or stale; inspect and remove it manually after validating the destination",
+                        ));
+                    }
+                    thread::sleep(LOCK_RETRY);
+                }
+                Err(error) => return Err(lock_error(error)),
+            }
+        }
+    }
+}
+
+impl Drop for CapabilityPublicationLock<'_> {
+    fn drop(&mut self) {
+        let _ = self.directory.remove_file(&self.filename);
+    }
+}
+
+#[cfg(unix)]
+fn sync_capability_directory(directory: &Dir) -> Result<(), MkoError> {
+    directory
+        .open(".")
+        .and_then(|file| file.sync_all())
+        .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))
+}
+
+#[cfg(not(unix))]
+fn sync_capability_directory(_directory: &Dir) -> Result<(), MkoError> {
+    Ok(())
 }
 
 struct PublicationLock {

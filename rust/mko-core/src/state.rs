@@ -114,7 +114,7 @@ pub fn validate_asset_state(asset: &AssetRecord) -> Result<(), MkoError> {
             ));
         }
         for pair in history.windows(2) {
-            if !matches!(pair, [Changed | Missing | Superseded, Failed]) {
+            if !transition_allowed(pair[0].clone(), pair[1].clone()) {
                 return Err(invalid_history(
                     "recovery checkpoints contain an invalid nesting",
                 ));

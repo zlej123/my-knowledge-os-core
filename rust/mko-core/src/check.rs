@@ -1044,7 +1044,14 @@ fn has_conflict_marker(bytes: &[u8]) -> bool {
 }
 
 fn parse_issue(path: &str, error: MkoError) -> CheckIssue {
-    issue(error.code(), Some(path), None, error.message(), None)
+    let message = match error.code() {
+        "schema_invalid" => "front matter does not match the required schema",
+        "yaml_invalid" => "front matter contains invalid YAML",
+        "unsafe_yaml" => "front matter violates YAML safety limits",
+        "front_matter_invalid" => "Markdown front matter is malformed",
+        _ => error.message(),
+    };
+    issue(error.code(), Some(path), None, message, None)
 }
 
 fn limit_issue(path: Option<&str>, message: &str) -> CheckIssue {
