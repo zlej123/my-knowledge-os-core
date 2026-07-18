@@ -1,0 +1,23 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+          components: rustfmt, clippy
+      - run: ./scripts/fmt.sh --check
+        if: runner.os != 'Windows'
+      - run: cargo fmt --all -- --check
+        working-directory: rust
+        if: runner.os == 'Windows'
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+        working-directory: rust
+      - run: cargo test --workspace
+        working-directory: rust

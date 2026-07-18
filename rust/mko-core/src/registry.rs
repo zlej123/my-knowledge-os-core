@@ -265,6 +265,7 @@ where
 
     transition_asset(&mut old_asset, AssetStatus::Superseded, now)?;
     write_asset(&old_path, &old_asset, &old_body)?;
+    crate::source::mark_sources_stale_for_asset(&config.repository_root, &old_asset.id, now)?;
     Ok(new_asset)
 }
 

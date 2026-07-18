@@ -252,6 +252,13 @@ fn command_policy_rejects_inline_approval_publication_and_arbitrary_commands() {
 }
 
 #[test]
+fn command_policy_allows_plain_language_prohibitions() {
+    let explanatory = "The adapter must never approve sources, create commits, or push changes.";
+
+    assert!(validate_command_policy(explanatory, &["mko asset capture"]).is_ok());
+}
+
+#[test]
 fn command_policy_rejects_compound_absolute_and_uppercase_executables() {
     let allowed = ["mko asset capture"];
     for malicious in [

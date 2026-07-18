@@ -255,6 +255,31 @@ pub fn source_state_mismatch_asset_ids(repository_root: &Path) -> Result<Vec<Str
     Ok(mismatches)
 }
 
+pub(crate) fn mark_sources_stale_for_asset(
+    repository_root: &Path,
+    asset_id: &str,
+    now: DateTime<Utc>,
+) -> Result<(), MkoError> {
+    let asset = read_asset(repository_root, asset_id)?;
+    let Some(sources) = existing_sources_directory(repository_root)? else {
+        return Ok(());
+    };
+    for mut document in read_source_documents(&sources)? {
+        if document.record.relations.asset_ids.as_slice() != [asset_id] {
+            continue;
+        }
+        validate_existing_source_document(&document, &asset)?;
+        if document.record.status == SourceStatus::Stale {
+            continue;
+        }
+        document.record.status = SourceStatus::Stale;
+        document.record.updated_at = now;
+        let rendered = render_markdown(&document.record, &document.body)?;
+        write_replace(&document.path, rendered.as_bytes())?;
+    }
+    Ok(())
+}
+
 pub fn source_state_mismatches(
     repository_root: &Path,
 ) -> Result<Vec<SourceStateMismatch>, MkoError> {
@@ -324,11 +349,14 @@ pub fn repair_source_state_with_clock(
     let asset = read_asset(&repository_root, &request.asset_id)?;
     if !matches!(
         asset.asset_status,
-        AssetStatus::Extracted | AssetStatus::ReviewPending | AssetStatus::Processed
+        AssetStatus::Extracted
+            | AssetStatus::ReviewPending
+            | AssetStatus::Processed
+            | AssetStatus::Superseded
     ) {
         return Err(MkoError::new(
             "invalid_state_transition",
-            "source state repair is limited to extracted, review_pending, or processed assets",
+            "source state repair is limited to extracted, review_pending, processed, or superseded assets",
         ));
     }
     let sources = existing_sources_directory(&repository_root)?.ok_or_else(|| {
@@ -346,6 +374,19 @@ pub fn repair_source_state_with_clock(
     })?;
     validate_existing_source_document(&document, &asset)
         .map_err(|error| existing_source_error(error.message()))?;
+    if asset.asset_status == AssetStatus::Superseded {
+        let result = if document.record.status == SourceStatus::Stale {
+            "already_consistent"
+        } else {
+            mark_sources_stale_for_asset(&repository_root, &asset.id, clock.now_utc())?;
+            "repaired"
+        };
+        return Ok(RepairSourceStateResult {
+            result: result.into(),
+            source_id,
+            asset_id: asset.id,
+        });
+    }
     let result = match document.record.status {
         SourceStatus::ReviewPending if document.record.review.status == ReviewStatus::Pending => {
             if asset.asset_status == AssetStatus::ReviewPending {
