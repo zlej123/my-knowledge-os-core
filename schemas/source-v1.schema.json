@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "source-v1.schema.json",
+  "title": "My Knowledge OS Source Record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "record_type", "schema_version", "scope", "title", "status", "created_at", "updated_at", "tags", "domain", "ai_assisted", "relations", "generation", "content_revision", "review", "source_metadata"],
+  "properties": {
+    "id": { "$ref": "#/$defs/source_id" },
+    "record_type": { "const": "source" },
+    "schema_version": { "const": 1 },
+    "scope": { "const": "personal" },
+    "title": { "type": "string" },
+    "status": { "enum": ["review_pending", "approved", "rejected", "stale", "archived"] },
+    "created_at": { "$ref": "#/$defs/timestamp" },
+    "updated_at": { "$ref": "#/$defs/timestamp" },
+    "tags": { "$ref": "#/$defs/string_array" },
+    "domain": { "$ref": "#/$defs/string_array" },
+    "ai_assisted": { "const": true },
+    "relations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asset_ids"],
+      "properties": {
+        "asset_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/asset_id" },
+          "minItems": 1,
+          "maxItems": 1
+        }
+      }
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["extractor_name", "extractor_version", "core_version", "processor_version", "prompt_version", "asset_fingerprint"],
+      "properties": {
+        "extractor_name": { "type": "string" },
+        "extractor_version": { "type": "string" },
+        "core_version": { "type": "string" },
+        "processor_version": { "type": "string" },
+        "prompt_version": { "type": "string" },
+        "asset_fingerprint": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "content_revision": { "$ref": "#/$defs/sha256" },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "approved_revision", "reviewed_at"],
+      "properties": {
+        "status": { "enum": ["pending", "approved", "rejected"] },
+        "approved_revision": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        "reviewed_at": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }
+      }
+    },
+    "source_metadata": { "$ref": "#/$defs/source_metadata" }
+  },
+  "$defs": {
+    "asset_id": { "type": "string", "pattern": "^personal-asset-[a-f0-9]{64}$" },
+    "source_id": { "type": "string", "pattern": "^personal-source-[a-f0-9]{64}$" },
+    "sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "string_array": { "type": "array", "items": { "type": "string" } },
+    "source_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authors", "publication_date", "doi"],
+      "properties": {
+        "authors": { "$ref": "#/$defs/string_array" },
+        "publication_date": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }] },
+        "doi": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

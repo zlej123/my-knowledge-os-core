@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "asset-v1.schema.json",
+  "title": "My Knowledge OS Asset Record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "record_type", "schema_version", "scope", "title", "classification", "asset_class", "media_type", "provider", "size_bytes", "modified_at", "fingerprint", "asset_status", "supersedes", "last_successful_step", "last_error", "created_at", "updated_at"],
+  "properties": {
+    "id": { "$ref": "#/$defs/asset_id" },
+    "record_type": { "const": "asset" },
+    "schema_version": { "const": 1 },
+    "scope": { "const": "personal" },
+    "title": { "type": "string" },
+    "classification": { "enum": ["public", "personal"] },
+    "asset_class": { "const": "document" },
+    "media_type": { "const": "application/pdf" },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "locator", "revision"],
+      "properties": {
+        "type": { "const": "google-drive-stream" },
+        "locator": { "type": "string" },
+        "revision": { "type": ["string", "null"] }
+      }
+    },
+    "size_bytes": { "type": "integer", "minimum": 0 },
+    "modified_at": { "$ref": "#/$defs/timestamp" },
+    "fingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "value"],
+      "properties": {
+        "method": { "const": "sha256" },
+        "value": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "asset_status": { "enum": ["registered", "extracted", "review_pending", "processed", "changed", "missing", "superseded", "failed"] },
+    "supersedes": { "anyOf": [{ "$ref": "#/$defs/asset_id" }, { "type": "null" }] },
+    "last_successful_step": { "enum": ["registered", "extracted", "drafted", "reviewed"] },
+    "last_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "retryable"],
+      "properties": {
+        "code": { "type": ["string", "null"] },
+        "retryable": { "type": "boolean" }
+      }
+    },
+    "created_at": { "$ref": "#/$defs/timestamp" },
+    "updated_at": { "$ref": "#/$defs/timestamp" }
+  },
+  "$defs": {
+    "asset_id": { "type": "string", "pattern": "^personal-asset-[a-f0-9]{64}$" },
+    "sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "timestamp": { "type": "string", "format": "date-time" }
+  }
+}
