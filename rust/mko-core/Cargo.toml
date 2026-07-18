@@ -22,4 +22,9 @@ serde-saphyr.workspace = true
 sha2.workspace = true
 sysinfo.workspace = true
 hostname.workspace = true
+pdf-extract.workspace = true
 unicode-normalization.workspace = true
+
+[dev-dependencies]
+lopdf = "=0.42.0"
+tempfile.workspace = true

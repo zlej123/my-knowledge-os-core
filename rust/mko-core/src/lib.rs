@@ -9,6 +9,8 @@ pub mod front_matter;
 pub mod lock;
 pub mod model;
 pub mod path_policy;
+pub mod pdf;
+pub mod prepare;
 pub mod registry;
 pub mod revision;
 pub mod safe_yaml;

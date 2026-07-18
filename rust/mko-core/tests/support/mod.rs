@@ -3,6 +3,7 @@ use mko_core::model::{
     Generation, Relations, Review, ReviewStatus, SourceMetadata, SourceRecord, SourceStatus,
 };
 
+#[allow(dead_code)]
 pub fn fixture_source() -> SourceRecord {
     let timestamp = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
         .unwrap()

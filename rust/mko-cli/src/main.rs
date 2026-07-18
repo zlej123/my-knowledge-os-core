@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 use mko_core::{
     model::AssetStatus,
+    pdf::{ExtractionWorkerResponse, extract_pdf_pages, worker_executable},
+    prepare::{PrepareRequest, prepare_source},
     registry::{
         AssetOperationRequest, CaptureRequest, accept_changed_asset, capture_asset, inspect_asset,
         lineage_repair_needed, repair_lineage,
@@ -22,10 +24,20 @@ enum Command {
         #[command(subcommand)]
         command: AssetCommand,
     },
-    Source,
+    Source {
+        #[command(subcommand)]
+        command: SourceCommand,
+    },
     Check(CheckArgs),
     Human,
     Hooks,
+    #[command(name = "__extract-pdf", hide = true)]
+    ExtractPdf(ExtractPdfArgs),
+}
+
+#[derive(Subcommand)]
+enum SourceCommand {
+    Prepare(PrepareArgs),
 }
 
 #[derive(Subcommand)]
@@ -74,6 +86,26 @@ struct CheckArgs {
     repo: PathBuf,
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args)]
+struct PrepareArgs {
+    #[arg(long)]
+    repo: PathBuf,
+    #[arg(long)]
+    local_config: Option<PathBuf>,
+    #[arg(long)]
+    asset_id: String,
+    #[arg(long)]
+    output: PathBuf,
+    #[arg(long)]
+    clear_stale_lock: bool,
+}
+
+#[derive(Args)]
+struct ExtractPdfArgs {
+    #[arg(long)]
+    file: PathBuf,
 }
 
 fn main() {
@@ -145,8 +177,38 @@ fn run(cli: Cli) -> Result<(), mko_core::error::MkoError> {
             command: AssetCommand::RepairLineage(arguments),
         } => repair_asset_lineage(arguments),
         Command::Check(arguments) => check(arguments),
-        Command::Source | Command::Human | Command::Hooks => Ok(()),
+        Command::Source {
+            command: SourceCommand::Prepare(arguments),
+        } => prepare(arguments),
+        Command::ExtractPdf(arguments) => extract_pdf(arguments),
+        Command::Human | Command::Hooks => Ok(()),
     }
+}
+
+fn prepare(arguments: PrepareArgs) -> Result<(), mko_core::error::MkoError> {
+    let mut request = PrepareRequest::new(&arguments.repo, &arguments.asset_id, &arguments.output)
+        .with_clear_stale_lock(arguments.clear_stale_lock);
+    if let Some(local_config) = arguments.local_config {
+        request = request.with_local_config(local_config);
+    }
+    let bundle = prepare_source(request, &worker_executable()?)?;
+    println!("prepared {} {}", bundle.asset_id, bundle.source_id);
+    Ok(())
+}
+
+fn extract_pdf(arguments: ExtractPdfArgs) -> Result<(), mko_core::error::MkoError> {
+    let response = match extract_pdf_pages(&arguments.file) {
+        Ok(pages) => ExtractionWorkerResponse::Success { pages },
+        Err(error) => ExtractionWorkerResponse::Error {
+            code: error.code().into(),
+            message: error.message().into(),
+        },
+    };
+    let output = serde_json::to_string(&response).map_err(|error| {
+        mko_core::error::MkoError::new("pdf_extraction_failed", error.to_string())
+    })?;
+    println!("{output}");
+    Ok(())
 }
 
 fn capture(arguments: CaptureArgs) -> Result<(), mko_core::error::MkoError> {

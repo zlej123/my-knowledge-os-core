@@ -457,7 +457,7 @@ fn validate_existing(
     Ok(())
 }
 
-fn read_asset_document(
+pub(crate) fn read_asset_document(
     repository_root: &Path,
     asset_id: &str,
 ) -> Result<(AssetRecord, String, PathBuf), MkoError> {
@@ -482,9 +482,18 @@ fn read_asset_document(
     Ok((document.metadata, document.body, path))
 }
 
-fn write_asset(path: &Path, asset: &AssetRecord, body: &str) -> Result<(), MkoError> {
+pub(crate) fn write_asset(path: &Path, asset: &AssetRecord, body: &str) -> Result<(), MkoError> {
     let document = render_markdown(asset, body)?;
     write_replace(path, document.as_bytes())
+}
+
+pub(crate) fn mark_asset_extracted(repository_root: &Path, asset_id: &str) -> Result<(), MkoError> {
+    let (mut asset, body, path) = read_asset_document(repository_root, asset_id)?;
+    if asset.asset_status == AssetStatus::Extracted {
+        return Ok(());
+    }
+    transition_asset(&mut asset, AssetStatus::Extracted, Utc::now())?;
+    write_asset(&path, &asset, &body)
 }
 
 fn validate_asset_id(asset_id: &str) -> Result<(), MkoError> {
