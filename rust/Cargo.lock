@@ -973,10 +973,12 @@ name = "mko-cli"
 version = "0.1.0"
 dependencies = [
  "assert_cmd",
+ "chrono",
  "clap",
  "lopdf",
  "mko-core",
  "predicates",
+ "serde",
  "serde_json",
 ]
 

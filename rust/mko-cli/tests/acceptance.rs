@@ -2,12 +2,14 @@ mod acceptance {
     use std::{
         fs, io,
         path::{Path, PathBuf},
-        process::Command as ProcessCommand,
+        process::{Command as ProcessCommand, Stdio},
         sync::atomic::{AtomicU64, Ordering},
-        time::Duration,
+        thread,
+        time::{Duration, Instant},
     };
 
     use assert_cmd::Command;
+    use chrono::{DateTime, Duration as ChronoDuration, Utc};
     use lopdf::{
         Document, Object, Stream,
         content::{Content, Operation},
@@ -16,14 +18,18 @@ mod acceptance {
     use mko_core::{
         approve::{ApprovalTerminal, ApproveSourceRequest, approve_source_with_terminal_and_clock},
         check::{CheckRequest, check_repository},
-        clock::SystemClock,
+        clock::{Clock, SystemClock},
         front_matter::parse_markdown,
-        lock::AssetLock,
-        model::{AssetStatus, ReviewStatus, SourceRecord, SourceStatus},
-        pdf::{EXTRACTION_TIMEOUT, MAX_EXTRACTED_TEXT_BYTES, validate_extracted_pages},
-        registry::read_asset,
-        safe_yaml::validate_yaml_input,
+        lock::{AssetLock, LockRecord},
+        model::{AssetRecord, AssetStatus, ReviewStatus, SourceRecord, SourceStatus},
+        pdf::{
+            MAX_EXTRACTED_TEXT_BYTES, extract_pdf_pages_from_bytes, extract_pdf_pages_from_reader,
+        },
+        prepare::{PrepareRequest, prepare_source_with_extractor},
+        registry::{CaptureRequest, capture_asset, read_asset},
+        source::{WriteSourceRequest, write_source_draft_with_clock},
     };
+    use serde::{Deserialize, Serialize};
     use serde_json::Value;
 
     static NEXT_ENV: AtomicU64 = AtomicU64::new(0);
@@ -112,13 +118,31 @@ mod acceptance {
             .repository
             .join(".knowledge-os/runtime/locks")
             .join(format!("{asset_id}.lock"));
-        fs::create_dir_all(runtime_lock.parent().unwrap()).unwrap();
-        fs::write(&runtime_lock, "crashed process lock").unwrap();
+        let clock = FixedClock::acceptance();
+        let seed =
+            AssetLock::acquire(&env.repository, &asset_id, "crash fixture", &clock, false).unwrap();
+        let mut stale: LockRecord =
+            serde_json::from_slice(&fs::read(&runtime_lock).unwrap()).unwrap();
+        drop(seed);
+        stale.pid = u32::MAX;
+        stale.started_at = clock.now_utc() - ChronoDuration::minutes(16);
+        fs::write(&runtime_lock, serde_json::to_vec(&stale).unwrap()).unwrap();
         assert!(
             check_repository(CheckRequest::new(&env.repository))
                 .unwrap()
                 .has_code("lock_held")
         );
+        assert_eq!(
+            AssetLock::acquire(&env.repository, &asset_id, "retry", &clock, false)
+                .unwrap_err()
+                .code(),
+            "lock_held"
+        );
+        let retried =
+            AssetLock::acquire(&env.repository, &asset_id, "retry", &clock, true).unwrap();
+        assert!(runtime_lock.is_file());
+        drop(retried);
+        assert!(!runtime_lock.exists());
     }
 
     pub fn change_and_supersede() {
@@ -130,20 +154,54 @@ mod acceptance {
         write_pdf(&pdf, &["new".into()]);
 
         let inspected = env.asset_operation("inspect", &old_id);
-        let accepted = env.asset_operation("accept-change", &old_id);
-        let old_asset = read_asset(&env.repository, &old_id).unwrap();
         let source_path = env.repository.join(draft["source_path"].as_str().unwrap());
-        let source = parse_markdown::<SourceRecord>(&fs::read_to_string(source_path).unwrap())
-            .unwrap()
-            .metadata;
+        let publication_lock = env
+            .repository
+            .join("assets/registry")
+            .join(format!(".{old_id}.md.publish.lock"));
+        fs::write(&publication_lock, "interrupt old record publication").unwrap();
+        let interrupted = env.asset_operation_failure("accept-change", &old_id);
+        let changed = read_asset(&env.repository, &old_id).unwrap();
+        let pending_source =
+            parse_markdown::<SourceRecord>(&fs::read_to_string(&source_path).unwrap())
+                .unwrap()
+                .metadata;
+        let successor = registry_assets(&env.repository)
+            .into_iter()
+            .find(|asset| asset.supersedes.as_deref() == Some(&old_id))
+            .expect("interrupted acceptance must durably publish its successor");
 
+        assert_eq!(interrupted["error"]["code"], "registry_locked");
         assert_eq!(inspected["result"], "changed");
-        assert_eq!(accepted["supersedes"], old_id);
-        assert_ne!(accepted["asset_id"], old_id);
-        assert_eq!(old_asset.asset_status, AssetStatus::Superseded);
-        assert_eq!(source.status, SourceStatus::Stale);
-        assert_eq!(source.review.status, ReviewStatus::Pending);
-        env.repair_state(&old_id);
+        assert_eq!(changed.asset_status, AssetStatus::Changed);
+        assert_eq!(pending_source.status, SourceStatus::ReviewPending);
+        assert_ne!(successor.id, old_id);
+
+        fs::remove_file(publication_lock).unwrap();
+        assert_eq!(
+            env.asset_operation("repair-lineage", &old_id)["result"],
+            "repaired"
+        );
+        let repaired_asset = read_asset(&env.repository, &old_id).unwrap();
+        let repaired_source =
+            parse_markdown::<SourceRecord>(&fs::read_to_string(&source_path).unwrap())
+                .unwrap()
+                .metadata;
+
+        assert_eq!(repaired_asset.asset_status, AssetStatus::Superseded);
+        assert_eq!(repaired_source.status, SourceStatus::Stale);
+        assert_eq!(repaired_source.review.status, ReviewStatus::Pending);
+        assert_eq!(
+            env.asset_operation("repair-lineage", &old_id)["result"],
+            "repaired"
+        );
+        assert_eq!(
+            parse_markdown::<SourceRecord>(&fs::read_to_string(source_path).unwrap())
+                .unwrap()
+                .metadata
+                .status,
+            SourceStatus::Stale
+        );
     }
 
     pub fn missing_and_restore() {
@@ -266,14 +324,13 @@ mod acceptance {
     }
 
     pub fn cross_platform_determinism() {
-        let first = deterministic_result();
-        let second = deterministic_result();
+        let expected: DeterministicResult = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/cross-platform-golden.json"
+        ))
+        .unwrap();
+        let actual = deterministic_result();
 
-        assert_eq!(first, second);
-        assert_eq!(first.logical_path, "paper.pdf");
-        assert!(first.asset_id.starts_with("personal-asset-"));
-        assert_eq!(first.relation, first.asset_id);
-        assert!(first.content_revision.starts_with("sha256:"));
+        assert_eq!(actual, expected);
     }
 
     pub fn case_unicode_collision() {
@@ -315,22 +372,52 @@ mod acceptance {
     }
 
     pub fn parser_limits() {
-        assert_eq!(EXTRACTION_TIMEOUT, Duration::from_secs(120));
+        let env = TestEnv::new();
+        let page_limit_pdf = env.root.join("1,001-pages.pdf");
+        write_pdf(
+            &page_limit_pdf,
+            &(0..1_001)
+                .map(|page| format!("Page {page}"))
+                .collect::<Vec<_>>(),
+        );
         assert_eq!(
-            validate_extracted_pages(&["x".repeat(MAX_EXTRACTED_TEXT_BYTES + 1)])
+            extract_pdf_pages_from_bytes(&fs::read(page_limit_pdf).unwrap())
+                .unwrap_err()
+                .code(),
+            "page_limit_exceeded"
+        );
+
+        let text_limit_pdf = env.root.join("oversized-extracted-text.pdf");
+        write_pdf(&text_limit_pdf, &["x".repeat(MAX_EXTRACTED_TEXT_BYTES + 1)]);
+        assert_eq!(
+            extract_pdf_pages_from_bytes(&fs::read(text_limit_pdf).unwrap())
                 .unwrap_err()
                 .code(),
             "extracted_text_too_large"
         );
+
+        let alias = "---\nroot: &root\n  value: fixture\nalias: *root\n---\nbody\n";
         assert_eq!(
-            validate_yaml_input("root: &root [*root]")
-                .unwrap_err()
-                .code(),
+            parse_markdown::<Value>(alias).unwrap_err().code(),
             "unsafe_yaml"
         );
-        let nested = format!("{}value{}", "[".repeat(33), "]".repeat(33));
+        let nested = format!(
+            "---\nroot: {}value{}\n---\nbody\n",
+            "[".repeat(33),
+            "]".repeat(33)
+        );
         assert_eq!(
-            validate_yaml_input(&nested).unwrap_err().code(),
+            parse_markdown::<Value>(&nested).unwrap_err().code(),
+            "unsafe_yaml"
+        );
+        let duplicate = "---\ntitle: first\ntitle: second\n---\nbody\n";
+        assert_eq!(
+            parse_markdown::<Value>(duplicate).unwrap_err().code(),
+            "yaml_invalid"
+        );
+        let oversized_yaml = format!("---\nvalue: {}\n---\nbody\n", "x".repeat(256 * 1024));
+        assert_eq!(
+            parse_markdown::<Value>(&oversized_yaml).unwrap_err().code(),
             "unsafe_yaml"
         );
     }
@@ -338,14 +425,19 @@ mod acceptance {
     pub fn concurrent_lock() {
         let env = TestEnv::new();
         let asset_id = format!("personal-asset-{}", "a".repeat(64));
-        let first = AssetLock::acquire(
-            &env.repository,
-            &asset_id,
-            "first process",
-            &SystemClock,
-            false,
-        )
-        .unwrap();
+        let ready = env.root.join("holder.ready");
+        let release = env.root.join("holder.release");
+        let mut holder = ProcessCommand::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "lock_holder_process_for_a14"])
+            .env("MKO_A14_REPOSITORY", &env.repository)
+            .env("MKO_A14_ASSET_ID", &asset_id)
+            .env("MKO_A14_READY", &ready)
+            .env("MKO_A14_RELEASE", &release)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        wait_for_file(&ready, &mut holder);
         let error = AssetLock::acquire(
             &env.repository,
             &asset_id,
@@ -354,12 +446,38 @@ mod acceptance {
             false,
         )
         .unwrap_err();
+        fs::write(&release, "release").unwrap();
+        let status = holder.wait().unwrap();
 
+        assert!(status.success());
         assert_eq!(error.code(), "lock_held");
-        drop(first);
         assert!(
             AssetLock::acquire(&env.repository, &asset_id, "retry", &SystemClock, false).is_ok()
         );
+    }
+
+    pub fn lock_holder_process() {
+        let repository = PathBuf::from(std::env::var_os("MKO_A14_REPOSITORY").unwrap());
+        let asset_id = std::env::var("MKO_A14_ASSET_ID").unwrap();
+        let ready = PathBuf::from(std::env::var_os("MKO_A14_READY").unwrap());
+        let release = PathBuf::from(std::env::var_os("MKO_A14_RELEASE").unwrap());
+        let _lock = AssetLock::acquire(
+            &repository,
+            &asset_id,
+            "holder process",
+            &SystemClock,
+            false,
+        )
+        .unwrap();
+        fs::write(ready, "ready").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !release.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "parent did not release A14 holder"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
@@ -409,7 +527,7 @@ mod acceptance {
         );
     }
 
-    #[derive(Debug, Eq, PartialEq)]
+    #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct DeterministicResult {
         logical_path: String,
         asset_id: String,
@@ -420,21 +538,63 @@ mod acceptance {
     fn deterministic_result() -> DeterministicResult {
         let env = TestEnv::new();
         let pdf = env.pdf("paper.pdf", &["same fixture"]);
-        let asset_id = env.capture(&pdf)["asset_id"].as_str().unwrap().to_owned();
-        let bundle_path = env.prepare(&asset_id);
-        let bundle: Value = serde_json::from_slice(&fs::read(&bundle_path).unwrap()).unwrap();
-        let draft = env.write_draft(&bundle_path, Fixture::Semantic);
+        let clock = FixedClock::acceptance();
+        let asset_id = capture_asset(
+            CaptureRequest::new(&env.repository, &pdf)
+                .with_local_config(&env.local_config)
+                .with_captured_at(clock.now_utc()),
+        )
+        .unwrap()
+        .asset_id;
+        let bundle_path = env
+            .repository
+            .join(".knowledge-os/runtime/prepared")
+            .join(format!("{asset_id}.json"));
+        let bundle = prepare_source_with_extractor(
+            PrepareRequest::new(&env.repository, &asset_id, &bundle_path)
+                .with_local_config(&env.local_config),
+            |snapshot, _| extract_pdf_pages_from_reader(snapshot),
+        )
+        .unwrap();
+        let draft = write_source_draft_with_clock(
+            WriteSourceRequest::new(
+                &env.repository,
+                &bundle_path,
+                Fixture::Semantic.bytes().to_vec(),
+            ),
+            &clock,
+        )
+        .unwrap();
         let source = parse_markdown::<SourceRecord>(
-            &fs::read_to_string(env.repository.join(draft["source_path"].as_str().unwrap()))
-                .unwrap(),
+            &fs::read_to_string(env.repository.join(&draft.source_path)).unwrap(),
         )
         .unwrap()
         .metadata;
         DeterministicResult {
-            logical_path: bundle["logical_path"].as_str().unwrap().into(),
+            logical_path: bundle.logical_path,
             asset_id,
             relation: source.relations.asset_ids[0].clone(),
             content_revision: source.content_revision,
+        }
+    }
+
+    struct FixedClock {
+        now: DateTime<Utc>,
+    }
+
+    impl FixedClock {
+        fn acceptance() -> Self {
+            Self {
+                now: DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            }
+        }
+    }
+
+    impl Clock for FixedClock {
+        fn now_utc(&self) -> DateTime<Utc> {
+            self.now
         }
     }
 
@@ -629,6 +789,29 @@ mod acceptance {
         }
 
         #[allow(deprecated)]
+        fn asset_operation_failure(&self, operation: &str, asset_id: &str) -> Value {
+            let output = Command::cargo_bin("mko")
+                .unwrap()
+                .args([
+                    "asset",
+                    operation,
+                    "--repo",
+                    path_str(&self.repository),
+                    "--local-config",
+                    path_str(&self.local_config),
+                    "--asset-id",
+                    asset_id,
+                    "--json",
+                ])
+                .assert()
+                .failure()
+                .get_output()
+                .stdout
+                .clone();
+            json_output(&output)
+        }
+
+        #[allow(deprecated)]
         fn repair_state(&self, asset_id: &str) {
             Command::cargo_bin("mko")
                 .unwrap()
@@ -707,6 +890,37 @@ mod acceptance {
 
     fn repository_files(repository: &Path) -> Vec<String> {
         files_below(repository)
+    }
+
+    fn registry_assets(repository: &Path) -> Vec<AssetRecord> {
+        fs::read_dir(repository.join("assets/registry"))
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path();
+                (path.extension().and_then(|extension| extension.to_str()) == Some("md")).then(
+                    || {
+                        parse_markdown::<AssetRecord>(&fs::read_to_string(path).unwrap())
+                            .unwrap()
+                            .metadata
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn wait_for_file(path: &Path, child: &mut std::process::Child) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !path.exists() {
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("A14 holder exited before synchronization: {status}");
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("A14 holder did not signal readiness");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn files_below(root: &Path) -> Vec<String> {
@@ -896,4 +1110,10 @@ fn a14_concurrent_lock() {
 #[test]
 fn a15_agent_cannot_approve() {
     acceptance::agent_cannot_approve();
+}
+
+#[test]
+#[ignore = "A14 launches this synchronized lock holder in a separate process"]
+fn lock_holder_process_for_a14() {
+    acceptance::lock_holder_process();
 }

@@ -291,7 +291,11 @@ pub fn repair_lineage_with_clock(
     let (mut old_asset, body, path) =
         read_asset_document(&config.repository_root, &request.asset_id)?;
     if old_asset.asset_status == AssetStatus::Superseded {
-        return Ok(());
+        return crate::source::mark_sources_stale_for_asset(
+            &config.repository_root,
+            &old_asset.id,
+            clock.now_utc(),
+        );
     }
     if old_asset.asset_status != AssetStatus::Changed {
         return Err(MkoError::new(
@@ -305,8 +309,10 @@ pub fn repair_lineage_with_clock(
             "no authoritative successor registry record supersedes this asset",
         ));
     }
-    transition_asset(&mut old_asset, AssetStatus::Superseded, clock.now_utc())?;
-    write_asset(&path, &old_asset, &body)
+    let now = clock.now_utc();
+    transition_asset(&mut old_asset, AssetStatus::Superseded, now)?;
+    write_asset(&path, &old_asset, &body)?;
+    crate::source::mark_sources_stale_for_asset(&config.repository_root, &old_asset.id, now)
 }
 
 pub fn read_asset(repository_root: &Path, asset_id: &str) -> Result<AssetRecord, MkoError> {
