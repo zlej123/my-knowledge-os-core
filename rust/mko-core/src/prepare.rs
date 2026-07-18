@@ -204,6 +204,7 @@ where
             "published source bundle failed validation",
         ));
     }
+    verify_public_runtime_bundle(&runtime.runtime, &runtime.output_name, &bytes, &bundle)?;
     if asset.asset_status == AssetStatus::Registered {
         mark_asset_extracted(&config.repository_root, &request.asset_id)?;
     }
@@ -228,6 +229,7 @@ fn source_id(asset_id: &str) -> Result<String, MkoError> {
 }
 
 struct RuntimePaths {
+    runtime: Dir,
     prepared: Dir,
     snapshots: Dir,
     output_name: PathBuf,
@@ -275,10 +277,45 @@ fn runtime_paths(
         Err(_) => return Err(runtime_path_error()),
     }
     Ok(RuntimePaths {
+        runtime,
         prepared,
         snapshots,
         output_name,
     })
+}
+
+fn verify_public_runtime_bundle(
+    runtime: &Dir,
+    output_name: &Path,
+    expected_bytes: &[u8],
+    expected_bundle: &PreparedSourceBundle,
+) -> Result<(), MkoError> {
+    let public_path = PathBuf::from("prepared").join(output_name);
+    let file = runtime
+        .open(&public_path)
+        .map_err(|_| runtime_publication_error())?;
+    let byte_limit = expected_bytes
+        .len()
+        .checked_add(1)
+        .and_then(|limit| u64::try_from(limit).ok())
+        .ok_or_else(runtime_publication_error)?;
+    let mut published_bytes = Vec::with_capacity(expected_bytes.len());
+    file.take(byte_limit)
+        .read_to_end(&mut published_bytes)
+        .map_err(|_| runtime_publication_error())?;
+    if published_bytes != expected_bytes {
+        return Err(runtime_publication_error());
+    }
+    let published: PreparedSourceBundle =
+        serde_json::from_slice(&published_bytes).map_err(|_| runtime_publication_error())?;
+    if published.schema_version != 1
+        || published.asset_id != expected_bundle.asset_id
+        || published.fingerprint != expected_bundle.fingerprint
+        || published != *expected_bundle
+    {
+        return Err(runtime_publication_error());
+    }
+    Ok(())
 }
 
 fn ensure_real_child_directory(parent: &Dir, name: &str) -> Result<Dir, MkoError> {
@@ -321,6 +358,13 @@ fn runtime_path_error() -> MkoError {
     MkoError::new(
         "runtime_path_invalid",
         "runtime directories must be real directories inside the repository",
+    )
+}
+
+fn runtime_publication_error() -> MkoError {
+    MkoError::new(
+        "runtime_publication_invalid",
+        "public prepared bundle does not match the atomically published bundle",
     )
 }
 

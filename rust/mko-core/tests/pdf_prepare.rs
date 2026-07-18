@@ -116,6 +116,9 @@ fn prepare_bundle_contains_untrusted_text_and_versions() {
     assert_eq!(bundle.prompt_version, "codex-source-v1");
     assert_eq!(bundle.trust, "untrusted_document_text");
     assert_eq!(bundle.logical_path, "paper.pdf");
+    let published: mko_core::prepare::PreparedSourceBundle =
+        serde_json::from_slice(&fs::read(env.output()).unwrap()).unwrap();
+    assert_eq!(published, bundle);
     assert!(
         !fs::read_to_string(env.output())
             .unwrap()
@@ -372,6 +375,92 @@ fn provider_replacement_during_extraction_discards_the_bundle() {
 
     assert_eq!(error.code(), "fingerprint_changed");
     assert!(!env.output().exists());
+    assert_eq!(
+        read_asset(&env.repository, &env.asset_id)
+            .unwrap()
+            .asset_status,
+        AssetStatus::Registered
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn prepared_replacement_with_external_symlink_cannot_report_success() {
+    let env = TestEnv::with_pdf(&["original"]);
+    let prepared = env.repository.join(".knowledge-os/runtime/prepared");
+    let retained = env
+        .repository
+        .join(".knowledge-os/runtime/prepared-retained");
+    let outside = env._root.path().join("outside-prepared");
+    fs::create_dir(&outside).unwrap();
+
+    let error = prepare_source_with_extractor(env.request(), |snapshot, _| {
+        let pages = extract_pdf_pages_from_reader(snapshot)?;
+        fs::rename(&prepared, &retained).unwrap();
+        std::os::unix::fs::symlink(&outside, &prepared).unwrap();
+        Ok(pages)
+    })
+    .unwrap_err();
+
+    assert_eq!(error.code(), "runtime_publication_invalid");
+    assert_eq!(fs::read_dir(outside).unwrap().count(), 0);
+    assert!(retained.join(format!("{}.json", env.asset_id)).exists());
+    assert_eq!(
+        read_asset(&env.repository, &env.asset_id)
+            .unwrap()
+            .asset_status,
+        AssetStatus::Registered
+    );
+}
+
+#[test]
+fn prepared_replacement_with_empty_directory_cannot_report_success() {
+    let env = TestEnv::with_pdf(&["original"]);
+    let prepared = env.repository.join(".knowledge-os/runtime/prepared");
+    let retained = env
+        .repository
+        .join(".knowledge-os/runtime/prepared-retained");
+
+    let error = prepare_source_with_extractor(env.request(), |snapshot, _| {
+        let pages = extract_pdf_pages_from_reader(snapshot)?;
+        fs::rename(&prepared, &retained).unwrap();
+        fs::create_dir(&prepared).unwrap();
+        Ok(pages)
+    })
+    .unwrap_err();
+
+    assert_eq!(error.code(), "runtime_publication_invalid");
+    assert!(!env.output().exists());
+    assert!(retained.join(format!("{}.json", env.asset_id)).exists());
+    assert_eq!(
+        read_asset(&env.repository, &env.asset_id)
+            .unwrap()
+            .asset_status,
+        AssetStatus::Registered
+    );
+}
+
+#[test]
+fn prepared_replacement_with_different_file_cannot_report_success() {
+    let env = TestEnv::with_pdf(&["original"]);
+    let prepared = env.repository.join(".knowledge-os/runtime/prepared");
+    let retained = env
+        .repository
+        .join(".knowledge-os/runtime/prepared-retained");
+    let output_name = format!("{}.json", env.asset_id);
+
+    let error = prepare_source_with_extractor(env.request(), |snapshot, _| {
+        let pages = extract_pdf_pages_from_reader(snapshot)?;
+        fs::rename(&prepared, &retained).unwrap();
+        fs::create_dir(&prepared).unwrap();
+        fs::write(prepared.join(&output_name), b"different public bytes").unwrap();
+        Ok(pages)
+    })
+    .unwrap_err();
+
+    assert_eq!(error.code(), "runtime_publication_invalid");
+    assert_eq!(fs::read(env.output()).unwrap(), b"different public bytes");
+    assert!(retained.join(output_name).exists());
     assert_eq!(
         read_asset(&env.repository, &env.asset_id)
             .unwrap()
