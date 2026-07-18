@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 chrono.workspace = true
+chrono-tz.workspace = true
 granit-parser.workspace = true
 hex.workspace = true
 serde.workspace = true
