@@ -3,7 +3,10 @@ use std::collections::HashSet;
 use serde::{Serialize, de::DeserializeOwned};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::{error::MkoError, safe_yaml::validate_yaml_input};
+use crate::{
+    error::MkoError,
+    safe_yaml::{MAX_YAML_BYTES, validate_yaml_input},
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParsedMarkdown<T> {
@@ -15,6 +18,11 @@ pub fn parse_markdown<T>(input: &str) -> Result<ParsedMarkdown<T>, MkoError>
 where
     T: DeserializeOwned,
 {
+    let raw_yaml = raw_front_matter(input)?;
+    if raw_yaml.len() > MAX_YAML_BYTES {
+        return Err(MkoError::new("unsafe_yaml", "front matter exceeds 256 KiB"));
+    }
+
     let normalized = normalize_lf(input);
     let Some(remaining) = normalized.strip_prefix("---\n") else {
         return Err(MkoError::new(
@@ -49,6 +57,26 @@ where
     })
 }
 
+fn raw_front_matter(input: &str) -> Result<&str, MkoError> {
+    let remaining = if let Some(remaining) = input.strip_prefix("---\r\n") {
+        remaining
+    } else if let Some(remaining) = input.strip_prefix("---\n") {
+        remaining
+    } else {
+        return Err(MkoError::new(
+            "front_matter_invalid",
+            "front matter must begin with ---",
+        ));
+    };
+    let Some(closing_offset) = raw_delimiter_offset(remaining) else {
+        return Err(MkoError::new(
+            "front_matter_invalid",
+            "front matter must end with ---",
+        ));
+    };
+    Ok(&remaining[..closing_offset])
+}
+
 pub fn render_markdown<T>(metadata: &T, body: &str) -> Result<String, MkoError>
 where
     T: Serialize,
@@ -79,6 +107,17 @@ fn delimiter_offset(input: &str) -> Option<usize> {
 
 fn delimiter_len(input: &str) -> usize {
     input.find('\n').map_or(3, |index| index + 1)
+}
+
+fn raw_delimiter_offset(input: &str) -> Option<usize> {
+    let mut offset = 0;
+    for line in input.split_inclusive('\n') {
+        if line.trim_end_matches(['\r', '\n']) == "---" {
+            return Some(offset);
+        }
+        offset += line.len();
+    }
+    if input == "---" { Some(0) } else { None }
 }
 
 fn reject_duplicate_top_level_keys(input: &str) -> Result<(), MkoError> {

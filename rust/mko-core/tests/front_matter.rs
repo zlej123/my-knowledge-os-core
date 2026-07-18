@@ -2,7 +2,7 @@ use mko_core::{
     front_matter::{parse_markdown, render_markdown},
     model::SourceRecord,
     revision::calculate_source_revision,
-    safe_yaml::validate_yaml_input,
+    safe_yaml::{MAX_YAML_BYTES, MAX_YAML_DEPTH, validate_yaml_input},
 };
 
 mod support;
@@ -104,4 +104,51 @@ fn source_schema_limits_relations_to_one_asset() {
         schema["properties"]["relations"]["properties"]["asset_ids"]["maxItems"],
         1
     );
+}
+
+#[test]
+fn rejects_flow_style_anchors_and_aliases() {
+    let input = "a: [&a \"x\"]\nb: [*a,*a]\n";
+    let error = validate_yaml_input(input).unwrap_err();
+    assert_eq!(error.code(), "unsafe_yaml");
+}
+
+#[test]
+fn accepts_anchor_and_alias_characters_inside_quoted_scalars() {
+    let input = "title: \"Look & feel * now ! wow\"\n";
+    assert!(validate_yaml_input(input).is_ok());
+}
+
+#[test]
+fn ignores_brackets_inside_quoted_scalars_comments_and_block_content() {
+    let brackets = "[".repeat(MAX_YAML_DEPTH + 1);
+    let quoted = format!("title: \"{brackets}\"\n");
+    let comment = format!("title: valid # {brackets}\n");
+    let block = format!("body: |\n  {brackets}\n");
+
+    assert!(validate_yaml_input(&quoted).is_ok());
+    assert!(validate_yaml_input(&comment).is_ok());
+    assert!(validate_yaml_input(&block).is_ok());
+}
+
+#[test]
+fn rejects_depth_hidden_by_quoted_closing_brackets() {
+    let mut nested = "leaf".to_owned();
+    for _ in 0..=MAX_YAML_DEPTH {
+        nested = format!("[\"]\", {nested}]");
+    }
+
+    let error = validate_yaml_input(&format!("value: {nested}\n")).unwrap_err();
+    assert_eq!(error.code(), "unsafe_yaml");
+}
+
+#[test]
+fn rejects_raw_crlf_front_matter_over_the_byte_limit() {
+    let input = format!(
+        "---\r\n{}title: valid\r\n---\r\n# Body\r\n",
+        "\r\n".repeat((MAX_YAML_BYTES / 2) + 1)
+    );
+
+    let error = parse_markdown::<serde_json::Value>(&input).unwrap_err();
+    assert_eq!(error.code(), "unsafe_yaml");
 }

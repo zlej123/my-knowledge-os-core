@@ -457,6 +457,7 @@ name = "mko-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "granit-parser",
  "hex",
  "serde",
  "serde-saphyr",
