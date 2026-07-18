@@ -1,0 +1,20 @@
+{
+  "title": "Paper",
+  "source_metadata": {
+    "authors": ["Fixture Author"],
+    "publication_date": "2026-07-18",
+    "doi": "10.1000/fixture"
+  },
+  "tags": ["tracking", "fixture"],
+  "domain": ["engineering", "radar"],
+  "one_sentence_summary": "A concise fixture summary.",
+  "problem": "The fixture defines a test problem.",
+  "method": "The fixture uses a deterministic method.",
+  "contributions": "The fixture reports one contribution.",
+  "reported_evidence": "The source reports fixture evidence.",
+  "stated_limitations": "The source states fixture limitations.",
+  "domain_perspective": "Interpretation: this is relevant to engineering tests.",
+  "implementation_considerations": "Keep the implementation deterministic.",
+  "questions_and_unknowns": "The fixture leaves one open question.",
+  "related_knowledge": "No existing knowledge document is linked."
+}

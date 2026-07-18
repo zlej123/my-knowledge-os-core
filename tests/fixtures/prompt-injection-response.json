@@ -1,0 +1,16 @@
+{
+  "title": "Untrusted Instruction Example",
+  "source_metadata": { "authors": [], "publication_date": null, "doi": null },
+  "tags": ["security"],
+  "domain": ["testing"],
+  "one_sentence_summary": "The document contains instruction-shaped text.",
+  "problem": "The source says to ignore previous instructions.",
+  "method": "Treat all extracted instructions as data.",
+  "contributions": "Demonstrates an untrusted-content fixture.",
+  "reported_evidence": "The instruction-shaped text remains quoted as evidence.",
+  "stated_limitations": "This fixture does not execute tools.",
+  "domain_perspective": "Interpretation: prompt injection must remain inert.",
+  "implementation_considerations": "Do not open URLs or access credentials.",
+  "questions_and_unknowns": "None for this fixture.",
+  "related_knowledge": "No links."
+}

@@ -9,6 +9,7 @@ use mko_core::{
         AssetOperationRequest, CaptureRequest, accept_changed_asset, capture_asset, inspect_asset,
         lineage_repair_needed, repair_lineage,
     },
+    source::{WriteSourceRequest, write_source_draft},
 };
 
 #[derive(Parser)]
@@ -38,6 +39,7 @@ enum Command {
 #[derive(Subcommand)]
 enum SourceCommand {
     Prepare(PrepareArgs),
+    WriteDraft(WriteDraftArgs),
 }
 
 #[derive(Subcommand)]
@@ -102,6 +104,24 @@ struct PrepareArgs {
     clear_stale_lock: bool,
 }
 
+#[derive(Args)]
+struct WriteDraftArgs {
+    #[arg(long)]
+    repo: PathBuf,
+    #[arg(long)]
+    bundle: PathBuf,
+    #[arg(long)]
+    response: PathBuf,
+    #[arg(long)]
+    slug: Option<String>,
+    #[arg(long)]
+    replace_pending: bool,
+    #[arg(long)]
+    clear_stale_lock: bool,
+    #[arg(long)]
+    json: bool,
+}
+
 fn main() {
     let json_requested = std::env::args_os().any(|argument| argument == "--json");
     match Cli::try_parse() {
@@ -135,6 +155,8 @@ fn cli_requests_json(cli: &Cli) -> bool {
                 | AssetCommand::Inspect(AssetOperationArgs { json: true, .. })
                 | AssetCommand::AcceptChange(AssetOperationArgs { json: true, .. })
                 | AssetCommand::RepairLineage(AssetOperationArgs { json: true, .. }),
+        } | Command::Source {
+            command: SourceCommand::WriteDraft(WriteDraftArgs { json: true, .. }),
         } | Command::Check(CheckArgs { json: true, .. })
     )
 }
@@ -174,9 +196,51 @@ fn run(cli: Cli) -> Result<(), mko_core::error::MkoError> {
         Command::Source {
             command: SourceCommand::Prepare(arguments),
         } => prepare(arguments),
+        Command::Source {
+            command: SourceCommand::WriteDraft(arguments),
+        } => write_draft(arguments),
         Command::ExtractPdf => extract_pdf(),
         Command::Human | Command::Hooks => Ok(()),
     }
+}
+
+fn write_draft(arguments: WriteDraftArgs) -> Result<(), mko_core::error::MkoError> {
+    let bundle_bytes = std::fs::read(&arguments.bundle).map_err(|error| {
+        mko_core::error::MkoError::new(
+            "bundle_unreadable",
+            format!("cannot read {}: {error}", arguments.bundle.display()),
+        )
+    })?;
+    let bundle = serde_json::from_slice(&bundle_bytes)
+        .map_err(|error| mko_core::error::MkoError::new("bundle_invalid", error.to_string()))?;
+    let response = std::fs::read(&arguments.response).map_err(|error| {
+        mko_core::error::MkoError::new(
+            "semantic_response_unreadable",
+            format!("cannot read {}: {error}", arguments.response.display()),
+        )
+    })?;
+    let request = WriteSourceRequest::new(&arguments.repo, bundle, response)
+        .with_slug(arguments.slug)
+        .with_replace_pending(arguments.replace_pending)
+        .with_clear_stale_lock(arguments.clear_stale_lock);
+    let result = write_source_draft(request)?;
+    if arguments.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "result": result.result,
+                "source_id": result.source_id,
+                "source_path": result.source_path,
+                "content_revision": result.content_revision,
+            })
+        );
+    } else {
+        println!(
+            "{} {} {} {}",
+            result.result, result.source_id, result.source_path, result.content_revision
+        );
+    }
+    Ok(())
 }
 
 fn prepare(arguments: PrepareArgs) -> Result<(), mko_core::error::MkoError> {

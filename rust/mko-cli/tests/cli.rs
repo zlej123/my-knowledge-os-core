@@ -276,6 +276,77 @@ fn source_prepare_preserves_the_worker_page_limit_error() {
     assert!(!output.exists());
 }
 
+#[test]
+#[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
+fn source_write_draft_consumes_typed_json_and_emits_complete_json() {
+    let env = CliTestEnv::new();
+    let pdf = env.provider.join("paper.pdf");
+    write_pdf(&pdf, &["Fixture page"]);
+    let captured = env.capture_json(&pdf);
+    let asset_id = captured["asset_id"].as_str().unwrap();
+    let bundle = env
+        .repository
+        .join(".knowledge-os/runtime/prepared")
+        .join(format!("{asset_id}.json"));
+    Command::cargo_bin("mko")
+        .unwrap()
+        .args([
+            "source",
+            "prepare",
+            "--repo",
+            &env.repository.display().to_string(),
+            "--local-config",
+            &env.local_config.display().to_string(),
+            "--asset-id",
+            asset_id,
+            "--output",
+            &bundle.display().to_string(),
+        ])
+        .assert()
+        .success();
+    let response = env.root.join("semantic-response.json");
+    fs::write(
+        &response,
+        include_bytes!("../../../tests/fixtures/semantic-response.json"),
+    )
+    .unwrap();
+
+    let output = Command::cargo_bin("mko")
+        .unwrap()
+        .args([
+            "source",
+            "write-draft",
+            "--repo",
+            &env.repository.display().to_string(),
+            "--bundle",
+            &bundle.display().to_string(),
+            "--response",
+            &response.display().to_string(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let output = parse_json(&output);
+    assert_eq!(output["result"], "created");
+    assert_eq!(output["source_id"], asset_id.replacen("asset", "source", 1));
+    assert!(
+        output["source_path"]
+            .as_str()
+            .unwrap()
+            .starts_with("sources/")
+    );
+    assert!(
+        output["content_revision"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+}
+
 struct CliTestEnv {
     root: PathBuf,
     repository: PathBuf,

@@ -327,7 +327,11 @@ pub fn lineage_repair_needed(repository_root: &Path) -> Result<Vec<String>, MkoE
         })
         .map(|asset| asset.id.clone())
         .collect::<Vec<_>>();
+    affected.extend(crate::source::source_state_mismatch_asset_ids(
+        &repository_root,
+    )?);
     affected.sort();
+    affected.dedup();
     Ok(affected)
 }
 
@@ -493,6 +497,25 @@ pub(crate) fn mark_asset_extracted(repository_root: &Path, asset_id: &str) -> Re
         return Ok(());
     }
     transition_asset(&mut asset, AssetStatus::Extracted, Utc::now())?;
+    write_asset(&path, &asset, &body)
+}
+
+pub(crate) fn mark_asset_review_pending_with_clock(
+    repository_root: &Path,
+    asset_id: &str,
+    clock: &dyn Clock,
+) -> Result<(), MkoError> {
+    let (mut asset, body, path) = read_asset_document(repository_root, asset_id)?;
+    if asset.asset_status == AssetStatus::ReviewPending {
+        return Ok(());
+    }
+    if asset.asset_status != AssetStatus::Extracted {
+        return Err(MkoError::new(
+            "invalid_state_transition",
+            "only an extracted asset can become review_pending",
+        ));
+    }
+    transition_asset(&mut asset, AssetStatus::ReviewPending, clock.now_utc())?;
     write_asset(&path, &asset, &body)
 }
 
