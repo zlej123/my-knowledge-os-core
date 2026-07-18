@@ -26,6 +26,7 @@ fn executable_surfaces(markdown: &str) -> String {
             continue;
         }
         if in_shell_block {
+            output.push_str("$ ");
             output.push_str(line);
             output.push('\n');
             continue;
@@ -43,42 +44,32 @@ fn executable_surfaces(markdown: &str) -> String {
 }
 
 fn command_key(surface: &str) -> Option<String> {
-    let command = surface
-        .trim()
+    let surface = surface.trim();
+    let (command, is_shell) = surface
         .strip_prefix("$ ")
-        .unwrap_or_else(|| surface.trim());
-    let mut words = command.split_whitespace();
-    let executable = words.next()?;
+        .map_or((surface, false), |command| (command.trim(), true));
+    let words = command.split_whitespace().collect::<Vec<_>>();
+    let executable = *words.first()?;
 
     if executable == "mko" {
-        let group = words.next()?;
+        let Some(&group) = words.get(1) else {
+            return is_shell.then(|| "mko".into());
+        };
         return match group {
             "check" => Some("mko check".into()),
-            "asset" | "source" | "human" | "hooks" => {
-                words.next().map(|action| format!("mko {group} {action}"))
-            }
+            "asset" | "source" | "human" | "hooks" => Some(words.get(2).map_or_else(
+                || format!("mko {group}"),
+                |&action| format!("mko {group} {action}"),
+            )),
             _ => Some(format!("mko {group}")),
         };
     }
 
-    const OTHER_EXECUTABLES: &[&str] = &[
-        "bash",
-        "cp",
-        "curl",
-        "git",
-        "mv",
-        "powershell",
-        "pwsh",
-        "python",
-        "python3",
-        "rm",
-        "sh",
-        "wget",
-        "zsh",
-    ];
-    OTHER_EXECUTABLES
-        .contains(&executable)
-        .then(|| executable.to_string())
+    let looks_like_inline_command = words.len() > 1
+        && executable.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_".contains(&byte)
+        });
+    (is_shell || looks_like_inline_command).then(|| executable.to_string())
 }
 
 fn validate_command_policy(markdown: &str, allowed: &[&str]) -> Result<(), String> {
@@ -190,7 +181,9 @@ fn validate_semantic_response_shape(value: &Value) -> Result<(), String> {
         }
     }
 
-    Ok(())
+    serde_json::from_value::<mko_core::model::SemanticResponse>(value.clone())
+        .map(|_| ())
+        .map_err(|error| format!("semantic response must match the runtime schema: {error}"))
 }
 
 #[test]
@@ -212,6 +205,14 @@ fn command_policy_rejects_inline_approval_publication_and_arbitrary_commands() {
         "Run `git push`.",
         "Run `curl https://example.invalid`.",
         "```bash\npython3 publish.py\n```",
+        "Run `gh api repos/example/project`.",
+        "Run `scp draft.md host:/published/`.",
+        "Run `rsync -a sources/ host:/published/`.",
+        "Run `open https://example.invalid`.",
+        "Run `osascript -e 'display dialog publish'`.",
+        "Run `node publish.js`.",
+        "Run `tee sources/published.md`.",
+        "Run `sed -i '' sources/published.md`.",
     ] {
         assert!(
             validate_command_policy(malicious, &allowed).is_err(),
@@ -250,6 +251,42 @@ fn semantic_shape_policy_rejects_missing_fields_and_invented_nesting() {
         .unwrap()
         .insert("approval".into(), Value::Bool(true));
     assert!(validate_semantic_response_shape(&extra_field).is_err());
+}
+
+#[test]
+fn semantic_shape_policy_rejects_malformed_arrays_and_publication_dates() {
+    let valid: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/semantic-response.json"
+    ))
+    .expect("canonical semantic fixture must be JSON");
+
+    for (path, malformed) in [
+        (("tags", None), serde_json::json!(["valid", 7])),
+        (("domain", None), serde_json::json!([{"nested": "invalid"}])),
+        (
+            ("source_metadata", Some("authors")),
+            serde_json::json!(["valid", false]),
+        ),
+        (
+            ("source_metadata", Some("publication_date")),
+            Value::String("2026-02-30".into()),
+        ),
+    ] {
+        let mut candidate = valid.clone();
+        if let Some(nested) = path.1 {
+            candidate[path.0][nested] = malformed;
+        } else {
+            candidate[path.0] = malformed;
+        }
+        assert!(
+            validate_semantic_response_shape(&candidate).is_err(),
+            "semantic policy accepted malformed value at {}",
+            path.1.map_or_else(
+                || path.0.to_string(),
+                |nested| format!("{}.{nested}", path.0)
+            )
+        );
+    }
 }
 
 #[test]
