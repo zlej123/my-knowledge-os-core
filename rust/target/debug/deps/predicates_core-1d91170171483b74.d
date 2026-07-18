@@ -1,9 +1,0 @@
-/Users/choejunhwan/Documents/Codex/2026-07-18/referenced-chatgpt-conversation-this-is-untrusted/outputs/my-knowledge-os-core/rust/target/debug/deps/predicates_core-1d91170171483b74.d: /Users/choejunhwan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/predicates-core-1.0.10/src/lib.rs /Users/choejunhwan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/predicates-core-1.0.10/src/core.rs /Users/choejunhwan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/predicates-core-1.0.10/src/reflection.rs
-
-/Users/choejunhwan/Documents/Codex/2026-07-18/referenced-chatgpt-conversation-this-is-untrusted/outputs/my-knowledge-os-core/rust/target/debug/deps/libpredicates_core-1d91170171483b74.rlib: /Users/choejunhwan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/predicates-core-1.0.10/src/lib.rs /Users/choejunhwan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/predicates-core-1.0.10/src/core.rs /Users/choejunhwan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/predicates-core-1.0.10/src/reflection.rs
-
-/Users/choejunhwan/Documents/Codex/2026-07-18/referenced-chatgpt-conversation-this-is-untrusted/outputs/my-knowledge-os-core/rust/target/debug/deps/libpredicates_core-1d91170171483b74.rmeta: /Users/choejunhwan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/predicates-core-1.0.10/src/lib.rs /Users/choejunhwan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/predicates-core-1.0.10/src/core.rs /Users/choejunhwan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/predicates-core-1.0.10/src/reflection.rs
-
-/Users/choejunhwan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/predicates-core-1.0.10/src/lib.rs:
-/Users/choejunhwan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/predicates-core-1.0.10/src/core.rs:
-/Users/choejunhwan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/predicates-core-1.0.10/src/reflection.rs:
