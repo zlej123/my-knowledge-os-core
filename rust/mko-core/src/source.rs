@@ -6,6 +6,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use chrono_tz::Asia::Seoul;
+use serde::Serialize;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
@@ -20,7 +21,10 @@ use crate::{
         SourceStatus,
     },
     path_policy::{canonical_directory, validate_ascii_slug},
-    prepare::PreparedSourceBundle,
+    pdf::{EXTRACTOR_NAME, EXTRACTOR_VERSION},
+    prepare::{
+        PROCESSOR_VERSION, PROMPT_VERSION, PreparedSourceBundle, load_prepared_source_bundle,
+    },
     registry::{mark_asset_review_pending_with_clock, read_asset},
     revision::calculate_source_revision,
 };
@@ -32,7 +36,7 @@ const MAX_SOURCE_SLUG_BYTES: usize = 96;
 #[derive(Clone, Debug)]
 pub struct WriteSourceRequest {
     repository_root: PathBuf,
-    bundle: PreparedSourceBundle,
+    bundle_path: PathBuf,
     response: Vec<u8>,
     slug: Option<String>,
     replace_pending: bool,
@@ -42,12 +46,12 @@ pub struct WriteSourceRequest {
 impl WriteSourceRequest {
     pub fn new(
         repository_root: impl AsRef<Path>,
-        bundle: PreparedSourceBundle,
+        bundle_path: impl AsRef<Path>,
         response: Vec<u8>,
     ) -> Self {
         Self {
             repository_root: repository_root.as_ref().to_path_buf(),
-            bundle,
+            bundle_path: bundle_path.as_ref().to_path_buf(),
             response,
             slug: None,
             replace_pending: false,
@@ -79,6 +83,45 @@ pub struct WriteSourceResult {
     pub content_revision: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SourceStateMismatch {
+    pub code: String,
+    pub source_id: String,
+    pub asset_id: String,
+    pub current_state: String,
+    pub expected_state: String,
+    pub safe_action: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct RepairSourceStateRequest {
+    repository_root: PathBuf,
+    asset_id: String,
+    clear_stale_lock: bool,
+}
+
+impl RepairSourceStateRequest {
+    pub fn new(repository_root: impl AsRef<Path>, asset_id: impl Into<String>) -> Self {
+        Self {
+            repository_root: repository_root.as_ref().to_path_buf(),
+            asset_id: asset_id.into(),
+            clear_stale_lock: false,
+        }
+    }
+
+    pub fn with_clear_stale_lock(mut self, clear_stale_lock: bool) -> Self {
+        self.clear_stale_lock = clear_stale_lock;
+        self
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepairSourceStateResult {
+    pub result: String,
+    pub source_id: String,
+    pub asset_id: String,
+}
+
 pub fn parse_semantic_response(input: &[u8]) -> Result<SemanticResponse, MkoError> {
     if input.len() > MAX_SEMANTIC_RESPONSE_BYTES {
         return Err(schema_error("semantic response exceeds 1 MiB"));
@@ -97,21 +140,21 @@ pub fn write_source_draft_with_clock(
     request: WriteSourceRequest,
     clock: &dyn Clock,
 ) -> Result<WriteSourceResult, MkoError> {
+    let bundle = load_prepared_source_bundle(&request.repository_root, &request.bundle_path)?;
     let repository_root = canonical_directory(&request.repository_root, "repository_root_invalid")?;
-    validate_bundle(&request.bundle, &repository_root)?;
     if let Some(slug) = request.slug.as_deref() {
         validate_source_slug(slug)?;
     }
     let semantic = parse_semantic_response(&request.response)?;
     let _lock = AssetLock::acquire(
         &repository_root,
-        &request.bundle.asset_id,
+        &bundle.asset_id,
         "mko source write-draft",
         clock,
         request.clear_stale_lock,
     )?;
-    let asset = read_asset(&repository_root, &request.bundle.asset_id)?;
-    validate_bundle_against_asset(&request.bundle, &asset)?;
+    let asset = read_asset(&repository_root, &bundle.asset_id)?;
+    validate_bundle_against_asset(&bundle, &asset)?;
     if !matches!(
         asset.asset_status,
         AssetStatus::Extracted | AssetStatus::ReviewPending
@@ -123,10 +166,12 @@ pub fn write_source_draft_with_clock(
     }
 
     let sources = sources_directory(&repository_root)?;
-    let existing = find_source(&sources, &request.bundle.source_id)?;
+    let existing = find_source(&sources, &bundle.source_id)?;
     let now = clock.now_utc();
     let body = render_source_body(&semantic);
     let (mut source, relative_path, destination, replacing) = if let Some(existing) = existing {
+        validate_existing_source_document(&existing, &asset)
+            .map_err(|error| existing_source_error(error.message()))?;
         if existing.record.status == SourceStatus::Approved
             || existing.record.review.status == ReviewStatus::Approved
         {
@@ -143,18 +188,12 @@ pub fn write_source_draft_with_clock(
                 "only a pending Source can be regenerated",
             ));
         }
-        let candidate = source_record(
-            &request.bundle,
-            &semantic,
-            existing.record.created_at,
-            now,
-            &body,
-        )?;
+        let candidate = source_record(&bundle, &semantic, existing.record.created_at, now, &body)?;
         if candidate.content_revision == existing.record.content_revision
             && calculate_source_revision(&existing.record, &existing.body)?
                 == existing.record.content_revision
         {
-            transition_asset_after_source(&repository_root, &request.bundle.asset_id, clock)?;
+            transition_asset_after_source(&repository_root, &bundle.asset_id, clock)?;
             return Ok(WriteSourceResult {
                 result: "existing".into(),
                 source_id: existing.record.id,
@@ -171,12 +210,12 @@ pub fn write_source_draft_with_clock(
         let relative = repository_relative(&repository_root, &existing.path)?;
         (candidate, relative, existing.path, true)
     } else {
-        let source = source_record(&request.bundle, &semantic, now, now, &body)?;
+        let source = source_record(&bundle, &semantic, now, now, &body)?;
         let filename = source_filename(
             now,
             request.slug.as_deref(),
             &semantic.title,
-            &request.bundle.source_id,
+            &bundle.source_id,
         )?;
         let destination = sources.join(&filename);
         (source, format!("sources/{filename}"), destination, false)
@@ -190,7 +229,7 @@ pub fn write_source_draft_with_clock(
         "replaced"
     } else {
         match write_new(&destination, document.as_bytes(), |path| {
-            validate_existing_source(path, &source, &body)
+            validate_existing_source(path, &source, &body, &asset)
         })? {
             AtomicWriteResult::Created => "created",
             AtomicWriteResult::Existing => "existing",
@@ -199,7 +238,7 @@ pub fn write_source_draft_with_clock(
 
     // The Source is already a complete pending System-of-Record document here. If this
     // second, independent write fails, `mko check` can report and repair the mismatch.
-    transition_asset_after_source(&repository_root, &request.bundle.asset_id, clock)?;
+    transition_asset_after_source(&repository_root, &bundle.asset_id, clock)?;
     Ok(WriteSourceResult {
         result: result.into(),
         source_id: source.id,
@@ -209,48 +248,110 @@ pub fn write_source_draft_with_clock(
 }
 
 pub fn source_state_mismatch_asset_ids(repository_root: &Path) -> Result<Vec<String>, MkoError> {
+    let mut mismatches = source_state_mismatches(repository_root)?
+        .into_iter()
+        .map(|issue| issue.asset_id)
+        .collect::<Vec<_>>();
+    mismatches.sort();
+    mismatches.dedup();
+    Ok(mismatches)
+}
+
+pub fn source_state_mismatches(
+    repository_root: &Path,
+) -> Result<Vec<SourceStateMismatch>, MkoError> {
     let repository_root = canonical_directory(repository_root, "repository_root_invalid")?;
-    let sources_path = repository_root.join("sources");
-    match fs::symlink_metadata(&sources_path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(MkoError::new("source_path_invalid", error.to_string())),
-        Ok(metadata) if !metadata.file_type().is_dir() => {
-            return Err(MkoError::new(
-                "source_path_invalid",
-                "sources must be a real directory",
-            ));
-        }
-        Ok(_) => {}
-    }
-    let sources = fs::canonicalize(&sources_path)
-        .map_err(|error| MkoError::new("source_path_invalid", error.to_string()))?;
-    if !sources.starts_with(&repository_root) {
-        return Err(MkoError::new(
-            "source_path_invalid",
-            "sources directory escapes the repository root",
-        ));
-    }
-    let mut mismatches = HashSet::new();
+    let Some(sources) = existing_sources_directory(&repository_root)? else {
+        return Ok(Vec::new());
+    };
+    let mut mismatches = Vec::new();
     for document in read_source_documents(&sources)? {
         if document.record.status != SourceStatus::ReviewPending {
             continue;
         }
-        for asset_id in &document.record.relations.asset_ids {
-            match read_asset(&repository_root, asset_id) {
-                Ok(asset) if asset.asset_status == AssetStatus::Extracted => {
-                    mismatches.insert(asset_id.clone());
-                }
-                Ok(_) => {}
-                Err(error) if error.code() == "registry_not_found" => {
-                    mismatches.insert(asset_id.clone());
-                }
-                Err(error) => return Err(error),
-            }
+        let Some(asset_id) = document.record.relations.asset_ids.first() else {
+            return Err(existing_source_error("pending Source relation is missing"));
+        };
+        let asset = read_asset(&repository_root, asset_id)
+            .map_err(|error| existing_source_error(error.message()))?;
+        validate_existing_source_document(&document, &asset)
+            .map_err(|error| existing_source_error(error.message()))?;
+        if asset.asset_status == AssetStatus::Extracted {
+            mismatches.push(SourceStateMismatch {
+                code: "source_state_mismatch".into(),
+                source_id: document.record.id,
+                asset_id: asset.id.clone(),
+                current_state: asset_status_name(&asset.asset_status).into(),
+                expected_state: "review_pending".into(),
+                safe_action: format!("mko source repair-state --asset-id {}", asset.id),
+            });
         }
     }
-    let mut mismatches = mismatches.into_iter().collect::<Vec<_>>();
-    mismatches.sort();
+    mismatches.sort_by(|left, right| left.source_id.cmp(&right.source_id));
     Ok(mismatches)
+}
+
+pub fn repair_source_state(
+    request: RepairSourceStateRequest,
+) -> Result<RepairSourceStateResult, MkoError> {
+    repair_source_state_with_clock(request, &SystemClock)
+}
+
+pub fn repair_source_state_with_clock(
+    request: RepairSourceStateRequest,
+    clock: &dyn Clock,
+) -> Result<RepairSourceStateResult, MkoError> {
+    let repository_root = canonical_directory(&request.repository_root, "repository_root_invalid")?;
+    let _lock = AssetLock::acquire(
+        &repository_root,
+        &request.asset_id,
+        "mko source repair-state",
+        clock,
+        request.clear_stale_lock,
+    )?;
+    let asset = read_asset(&repository_root, &request.asset_id)?;
+    if !matches!(
+        asset.asset_status,
+        AssetStatus::Extracted | AssetStatus::ReviewPending
+    ) {
+        return Err(MkoError::new(
+            "invalid_state_transition",
+            "source state repair is limited to extracted or review_pending assets",
+        ));
+    }
+    let sources = existing_sources_directory(&repository_root)?.ok_or_else(|| {
+        MkoError::new(
+            "relation_missing",
+            "no canonical pending Source exists for this Asset",
+        )
+    })?;
+    let source_id = asset.id.replacen("asset", "source", 1);
+    let document = find_source(&sources, &source_id)?.ok_or_else(|| {
+        MkoError::new(
+            "relation_missing",
+            "no canonical pending Source exists for this Asset",
+        )
+    })?;
+    validate_existing_source_document(&document, &asset)
+        .map_err(|error| existing_source_error(error.message()))?;
+    if document.record.status != SourceStatus::ReviewPending
+        || document.record.review.status != ReviewStatus::Pending
+    {
+        return Err(existing_source_error(
+            "state repair requires a valid pending Source",
+        ));
+    }
+    let result = if asset.asset_status == AssetStatus::ReviewPending {
+        "already_consistent"
+    } else {
+        mark_asset_review_pending_with_clock(&repository_root, &asset.id, clock)?;
+        "repaired"
+    };
+    Ok(RepairSourceStateResult {
+        result: result.into(),
+        source_id,
+        asset_id: asset.id,
+    })
 }
 
 fn transition_asset_after_source(
@@ -265,38 +366,13 @@ fn transition_asset_after_source(
     mark_asset_review_pending_with_clock(repository_root, asset_id, clock)
 }
 
-fn validate_bundle(bundle: &PreparedSourceBundle, repository_root: &Path) -> Result<(), MkoError> {
-    let expected_source_id = bundle
-        .asset_id
-        .replacen("personal-asset-", "personal-source-", 1);
-    if bundle.schema_version != 1
-        || bundle.source_id != expected_source_id
-        || bundle.trust != "untrusted_document_text"
-        || bundle.extractor.name.is_empty()
-        || bundle.extractor.version.is_empty()
-        || bundle.core_version != CORE_VERSION
-        || bundle.processor_version.is_empty()
-        || bundle.prompt_version.is_empty()
-        || bundle.logical_path.is_empty()
-        || bundle.fingerprint.method != "sha256"
-    {
-        return Err(MkoError::new(
-            "bundle_invalid",
-            "prepared Source bundle does not satisfy the v0.1 contract",
-        ));
-    }
-    // Validate the content-addressed ID through the authoritative Registry reader before
-    // any path derived from it is used.
-    read_asset(repository_root, &bundle.asset_id)?;
-    Ok(())
-}
-
 fn validate_bundle_against_asset(
     bundle: &PreparedSourceBundle,
     asset: &crate::model::AssetRecord,
 ) -> Result<(), MkoError> {
     if bundle.asset_id != asset.id
         || bundle.fingerprint != asset.fingerprint
+        || bundle.title_hint != asset.title
         || bundle.logical_path != asset.provider.locator
         || bundle.source_id != asset.id.replacen("asset", "source", 1)
     {
@@ -351,27 +427,11 @@ fn source_record(
 }
 
 fn render_source_body(response: &SemanticResponse) -> String {
-    let authors = if response.source_metadata.authors.is_empty() {
-        "Not reported".into()
-    } else {
-        response.source_metadata.authors.join(", ")
-    };
-    let publication_date = response
-        .source_metadata
-        .publication_date
-        .map(|date| date.to_string())
-        .unwrap_or_else(|| "Not reported".into());
-    let doi = response
-        .source_metadata
-        .doi
-        .as_deref()
-        .unwrap_or("Not reported");
+    let source_metadata = render_source_metadata(response);
     format!(
-        "# {}\n\n## Source Metadata\n\n- Authors: {}\n- Publication Date: {}\n- DOI: {}\n\n## One-Sentence Summary\n\n{}\n\n## Problem\n\n{}\n\n## Method\n\n{}\n\n## Contributions\n\n{}\n\n## Reported Evidence\n\n{}\n\n## Stated Limitations\n\n{}\n\n## Domain Perspective\n\n{}\n\n## Implementation Considerations\n\n{}\n\n## Questions and Unknowns\n\n{}\n\n## Related Knowledge\n\n{}\n",
+        "# {}\n\n## Source Metadata\n\n{}\n\n## One-Sentence Summary\n\n{}\n\n## Problem\n\n{}\n\n## Method\n\n{}\n\n## Contributions\n\n{}\n\n## Reported Evidence\n\n{}\n\n## Stated Limitations\n\n{}\n\n## Domain Perspective\n\n{}\n\n## Implementation Considerations\n\n{}\n\n## Questions and Unknowns\n\n{}\n\n## Related Knowledge\n\n{}\n",
         response.title,
-        canonical_section_text(&authors),
-        publication_date,
-        canonical_section_text(doi),
+        source_metadata,
         canonical_section_text(&response.one_sentence_summary),
         canonical_section_text(&response.problem),
         canonical_section_text(&response.method),
@@ -422,21 +482,70 @@ fn normalize_and_validate_response(response: &mut SemanticResponse) -> Result<()
     ] {
         normalize_string(section)?;
     }
+    validate_aggregate_semantic_limits(response)?;
     Ok(())
+}
+
+fn validate_aggregate_semantic_limits(response: &SemanticResponse) -> Result<(), MkoError> {
+    validate_semantic_size(&response.source_metadata.authors.join(", "))?;
+    validate_semantic_size(&response.tags.join("\n"))?;
+    validate_semantic_size(&response.domain.join("\n"))?;
+    validate_semantic_size(&render_source_metadata(response))?;
+    for section in [
+        &response.one_sentence_summary,
+        &response.problem,
+        &response.method,
+        &response.contributions,
+        &response.reported_evidence,
+        &response.stated_limitations,
+        &response.domain_perspective,
+        &response.implementation_considerations,
+        &response.questions_and_unknowns,
+        &response.related_knowledge,
+    ] {
+        validate_semantic_size(&canonical_section_text(section))?;
+    }
+    Ok(())
+}
+
+fn render_source_metadata(response: &SemanticResponse) -> String {
+    let authors = if response.source_metadata.authors.is_empty() {
+        "Not reported".into()
+    } else {
+        response.source_metadata.authors.join(", ")
+    };
+    let publication_date = response
+        .source_metadata
+        .publication_date
+        .map(|date| date.to_string())
+        .unwrap_or_else(|| "Not reported".into());
+    let doi = response
+        .source_metadata
+        .doi
+        .as_deref()
+        .unwrap_or("Not reported");
+    format!(
+        "- Authors: {}\n- Publication Date: {}\n- DOI: {}",
+        canonical_section_text(&authors),
+        publication_date,
+        canonical_section_text(doi)
+    )
 }
 
 fn canonical_section_text(value: &str) -> String {
     value
         .lines()
         .map(|line| {
-            let whitespace_len = line.len() - line.trim_start_matches(' ').len();
-            let trimmed = &line[whitespace_len..];
-            let hash_heading = whitespace_len <= 3 && trimmed.starts_with('#');
-            let setext_or_rule = !trimmed.is_empty()
-                && (trimmed.bytes().all(|byte| byte == b'=')
-                    || trimmed.bytes().all(|byte| byte == b'-'));
-            if hash_heading || setext_or_rule {
-                format!("{}\\{}", &line[..whitespace_len], trimmed)
+            let whitespace_len = line.len() - line.trim_start_matches([' ', '\t']).len();
+            let content = &line[whitespace_len..];
+            let structural = content.trim_end_matches([' ', '\t']);
+            let hash_heading = structural.starts_with('#');
+            let fence = structural.starts_with("```") || structural.starts_with("~~~");
+            let setext_or_rule = !structural.is_empty()
+                && (structural.bytes().all(|byte| byte == b'=')
+                    || structural.bytes().all(|byte| byte == b'-'));
+            if hash_heading || fence || setext_or_rule {
+                format!("{}\\{}", &line[..whitespace_len], content)
             } else {
                 line.to_owned()
             }
@@ -446,14 +555,18 @@ fn canonical_section_text(value: &str) -> String {
 }
 
 fn normalize_string(value: &mut String) -> Result<(), MkoError> {
-    if value.len() > MAX_SEMANTIC_STRING_BYTES {
-        return Err(schema_error("semantic string exceeds 64 KiB"));
-    }
     *value = value
         .replace("\r\n", "\n")
         .replace('\r', "\n")
         .nfc()
         .collect();
+    validate_semantic_size(value)
+}
+
+fn validate_semantic_size(value: &str) -> Result<(), MkoError> {
+    if value.len() > MAX_SEMANTIC_STRING_BYTES {
+        return Err(schema_error("normalized semantic section exceeds 64 KiB"));
+    }
     Ok(())
 }
 
@@ -532,6 +645,21 @@ fn sources_directory(repository_root: &Path) -> Result<PathBuf, MkoError> {
     Ok(canonical)
 }
 
+fn existing_sources_directory(repository_root: &Path) -> Result<Option<PathBuf>, MkoError> {
+    let path = repository_root.join("sources");
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) | Err(_) => return Err(source_path_error()),
+    }
+    let canonical = fs::canonicalize(&path).map_err(|_| source_path_error())?;
+    if !canonical.starts_with(repository_root) {
+        return Err(source_path_error());
+    }
+    reject_source_collisions(&canonical)?;
+    Ok(Some(canonical))
+}
+
 fn reject_source_collisions(sources: &Path) -> Result<(), MkoError> {
     let mut names = HashSet::new();
     for entry in fs::read_dir(sources).map_err(|_| source_path_error())? {
@@ -557,6 +685,139 @@ struct SourceDocument {
     record: SourceRecord,
     body: String,
     path: PathBuf,
+}
+
+fn validate_existing_source_document(
+    document: &SourceDocument,
+    asset: &crate::model::AssetRecord,
+) -> Result<(), MkoError> {
+    let source = &document.record;
+    let expected_source_id = asset.id.replacen("asset", "source", 1);
+    if source.id != expected_source_id
+        || source.record_type != "source"
+        || source.schema_version != 1
+        || source.scope != "personal"
+        || !source.ai_assisted
+        || source.relations.asset_ids != [asset.id.clone()]
+        || source.generation.extractor_name != EXTRACTOR_NAME
+        || source.generation.extractor_version != EXTRACTOR_VERSION
+        || source.generation.core_version != CORE_VERSION
+        || source.generation.processor_version != PROCESSOR_VERSION
+        || source.generation.prompt_version != PROMPT_VERSION
+        || source.generation.asset_fingerprint != asset.fingerprint.value
+    {
+        return Err(existing_source_error(
+            "existing Source identity, relation, or generation metadata is invalid",
+        ));
+    }
+    validate_review_invariants(source)?;
+    let actual_revision = calculate_source_revision(source, &document.body)?;
+    if actual_revision != source.content_revision {
+        return Err(existing_source_error(
+            "existing Source content revision does not match its semantic content",
+        ));
+    }
+    validate_canonical_source_path(document)?;
+    validate_canonical_headings(source, &document.body)?;
+    Ok(())
+}
+
+fn validate_review_invariants(source: &SourceRecord) -> Result<(), MkoError> {
+    let valid = match source.status {
+        SourceStatus::ReviewPending => {
+            source.review.status == ReviewStatus::Pending
+                && source.review.approved_revision.is_none()
+                && source.review.reviewed_at.is_none()
+        }
+        SourceStatus::Approved => {
+            source.review.status == ReviewStatus::Approved
+                && source.review.approved_revision.as_deref()
+                    == Some(source.content_revision.as_str())
+                && source.review.reviewed_at.is_some()
+        }
+        SourceStatus::Rejected => {
+            source.review.status == ReviewStatus::Rejected
+                && source.review.approved_revision.is_none()
+                && source.review.reviewed_at.is_some()
+        }
+        SourceStatus::Stale | SourceStatus::Archived => match source.review.status {
+            ReviewStatus::Pending => {
+                source.review.approved_revision.is_none() && source.review.reviewed_at.is_none()
+            }
+            ReviewStatus::Approved => {
+                source.review.approved_revision.is_some() && source.review.reviewed_at.is_some()
+            }
+            ReviewStatus::Rejected => {
+                source.review.approved_revision.is_none() && source.review.reviewed_at.is_some()
+            }
+        },
+    };
+    if !valid {
+        return Err(existing_source_error(
+            "existing Source status and review metadata are inconsistent",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_canonical_source_path(document: &SourceDocument) -> Result<(), MkoError> {
+    let filename = document
+        .path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| existing_source_error("existing Source filename is not UTF-8"))?;
+    let hash = document
+        .record
+        .id
+        .strip_prefix("personal-source-")
+        .filter(|hash| hash.len() == 64)
+        .ok_or_else(|| existing_source_error("existing Source ID is invalid"))?;
+    let date = document
+        .record
+        .created_at
+        .with_timezone(&Seoul)
+        .date_naive()
+        .to_string();
+    let prefix = format!("{date}-");
+    let suffix = format!("-{}.md", &hash[..12]);
+    let slug = filename
+        .strip_prefix(&prefix)
+        .and_then(|value| value.strip_suffix(&suffix))
+        .ok_or_else(|| existing_source_error("existing Source path is not deterministic"))?;
+    validate_source_slug(slug)
+        .map_err(|_| existing_source_error("existing Source slug is not portable"))
+}
+
+fn validate_canonical_headings(source: &SourceRecord, body: &str) -> Result<(), MkoError> {
+    let mut expected = vec![format!("# {}", source.title)];
+    expected.extend(
+        [
+            "## Source Metadata",
+            "## One-Sentence Summary",
+            "## Problem",
+            "## Method",
+            "## Contributions",
+            "## Reported Evidence",
+            "## Stated Limitations",
+            "## Domain Perspective",
+            "## Implementation Considerations",
+            "## Questions and Unknowns",
+            "## Related Knowledge",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    let actual = body
+        .lines()
+        .filter(|line| line.starts_with('#'))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if actual != expected {
+        return Err(existing_source_error(
+            "existing Source body does not have canonical headings",
+        ));
+    }
+    Ok(())
 }
 
 fn find_source(sources: &Path, source_id: &str) -> Result<Option<SourceDocument>, MkoError> {
@@ -590,7 +851,8 @@ fn read_source_documents(sources: &Path) -> Result<Vec<SourceDocument>, MkoError
         }
         let input = fs::read_to_string(&path)
             .map_err(|error| MkoError::new("source_unreadable", error.to_string()))?;
-        let parsed = parse_markdown::<SourceRecord>(&input)?;
+        let parsed = parse_markdown::<SourceRecord>(&input)
+            .map_err(|error| existing_source_error(error.message()))?;
         documents.push(SourceDocument {
             record: parsed.metadata,
             body: parsed.body,
@@ -604,14 +866,21 @@ fn validate_existing_source(
     path: &Path,
     expected: &SourceRecord,
     expected_body: &str,
+    asset: &crate::model::AssetRecord,
 ) -> Result<(), MkoError> {
     let input = fs::read_to_string(path)
         .map_err(|error| MkoError::new("source_unreadable", error.to_string()))?;
-    let existing = parse_markdown::<SourceRecord>(&input)?;
-    let revision = calculate_source_revision(&existing.metadata, &existing.body)?;
-    if existing.metadata.id != expected.id
-        || existing.metadata.relations != expected.relations
-        || revision != calculate_source_revision(expected, expected_body)?
+    let existing = parse_markdown::<SourceRecord>(&input)
+        .map_err(|error| existing_source_error(error.message()))?;
+    let document = SourceDocument {
+        record: existing.metadata,
+        body: existing.body,
+        path: path.to_path_buf(),
+    };
+    validate_existing_source_document(&document, asset)?;
+    if document.record.id != expected.id
+        || document.record.relations != expected.relations
+        || document.record.content_revision != calculate_source_revision(expected, expected_body)?
     {
         return Err(MkoError::new(
             "source_conflict",
@@ -646,6 +915,23 @@ fn repository_relative(repository_root: &Path, path: &Path) -> Result<String, Mk
 
 fn schema_error(message: impl Into<String>) -> MkoError {
     MkoError::new("schema_invalid", message)
+}
+
+fn existing_source_error(message: impl Into<String>) -> MkoError {
+    MkoError::new("existing_source_invalid", message)
+}
+
+fn asset_status_name(status: &AssetStatus) -> &'static str {
+    match status {
+        AssetStatus::Registered => "registered",
+        AssetStatus::Extracted => "extracted",
+        AssetStatus::ReviewPending => "review_pending",
+        AssetStatus::Processed => "processed",
+        AssetStatus::Changed => "changed",
+        AssetStatus::Missing => "missing",
+        AssetStatus::Superseded => "superseded",
+        AssetStatus::Failed => "failed",
+    }
 }
 
 fn source_path_error() -> MkoError {

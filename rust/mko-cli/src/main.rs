@@ -9,7 +9,10 @@ use mko_core::{
         AssetOperationRequest, CaptureRequest, accept_changed_asset, capture_asset, inspect_asset,
         lineage_repair_needed, repair_lineage,
     },
-    source::{WriteSourceRequest, write_source_draft},
+    source::{
+        RepairSourceStateRequest, WriteSourceRequest, repair_source_state, source_state_mismatches,
+        write_source_draft,
+    },
 };
 
 #[derive(Parser)]
@@ -40,6 +43,7 @@ enum Command {
 enum SourceCommand {
     Prepare(PrepareArgs),
     WriteDraft(WriteDraftArgs),
+    RepairState(RepairStateArgs),
 }
 
 #[derive(Subcommand)]
@@ -122,6 +126,18 @@ struct WriteDraftArgs {
     json: bool,
 }
 
+#[derive(Args)]
+struct RepairStateArgs {
+    #[arg(long)]
+    repo: PathBuf,
+    #[arg(long)]
+    asset_id: String,
+    #[arg(long)]
+    clear_stale_lock: bool,
+    #[arg(long)]
+    json: bool,
+}
+
 fn main() {
     let json_requested = std::env::args_os().any(|argument| argument == "--json");
     match Cli::try_parse() {
@@ -157,6 +173,8 @@ fn cli_requests_json(cli: &Cli) -> bool {
                 | AssetCommand::RepairLineage(AssetOperationArgs { json: true, .. }),
         } | Command::Source {
             command: SourceCommand::WriteDraft(WriteDraftArgs { json: true, .. }),
+        } | Command::Source {
+            command: SourceCommand::RepairState(RepairStateArgs { json: true, .. }),
         } | Command::Check(CheckArgs { json: true, .. })
     )
 }
@@ -199,27 +217,22 @@ fn run(cli: Cli) -> Result<(), mko_core::error::MkoError> {
         Command::Source {
             command: SourceCommand::WriteDraft(arguments),
         } => write_draft(arguments),
+        Command::Source {
+            command: SourceCommand::RepairState(arguments),
+        } => repair_source(arguments),
         Command::ExtractPdf => extract_pdf(),
         Command::Human | Command::Hooks => Ok(()),
     }
 }
 
 fn write_draft(arguments: WriteDraftArgs) -> Result<(), mko_core::error::MkoError> {
-    let bundle_bytes = std::fs::read(&arguments.bundle).map_err(|error| {
-        mko_core::error::MkoError::new(
-            "bundle_unreadable",
-            format!("cannot read {}: {error}", arguments.bundle.display()),
-        )
-    })?;
-    let bundle = serde_json::from_slice(&bundle_bytes)
-        .map_err(|error| mko_core::error::MkoError::new("bundle_invalid", error.to_string()))?;
     let response = std::fs::read(&arguments.response).map_err(|error| {
         mko_core::error::MkoError::new(
             "semantic_response_unreadable",
             format!("cannot read {}: {error}", arguments.response.display()),
         )
     })?;
-    let request = WriteSourceRequest::new(&arguments.repo, bundle, response)
+    let request = WriteSourceRequest::new(&arguments.repo, &arguments.bundle, response)
         .with_slug(arguments.slug)
         .with_replace_pending(arguments.replace_pending)
         .with_clear_stale_lock(arguments.clear_stale_lock);
@@ -239,6 +252,26 @@ fn write_draft(arguments: WriteDraftArgs) -> Result<(), mko_core::error::MkoErro
             "{} {} {} {}",
             result.result, result.source_id, result.source_path, result.content_revision
         );
+    }
+    Ok(())
+}
+
+fn repair_source(arguments: RepairStateArgs) -> Result<(), mko_core::error::MkoError> {
+    let result = repair_source_state(
+        RepairSourceStateRequest::new(&arguments.repo, &arguments.asset_id)
+            .with_clear_stale_lock(arguments.clear_stale_lock),
+    )?;
+    if arguments.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "result": result.result,
+                "source_id": result.source_id,
+                "asset_id": result.asset_id,
+            })
+        );
+    } else {
+        println!("{} {} {}", result.result, result.source_id, result.asset_id);
     }
     Ok(())
 }
@@ -356,23 +389,37 @@ fn repair_asset_lineage(arguments: AssetOperationArgs) -> Result<(), mko_core::e
 
 fn check(arguments: CheckArgs) -> Result<(), mko_core::error::MkoError> {
     let asset_ids = lineage_repair_needed(&arguments.repo)?;
+    let issues = source_state_mismatches(&arguments.repo)?;
     let result = if asset_ids.is_empty() {
         "ok"
     } else {
         "repair_needed"
     };
     if arguments.json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "result": result,
-                "asset_ids": asset_ids,
-            })
-        );
+        let mut output = serde_json::json!({
+            "result": result,
+            "asset_ids": asset_ids,
+        });
+        if !issues.is_empty() {
+            output["issues"] = serde_json::to_value(&issues).map_err(|error| {
+                mko_core::error::MkoError::new("check_failed", error.to_string())
+            })?;
+        }
+        println!("{output}");
     } else if asset_ids.is_empty() {
         println!("ok");
     } else {
         println!("repair_needed {}", asset_ids.join(","));
+        for issue in issues {
+            println!(
+                "{} {} {} -> {}: {}",
+                issue.code,
+                issue.source_id,
+                issue.current_state,
+                issue.expected_state,
+                issue.safe_action
+            );
+        }
     }
     Ok(())
 }

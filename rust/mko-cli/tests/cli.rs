@@ -347,6 +347,95 @@ fn source_write_draft_consumes_typed_json_and_emits_complete_json() {
     );
 }
 
+#[test]
+#[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
+fn source_write_draft_rejects_a_bundle_outside_the_canonical_runtime_path() {
+    let env = CliTestEnv::new();
+    let pdf = env.provider.join("paper.pdf");
+    write_pdf(&pdf, &["Fixture page"]);
+    let captured = env.capture_json(&pdf);
+    let asset_id = captured["asset_id"].as_str().unwrap();
+    let bundle = env.prepare_bundle(asset_id);
+    let arbitrary = env.root.join("bundle.json");
+    fs::copy(bundle, &arbitrary).unwrap();
+    let response = env.semantic_response();
+
+    Command::cargo_bin("mko")
+        .unwrap()
+        .args(env.write_draft_arguments(&arbitrary, &response))
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("runtime_output_invalid"));
+}
+
+#[test]
+#[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
+fn check_reports_structured_source_mismatch_and_repair_state_is_idempotent() {
+    let env = CliTestEnv::new();
+    let pdf = env.provider.join("paper.pdf");
+    write_pdf(&pdf, &["Fixture page"]);
+    let captured = env.capture_json(&pdf);
+    let asset_id = captured["asset_id"].as_str().unwrap();
+    let source_id = asset_id.replacen("asset", "source", 1);
+    let bundle = env.prepare_bundle(asset_id);
+    let response = env.semantic_response();
+    let publication_lock = env
+        .repository
+        .join("assets/registry")
+        .join(format!(".{asset_id}.md.publish.lock"));
+    fs::write(&publication_lock, b"interrupt transition").unwrap();
+    Command::cargo_bin("mko")
+        .unwrap()
+        .args(env.write_draft_arguments(&bundle, &response))
+        .assert()
+        .failure();
+    fs::remove_file(publication_lock).unwrap();
+
+    let output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(env.check_arguments())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        parse_json(&output),
+        json!({
+            "result": "repair_needed",
+            "asset_ids": [asset_id],
+            "issues": [{
+                "code": "source_state_mismatch",
+                "source_id": source_id,
+                "asset_id": asset_id,
+                "current_state": "extracted",
+                "expected_state": "review_pending",
+                "safe_action": format!("mko source repair-state --asset-id {asset_id}"),
+            }],
+        })
+    );
+
+    for expected in ["repaired", "already_consistent"] {
+        let output = Command::cargo_bin("mko")
+            .unwrap()
+            .args([
+                "source",
+                "repair-state",
+                "--repo",
+                &env.repository.display().to_string(),
+                "--asset-id",
+                asset_id,
+                "--json",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        assert_eq!(parse_json(&output)["result"], expected);
+    }
+}
+
 struct CliTestEnv {
     root: PathBuf,
     repository: PathBuf,
@@ -428,6 +517,59 @@ impl CliTestEnv {
             "check".into(),
             "--repo".into(),
             self.repository.display().to_string(),
+            "--json".into(),
+        ]
+    }
+
+    #[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
+    fn prepare_bundle(&self, asset_id: &str) -> PathBuf {
+        let bundle = self
+            .repository
+            .join(".knowledge-os/runtime/prepared")
+            .join(format!("{asset_id}.json"));
+        Command::cargo_bin("mko")
+            .unwrap()
+            .args([
+                "source",
+                "prepare",
+                "--repo",
+                &self.repository.display().to_string(),
+                "--local-config",
+                &self.local_config.display().to_string(),
+                "--asset-id",
+                asset_id,
+                "--output",
+                &bundle.display().to_string(),
+            ])
+            .assert()
+            .success();
+        bundle
+    }
+
+    fn semantic_response(&self) -> PathBuf {
+        let response = self.root.join("semantic-response.json");
+        fs::write(
+            &response,
+            include_bytes!("../../../tests/fixtures/semantic-response.json"),
+        )
+        .unwrap();
+        response
+    }
+
+    fn write_draft_arguments(
+        &self,
+        bundle: &std::path::Path,
+        response: &std::path::Path,
+    ) -> Vec<String> {
+        vec![
+            "source".into(),
+            "write-draft".into(),
+            "--repo".into(),
+            self.repository.display().to_string(),
+            "--bundle".into(),
+            bundle.display().to_string(),
+            "--response".into(),
+            response.display().to_string(),
             "--json".into(),
         ]
     }

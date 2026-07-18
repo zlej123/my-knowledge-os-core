@@ -24,9 +24,10 @@ use crate::{
     registry::{mark_asset_extracted, read_asset},
 };
 
-const PROCESSOR_VERSION: &str = "source-v1";
-const PROMPT_VERSION: &str = "codex-source-v1";
-const TRUST: &str = "untrusted_document_text";
+pub const PROCESSOR_VERSION: &str = "source-v1";
+pub const PROMPT_VERSION: &str = "codex-source-v1";
+pub const TRUST: &str = "untrusted_document_text";
+const MAX_PREPARED_BUNDLE_BYTES: u64 = 128 * 1024 * 1024;
 static NEXT_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
@@ -86,6 +87,78 @@ pub struct PreparedSourceBundle {
     pub core_version: String,
     pub processor_version: String,
     pub prompt_version: String,
+}
+
+pub fn load_prepared_source_bundle(
+    repository_root: &Path,
+    requested: &Path,
+) -> Result<PreparedSourceBundle, MkoError> {
+    let requested_repository_root = repository_root.to_path_buf();
+    let repository_root = crate::path_policy::canonical_directory(
+        &requested_repository_root,
+        "repository_root_invalid",
+    )?;
+    let asset_id = requested
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(runtime_output_error)?;
+    source_id(asset_id).map_err(|_| runtime_output_error())?;
+    let runtime = runtime_paths(
+        &repository_root,
+        &requested_repository_root,
+        asset_id,
+        requested,
+    )?;
+    let public_path = PathBuf::from("prepared").join(&runtime.output_name);
+    let file = runtime
+        .runtime
+        .open(&public_path)
+        .map_err(|_| runtime_publication_error())?;
+    let mut bytes = Vec::new();
+    file.take(MAX_PREPARED_BUNDLE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| runtime_publication_error())?;
+    if bytes.len() as u64 > MAX_PREPARED_BUNDLE_BYTES {
+        return Err(MkoError::new(
+            "bundle_invalid",
+            "prepared Source bundle exceeds its bounded runtime transport",
+        ));
+    }
+    let bundle: PreparedSourceBundle = serde_json::from_slice(&bytes)
+        .map_err(|error| MkoError::new("bundle_invalid", error.to_string()))?;
+    validate_prepared_bundle_contract(&bundle, asset_id)?;
+    Ok(bundle)
+}
+
+fn validate_prepared_bundle_contract(
+    bundle: &PreparedSourceBundle,
+    asset_id: &str,
+) -> Result<(), MkoError> {
+    let expected_source_id = source_id(asset_id)?;
+    let hash = asset_id
+        .strip_prefix("personal-asset-")
+        .ok_or_else(|| MkoError::new("bundle_invalid", "invalid prepared Asset ID"))?;
+    if bundle.schema_version != 1
+        || bundle.asset_id != asset_id
+        || bundle.source_id != expected_source_id
+        || bundle.fingerprint.method != "sha256"
+        || bundle.fingerprint.value != format!("sha256:{hash}")
+        || bundle.title_hint.is_empty()
+        || bundle.logical_path.is_empty()
+        || bundle.trust != TRUST
+        || bundle.extractor.name != EXTRACTOR_NAME
+        || bundle.extractor.version != EXTRACTOR_VERSION
+        || bundle.core_version != CORE_VERSION
+        || bundle.processor_version != PROCESSOR_VERSION
+        || bundle.prompt_version != PROMPT_VERSION
+    {
+        return Err(MkoError::new(
+            "bundle_invalid",
+            "prepared Source bundle does not match the canonical Core contract",
+        ));
+    }
+    validate_extracted_pages(&bundle.pages)?;
+    Ok(())
 }
 
 pub fn prepare_source(
