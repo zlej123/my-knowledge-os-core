@@ -1,18 +1,20 @@
 use std::{
-    fs::{self, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use atomic_write_file::AtomicWriteFile;
+use cap_std::{
+    ambient_authority,
+    fs::{Dir, File, OpenOptions},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     CORE_VERSION,
     config::load_capture_config,
     error::MkoError,
-    fingerprint::{FileSnapshot, fingerprint_file, fingerprint_open_file, validate_pdf_content},
+    fingerprint::{FileSnapshot, fingerprint_open_file, validate_pdf_content},
     lock::AssetLock,
     model::{AssetStatus, Fingerprint},
     path_policy::provider_path,
@@ -90,8 +92,8 @@ pub fn prepare_source(
     request: PrepareRequest,
     worker_executable: &Path,
 ) -> Result<PreparedSourceBundle, MkoError> {
-    prepare_source_with_extractor(request, |snapshot| {
-        extract_pdf_pages_in_child(worker_executable, snapshot)
+    prepare_source_with_extractor(request, |snapshot, expected| {
+        extract_pdf_pages_in_child(worker_executable, snapshot, expected)
     })
 }
 
@@ -100,7 +102,7 @@ pub fn prepare_source_with_extractor<F>(
     extractor: F,
 ) -> Result<PreparedSourceBundle, MkoError>
 where
-    F: FnOnce(&Path) -> Result<Vec<String>, MkoError>,
+    F: FnOnce(File, &FileSnapshot) -> Result<Vec<String>, MkoError>,
 {
     let config = load_capture_config(
         &request.repository_root,
@@ -147,14 +149,13 @@ where
         ));
     }
     let snapshot = Snapshot::copy_from(
-        &runtime.snapshot_directory,
+        &runtime.snapshots,
         &request.asset_id,
         &mut provider,
         &before,
     )?;
-    let pages = extractor(&snapshot.path)?;
+    let pages = extractor(snapshot.clone_file()?, &before)?;
     validate_extracted_pages(&pages)?;
-    snapshot.verify(&before)?;
 
     let retained_after = fingerprint_open_file(&mut provider)?;
     let mut reopened = provider_path(&config.provider_root, &candidate)?.file;
@@ -194,12 +195,9 @@ where
             "prepared source bundle failed deterministic validation",
         ));
     }
-    write_runtime(&runtime.output, &bytes)?;
-    let published: PreparedSourceBundle = serde_json::from_slice(
-        &fs::read(&runtime.output)
-            .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))?,
-    )
-    .map_err(|error| MkoError::new("bundle_invalid", error.to_string()))?;
+    let staged = write_runtime(&runtime.prepared, &runtime.output_name, &bytes)?;
+    let published: PreparedSourceBundle = serde_json::from_slice(&staged)
+        .map_err(|error| MkoError::new("bundle_invalid", error.to_string()))?;
     if published != bundle {
         return Err(MkoError::new(
             "bundle_invalid",
@@ -230,8 +228,9 @@ fn source_id(asset_id: &str) -> Result<String, MkoError> {
 }
 
 struct RuntimePaths {
-    output: PathBuf,
-    snapshot_directory: PathBuf,
+    prepared: Dir,
+    snapshots: Dir,
+    output_name: PathBuf,
 }
 
 fn runtime_paths(
@@ -262,54 +261,53 @@ fn runtime_paths(
         return Err(runtime_output_error());
     }
 
-    let knowledge = ensure_real_child_directory(repository_root, ".knowledge-os")?;
+    let repository = Dir::open_ambient_dir(repository_root, ambient_authority())
+        .map_err(|_| runtime_path_error())?;
+    let knowledge = ensure_real_child_directory(&repository, ".knowledge-os")?;
     let runtime = ensure_real_child_directory(&knowledge, "runtime")?;
     let prepared = ensure_real_child_directory(&runtime, "prepared")?;
     let snapshots = ensure_real_child_directory(&runtime, "snapshots")?;
-    if !knowledge.starts_with(repository_root)
-        || !runtime.starts_with(repository_root)
-        || !prepared.starts_with(repository_root)
-        || !snapshots.starts_with(repository_root)
-    {
-        return Err(runtime_path_error());
-    }
-    let output = prepared.join(format!("{asset_id}.json"));
-    match fs::symlink_metadata(&output) {
+    let output_name = PathBuf::from(format!("{asset_id}.json"));
+    match prepared.symlink_metadata(&output_name) {
         Ok(metadata) if metadata.file_type().is_file() => {}
         Ok(_) => return Err(runtime_output_error()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(runtime_path_error()),
     }
     Ok(RuntimePaths {
-        output,
-        snapshot_directory: snapshots,
+        prepared,
+        snapshots,
+        output_name,
     })
 }
 
-fn ensure_real_child_directory(parent: &Path, name: &str) -> Result<PathBuf, MkoError> {
-    let path = parent.join(name);
-    match fs::symlink_metadata(&path) {
+fn ensure_real_child_directory(parent: &Dir, name: &str) -> Result<Dir, MkoError> {
+    match parent.symlink_metadata(name) {
         Ok(metadata) if metadata.file_type().is_dir() => {}
         Ok(_) => return Err(runtime_path_error()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            match fs::create_dir(&path) {
+            match parent.create_dir(name) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(_) => return Err(runtime_path_error()),
             }
-            let metadata = fs::symlink_metadata(&path).map_err(|_| runtime_path_error())?;
+            let metadata = parent
+                .symlink_metadata(name)
+                .map_err(|_| runtime_path_error())?;
             if !metadata.file_type().is_dir() {
                 return Err(runtime_path_error());
             }
         }
         Err(_) => return Err(runtime_path_error()),
     }
-    let canonical = fs::canonicalize(&path).map_err(|_| runtime_path_error())?;
-    let canonical_parent = fs::canonicalize(parent).map_err(|_| runtime_path_error())?;
-    if canonical.parent() != Some(canonical_parent.as_path()) {
+    let child = parent.open_dir(name).map_err(|_| runtime_path_error())?;
+    let metadata = parent
+        .symlink_metadata(name)
+        .map_err(|_| runtime_path_error())?;
+    if !metadata.file_type().is_dir() {
         return Err(runtime_path_error());
     }
-    Ok(canonical)
+    Ok(child)
 }
 
 fn runtime_output_error() -> MkoError {
@@ -326,8 +324,8 @@ fn runtime_path_error() -> MkoError {
     )
 }
 
-fn write_runtime(path: &Path, bytes: &[u8]) -> Result<(), MkoError> {
-    match fs::symlink_metadata(path) {
+fn write_runtime(directory: &Dir, name: &Path, bytes: &[u8]) -> Result<Vec<u8>, MkoError> {
+    match directory.symlink_metadata(name) {
         Ok(metadata) if metadata.file_type().is_file() => {}
         Ok(_) => {
             return Err(MkoError::new(
@@ -338,22 +336,54 @@ fn write_runtime(path: &Path, bytes: &[u8]) -> Result<(), MkoError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(MkoError::new("runtime_write_failed", error.to_string())),
     }
-    let mut file = AtomicWriteFile::open(path)
-        .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))?;
-    file.write_all(bytes)
-        .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))?;
-    file.commit()
-        .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))
+    let temporary = PathBuf::from(format!(
+        ".{}.{}.{}.tmp",
+        name.to_string_lossy(),
+        std::process::id(),
+        NEXT_SNAPSHOT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        let mut file = directory
+            .open_with(&temporary, &options)
+            .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))?;
+        file.write_all(bytes)
+            .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))?;
+        file.sync_all()
+            .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))?;
+        let mut staged = Vec::with_capacity(bytes.len());
+        file.read_to_end(&mut staged)
+            .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))?;
+        if staged != bytes {
+            return Err(MkoError::new(
+                "runtime_write_failed",
+                "staged runtime bundle failed byte-for-byte validation",
+            ));
+        }
+        drop(file);
+        directory
+            .rename(&temporary, directory, name)
+            .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))?;
+        Ok(staged)
+    })();
+    if result.is_err() {
+        let _ = directory.remove_file(&temporary);
+    }
+    result
 }
 
-#[derive(Debug)]
 struct Snapshot {
-    path: PathBuf,
+    directory: Dir,
+    name: PathBuf,
+    file: Option<File>,
 }
 
 impl Snapshot {
     fn copy_from(
-        directory: &Path,
+        directory: &Dir,
         asset_id: &str,
         provider: &mut cap_std::fs::File,
         expected: &FileSnapshot,
@@ -362,7 +392,7 @@ impl Snapshot {
     }
 
     fn copy_from_with_hook<F>(
-        directory: &Path,
+        directory: &Dir,
         asset_id: &str,
         provider: &mut cap_std::fs::File,
         expected: &FileSnapshot,
@@ -371,15 +401,15 @@ impl Snapshot {
     where
         F: FnMut(usize),
     {
-        let path = directory.join(format!(
+        let name = PathBuf::from(format!(
             ".{asset_id}.{}.{}.pdf",
             std::process::id(),
             NEXT_SNAPSHOT.fetch_add(1, Ordering::Relaxed)
         ));
-        let mut snapshot = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        let mut snapshot = directory
+            .open_with(&name, &options)
             .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))?;
         provider
             .seek(SeekFrom::Start(0))
@@ -408,20 +438,36 @@ impl Snapshot {
             .seek(SeekFrom::Start(0))
             .map_err(|error| MkoError::new("file_unreadable", error.to_string()))?;
         if let Err(error) = result {
-            let _ = fs::remove_file(&path);
+            drop(snapshot);
+            let _ = directory.remove_file(&name);
             return Err(error);
         }
-        let result = Self { path };
+        let retained_directory = match directory.try_clone() {
+            Ok(directory) => directory,
+            Err(error) => {
+                drop(snapshot);
+                let _ = directory.remove_file(&name);
+                return Err(MkoError::new("runtime_write_failed", error.to_string()));
+            }
+        };
+        let result = Self {
+            directory: retained_directory,
+            name,
+            file: Some(snapshot),
+        };
         result.verify(expected)?;
         Ok(result)
     }
 
     fn verify(&self, expected: &FileSnapshot) -> Result<(), MkoError> {
-        let fingerprint = fingerprint_file(&self.path)?;
-        let size_bytes = fs::metadata(&self.path)
-            .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))?
-            .len();
-        if fingerprint != expected.fingerprint || size_bytes != expected.size_bytes {
+        let mut file = self
+            .file
+            .as_ref()
+            .ok_or_else(|| MkoError::new("runtime_write_failed", "snapshot handle is missing"))?
+            .try_clone()
+            .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))?;
+        let actual = fingerprint_open_file(&mut file)?;
+        if actual.fingerprint != expected.fingerprint || actual.size_bytes != expected.size_bytes {
             return Err(MkoError::new(
                 "fingerprint_changed",
                 "runtime PDF snapshot does not match the registered fingerprint and size",
@@ -429,11 +475,31 @@ impl Snapshot {
         }
         Ok(())
     }
+
+    fn clone_file(&self) -> Result<File, MkoError> {
+        self.file
+            .as_ref()
+            .ok_or_else(|| MkoError::new("runtime_write_failed", "snapshot handle is missing"))
+            .and_then(|file| {
+                file.try_clone()
+                    .map_err(|error| MkoError::new("runtime_write_failed", error.to_string()))
+            })
+    }
+}
+
+impl std::fmt::Debug for Snapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Snapshot")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Drop for Snapshot {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        drop(self.file.take());
+        let _ = self.directory.remove_file(&self.name);
     }
 }
 
@@ -443,7 +509,7 @@ mod tests {
 
     use cap_std::{ambient_authority, fs::Dir};
 
-    use super::Snapshot;
+    use super::{Snapshot, runtime_paths, write_runtime};
     use crate::fingerprint::fingerprint_open_file;
 
     #[test]
@@ -457,7 +523,7 @@ mod tests {
         let expected = fingerprint_open_file(&mut provider).unwrap();
         let prepared = root.path().join("prepared");
         fs::create_dir(&prepared).unwrap();
-        let output = prepared.clone();
+        let output = Dir::open_ambient_dir(&prepared, ambient_authority()).unwrap();
         let source_for_hook = source_path.clone();
         let original_for_hook = Arc::clone(&original);
 
@@ -479,5 +545,69 @@ mod tests {
         assert_eq!(error.code(), "fingerprint_changed");
         assert_eq!(fs::read(source_path).unwrap(), *original);
         assert_eq!(fs::read_dir(prepared).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_snapshot_directory_handle_prevents_post_validation_escape() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = root.path().join("repository");
+        let outside = root.path().join("outside");
+        fs::create_dir(&repository).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let asset_id = format!("personal-asset-{}", "a".repeat(64));
+        let output = repository
+            .join(".knowledge-os/runtime/prepared")
+            .join(format!("{asset_id}.json"));
+        let runtime = runtime_paths(&repository, &repository, &asset_id, &output).unwrap();
+        let retained = repository.join(".knowledge-os/runtime/snapshots-retained");
+        fs::rename(
+            repository.join(".knowledge-os/runtime/snapshots"),
+            &retained,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside, repository.join(".knowledge-os/runtime/snapshots"))
+            .unwrap();
+        let provider_root = root.path().join("provider");
+        fs::create_dir(&provider_root).unwrap();
+        fs::write(provider_root.join("paper.pdf"), b"%PDF-retained bytes").unwrap();
+        let provider_dir = Dir::open_ambient_dir(&provider_root, ambient_authority()).unwrap();
+        let mut provider = provider_dir.open("paper.pdf").unwrap();
+        let expected = fingerprint_open_file(&mut provider).unwrap();
+
+        let snapshot =
+            Snapshot::copy_from(&runtime.snapshots, &asset_id, &mut provider, &expected).unwrap();
+
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(&retained).unwrap().count(), 1);
+        drop(snapshot);
+        assert_eq!(fs::read_dir(&retained).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_prepared_directory_handle_prevents_post_validation_escape() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = root.path().join("repository");
+        let outside = root.path().join("outside");
+        fs::create_dir(&repository).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let asset_id = format!("personal-asset-{}", "b".repeat(64));
+        let output = repository
+            .join(".knowledge-os/runtime/prepared")
+            .join(format!("{asset_id}.json"));
+        let runtime = runtime_paths(&repository, &repository, &asset_id, &output).unwrap();
+        let retained = repository.join(".knowledge-os/runtime/prepared-retained");
+        fs::rename(repository.join(".knowledge-os/runtime/prepared"), &retained).unwrap();
+        std::os::unix::fs::symlink(&outside, repository.join(".knowledge-os/runtime/prepared"))
+            .unwrap();
+
+        write_runtime(&runtime.prepared, &runtime.output_name, b"retained bundle").unwrap();
+
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+        assert_eq!(
+            fs::read(retained.join(&runtime.output_name)).unwrap(),
+            b"retained bundle"
+        );
     }
 }

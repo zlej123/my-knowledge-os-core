@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 use mko_core::{
     model::AssetStatus,
-    pdf::{ExtractionWorkerResponse, extract_pdf_pages, worker_executable},
+    pdf::{ExtractionWorkerResponse, extract_pdf_pages_from_reader, worker_executable},
     prepare::{PrepareRequest, prepare_source},
     registry::{
         AssetOperationRequest, CaptureRequest, accept_changed_asset, capture_asset, inspect_asset,
@@ -32,7 +32,7 @@ enum Command {
     Human,
     Hooks,
     #[command(name = "__extract-pdf", hide = true)]
-    ExtractPdf(ExtractPdfArgs),
+    ExtractPdf,
 }
 
 #[derive(Subcommand)]
@@ -100,12 +100,6 @@ struct PrepareArgs {
     output: PathBuf,
     #[arg(long)]
     clear_stale_lock: bool,
-}
-
-#[derive(Args)]
-struct ExtractPdfArgs {
-    #[arg(long)]
-    file: PathBuf,
 }
 
 fn main() {
@@ -180,7 +174,7 @@ fn run(cli: Cli) -> Result<(), mko_core::error::MkoError> {
         Command::Source {
             command: SourceCommand::Prepare(arguments),
         } => prepare(arguments),
-        Command::ExtractPdf(arguments) => extract_pdf(arguments),
+        Command::ExtractPdf => extract_pdf(),
         Command::Human | Command::Hooks => Ok(()),
     }
 }
@@ -196,8 +190,8 @@ fn prepare(arguments: PrepareArgs) -> Result<(), mko_core::error::MkoError> {
     Ok(())
 }
 
-fn extract_pdf(arguments: ExtractPdfArgs) -> Result<(), mko_core::error::MkoError> {
-    let response = match extract_pdf_pages(&arguments.file) {
+fn extract_pdf() -> Result<(), mko_core::error::MkoError> {
+    let response = match extract_pdf_pages_from_reader(std::io::stdin().lock()) {
         Ok(pages) => ExtractionWorkerResponse::Success { pages },
         Err(error) => ExtractionWorkerResponse::Error {
             code: error.code().into(),

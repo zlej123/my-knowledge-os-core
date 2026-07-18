@@ -5,14 +5,22 @@ mod support;
 use std::{fs, path::PathBuf};
 
 use mko_core::{
+    fingerprint::FileSnapshot,
     model::AssetStatus,
-    pdf::extract_pdf_pages,
+    pdf::extract_pdf_pages_from_reader,
     prepare::{PrepareRequest, prepare_source_with_extractor},
     registry::{CaptureRequest, capture_asset, read_asset},
 };
 use tempfile::TempDir;
 
 use pdf_fixture::write_pdf;
+
+fn extract_snapshot(
+    snapshot: cap_std::fs::File,
+    _: &FileSnapshot,
+) -> Result<Vec<String>, mko_core::error::MkoError> {
+    extract_pdf_pages_from_reader(snapshot)
+}
 
 struct TestEnv {
     _root: TempDir,
@@ -81,7 +89,7 @@ impl TestEnv {
     fn prepare(
         &self,
     ) -> Result<mko_core::prepare::PreparedSourceBundle, mko_core::error::MkoError> {
-        prepare_source_with_extractor(self.request(), extract_pdf_pages)
+        prepare_source_with_extractor(self.request(), extract_snapshot)
     }
 }
 
@@ -142,9 +150,9 @@ fn page_limit_is_enforced_by_the_extraction_worker() {
     let env = TestEnv::with_pdf_pages(1001);
     let mut called = false;
 
-    let error = prepare_source_with_extractor(env.request(), |_| {
+    let error = prepare_source_with_extractor(env.request(), |snapshot, _| {
         called = true;
-        extract_pdf_pages(&env.provider.join("paper.pdf"))
+        extract_pdf_pages_from_reader(snapshot)
     })
     .unwrap_err();
 
@@ -158,7 +166,8 @@ fn rejects_more_than_twenty_mebibytes_of_extracted_text() {
     let env = TestEnv::with_pdf(&["small"]);
     let oversized = "x".repeat(20 * 1024 * 1024 + 1);
 
-    let error = prepare_source_with_extractor(env.request(), |_| Ok(vec![oversized])).unwrap_err();
+    let error =
+        prepare_source_with_extractor(env.request(), |_, _| Ok(vec![oversized])).unwrap_err();
 
     assert_eq!(error.code(), "extracted_text_too_large");
     assert!(!env.output().exists());
@@ -172,7 +181,7 @@ fn rejects_output_outside_runtime_without_extracting() {
         .with_local_config(&env.local_config);
     let mut called = false;
 
-    let error = prepare_source_with_extractor(request, |_| {
+    let error = prepare_source_with_extractor(request, |_, _| {
         called = true;
         Ok(vec!["small".into()])
     })
@@ -193,7 +202,8 @@ fn rejects_runtime_lock_path_as_a_prepared_output() {
     let request = PrepareRequest::new(&env.repository, &env.asset_id, lock_path)
         .with_local_config(&env.local_config);
 
-    let error = prepare_source_with_extractor(request, |_| Ok(vec!["small".into()])).unwrap_err();
+    let error =
+        prepare_source_with_extractor(request, |_, _| Ok(vec!["small".into()])).unwrap_err();
 
     assert_eq!(error.code(), "runtime_output_invalid");
 }
@@ -208,7 +218,8 @@ fn rejects_prepared_output_named_for_a_different_asset() {
     let request = PrepareRequest::new(&env.repository, &env.asset_id, wrong)
         .with_local_config(&env.local_config);
 
-    let error = prepare_source_with_extractor(request, |_| Ok(vec!["small".into()])).unwrap_err();
+    let error =
+        prepare_source_with_extractor(request, |_, _| Ok(vec!["small".into()])).unwrap_err();
 
     assert_eq!(error.code(), "runtime_output_invalid");
 }
@@ -228,7 +239,7 @@ fn two_assets_cannot_publish_to_the_same_prepared_output() {
     let request = PrepareRequest::new(&env.repository, &second_id, shared_output)
         .with_local_config(&env.local_config);
 
-    let error = prepare_source_with_extractor(request, extract_pdf_pages).unwrap_err();
+    let error = prepare_source_with_extractor(request, extract_snapshot).unwrap_err();
 
     assert_eq!(error.code(), "runtime_output_invalid");
 }
@@ -252,10 +263,78 @@ fn rejects_a_runtime_root_symlink_that_escapes_the_repository() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn rejects_a_static_prepared_symlink() {
+    let env = TestEnv::with_pdf(&["small"]);
+    let outside = env._root.path().join("outside-prepared");
+    fs::create_dir_all(&outside).unwrap();
+    fs::create_dir_all(env.repository.join(".knowledge-os/runtime")).unwrap();
+    std::os::unix::fs::symlink(
+        &outside,
+        env.repository.join(".knowledge-os/runtime/prepared"),
+    )
+    .unwrap();
+
+    let error = env.prepare().unwrap_err();
+
+    assert_eq!(error.code(), "runtime_path_invalid");
+    assert_eq!(fs::read_dir(outside).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_a_static_snapshots_symlink() {
+    let env = TestEnv::with_pdf(&["small"]);
+    let outside = env._root.path().join("outside-snapshots");
+    fs::create_dir_all(&outside).unwrap();
+    fs::create_dir_all(env.repository.join(".knowledge-os/runtime")).unwrap();
+    std::os::unix::fs::symlink(
+        &outside,
+        env.repository.join(".knowledge-os/runtime/snapshots"),
+    )
+    .unwrap();
+
+    let error = env.prepare().unwrap_err();
+
+    assert_eq!(error.code(), "runtime_path_invalid");
+    assert_eq!(fs::read_dir(outside).unwrap().count(), 0);
+}
+
 #[test]
 fn rejects_a_non_directory_runtime_component() {
     let env = TestEnv::with_pdf(&["small"]);
     fs::write(env.repository.join(".knowledge-os"), b"not a directory").unwrap();
+
+    let error = env.prepare().unwrap_err();
+
+    assert_eq!(error.code(), "runtime_path_invalid");
+}
+
+#[test]
+fn rejects_a_non_directory_prepared_component() {
+    let env = TestEnv::with_pdf(&["small"]);
+    fs::create_dir_all(env.repository.join(".knowledge-os/runtime")).unwrap();
+    fs::write(
+        env.repository.join(".knowledge-os/runtime/prepared"),
+        b"not a directory",
+    )
+    .unwrap();
+
+    let error = env.prepare().unwrap_err();
+
+    assert_eq!(error.code(), "runtime_path_invalid");
+}
+
+#[test]
+fn rejects_a_non_directory_snapshots_component() {
+    let env = TestEnv::with_pdf(&["small"]);
+    fs::create_dir_all(env.repository.join(".knowledge-os/runtime")).unwrap();
+    fs::write(
+        env.repository.join(".knowledge-os/runtime/snapshots"),
+        b"not a directory",
+    )
+    .unwrap();
 
     let error = env.prepare().unwrap_err();
 
@@ -282,8 +361,8 @@ fn failed_atomic_publication_leaves_asset_registered() {
 fn provider_replacement_during_extraction_discards_the_bundle() {
     let env = TestEnv::with_pdf(&["original"]);
 
-    let error = prepare_source_with_extractor(env.request(), |snapshot| {
-        let pages = extract_pdf_pages(snapshot)?;
+    let error = prepare_source_with_extractor(env.request(), |snapshot, _| {
+        let pages = extract_pdf_pages_from_reader(snapshot)?;
         let replacement = env.provider.join("replacement.pdf");
         write_pdf(&replacement, &["replacement".into()]);
         fs::rename(replacement, env.provider.join("paper.pdf")).unwrap();
