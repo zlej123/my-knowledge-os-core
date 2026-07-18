@@ -55,13 +55,13 @@ pub fn transition_asset(
             "recovery must return the asset to its previous durable state",
         ));
     }
-    if matches!(
+    if recovery_transition {
+        asset.durable_state_history.pop();
+    } else if matches!(
         to,
         AssetStatus::Changed | AssetStatus::Missing | AssetStatus::Failed
     ) {
         asset.durable_state_history.push(from.clone());
-    } else if recovery_transition {
-        asset.durable_state_history.pop();
     }
     asset.asset_status = to;
     match asset.asset_status {

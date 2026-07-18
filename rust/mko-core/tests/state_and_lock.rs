@@ -377,6 +377,46 @@ fn failed_recovery_returns_to_changed_missing_and_superseded_checkpoints() {
 }
 
 #[test]
+fn failed_recovery_pops_its_checkpoint_before_restoring_changed_missing_or_superseded() {
+    let env = TestEnv::with_asset();
+
+    let mut changed = env.old_asset();
+    transition_asset(&mut changed, AssetStatus::Changed, fixed_time()).unwrap();
+    transition_asset(&mut changed, AssetStatus::Failed, fixed_time()).unwrap();
+    transition_asset(&mut changed, AssetStatus::Changed, fixed_time()).unwrap();
+    transition_asset(&mut changed, AssetStatus::Registered, fixed_time()).unwrap();
+    assert_eq!(changed.asset_status, AssetStatus::Registered);
+    assert!(changed.durable_state_history.is_empty());
+
+    let mut missing = env.old_asset();
+    transition_asset(&mut missing, AssetStatus::Missing, fixed_time()).unwrap();
+    transition_asset(&mut missing, AssetStatus::Failed, fixed_time()).unwrap();
+    transition_asset(&mut missing, AssetStatus::Missing, fixed_time()).unwrap();
+    transition_asset(&mut missing, AssetStatus::Registered, fixed_time()).unwrap();
+    assert_eq!(missing.asset_status, AssetStatus::Registered);
+    assert!(missing.durable_state_history.is_empty());
+
+    let mut superseded = env.old_asset();
+    transition_asset(&mut superseded, AssetStatus::Changed, fixed_time()).unwrap();
+    transition_asset(&mut superseded, AssetStatus::Superseded, fixed_time()).unwrap();
+    transition_asset(&mut superseded, AssetStatus::Failed, fixed_time()).unwrap();
+    transition_asset(&mut superseded, AssetStatus::Superseded, fixed_time()).unwrap();
+    assert_eq!(superseded.asset_status, AssetStatus::Superseded);
+    assert_eq!(
+        superseded.durable_state_history,
+        vec![AssetStatus::Registered]
+    );
+
+    for history in [
+        &changed.durable_state_history,
+        &missing.durable_state_history,
+        &superseded.durable_state_history,
+    ] {
+        assert!(!history.contains(&AssetStatus::Failed));
+    }
+}
+
+#[test]
 fn changed_asset_is_superseded_by_new_content_record() {
     let env = TestEnv::with_asset();
     env.replace_provider_bytes(b"%PDF-1.7\nnew-content");
