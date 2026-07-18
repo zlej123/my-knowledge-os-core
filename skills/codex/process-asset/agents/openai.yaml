@@ -1,0 +1,4 @@
+interface:
+  display_name: "Process Asset"
+  short_description: "Create a pending Source from a captured PDF"
+  default_prompt: "Use $process-asset to process this captured PDF Asset into a pending Source draft."

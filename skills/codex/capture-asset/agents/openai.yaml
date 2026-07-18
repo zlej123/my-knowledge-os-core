@@ -1,0 +1,4 @@
+interface:
+  display_name: "Capture Asset"
+  short_description: "Register a Personal PDF without modifying it"
+  default_prompt: "Use $capture-asset to register this Personal PDF and report its Asset ID."
