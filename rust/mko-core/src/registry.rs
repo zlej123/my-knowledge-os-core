@@ -8,13 +8,16 @@ use chrono_tz::Asia::Seoul;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
-    atomic::{AtomicWriteResult, write_new},
+    atomic::{AtomicWriteResult, write_new, write_replace},
+    clock::{Clock, SystemClock},
     config::load_capture_config,
     error::MkoError,
     fingerprint::{asset_id, fingerprint_open_file, validate_pdf_content},
     front_matter::{parse_markdown, render_markdown},
+    lock::AssetLock,
     model::{AssetRecord, AssetStatus, Classification, LastError, LastSuccessfulStep, Provider},
-    path_policy::{provider_path, registry_directory, validate_ascii_slug},
+    path_policy::{canonical_directory, provider_path, registry_directory, validate_ascii_slug},
+    state::{previous_durable_state, transition_asset},
 };
 
 #[derive(Clone, Debug)]
@@ -72,6 +75,205 @@ pub struct CaptureResult {
     pub result: String,
     pub asset_id: String,
     pub registry_path: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct AssetOperationRequest {
+    repository_root: PathBuf,
+    local_config_path: Option<PathBuf>,
+    asset_id: String,
+    clear_stale_lock: bool,
+}
+
+impl AssetOperationRequest {
+    pub fn new(repository_root: impl AsRef<Path>, asset_id: impl Into<String>) -> Self {
+        Self {
+            repository_root: repository_root.as_ref().to_path_buf(),
+            local_config_path: None,
+            asset_id: asset_id.into(),
+            clear_stale_lock: false,
+        }
+    }
+
+    pub fn with_local_config(mut self, path: impl AsRef<Path>) -> Self {
+        self.local_config_path = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn with_clear_stale_lock(mut self, clear_stale_lock: bool) -> Self {
+        self.clear_stale_lock = clear_stale_lock;
+        self
+    }
+}
+
+pub fn inspect_asset(request: AssetOperationRequest) -> Result<AssetRecord, MkoError> {
+    inspect_asset_with_clock(request, &SystemClock)
+}
+
+pub fn inspect_asset_with_clock(
+    request: AssetOperationRequest,
+    clock: &dyn Clock,
+) -> Result<AssetRecord, MkoError> {
+    let config = load_capture_config(
+        &request.repository_root,
+        request.local_config_path.as_deref(),
+    )?;
+    let _lock = AssetLock::acquire(
+        &config.repository_root,
+        &request.asset_id,
+        "mko asset inspect",
+        clock,
+        request.clear_stale_lock,
+    )?;
+    let (mut asset, body, path) = read_asset_document(&config.repository_root, &request.asset_id)?;
+    if asset.asset_status == AssetStatus::Superseded {
+        return Ok(asset);
+    }
+    let candidate = config.provider_root.join(&asset.provider.locator);
+    if !candidate.exists() {
+        if asset.asset_status != AssetStatus::Missing {
+            transition_asset(&mut asset, AssetStatus::Missing, clock.now_utc())?;
+            write_asset(&path, &asset, &body)?;
+        }
+        return Ok(asset);
+    }
+    let mut provider_file = provider_path(&config.provider_root, &candidate)?.file;
+    let snapshot = fingerprint_open_file(&mut provider_file)?;
+    if snapshot.fingerprint != asset.fingerprint {
+        if asset.asset_status != AssetStatus::Changed {
+            transition_asset(&mut asset, AssetStatus::Changed, clock.now_utc())?;
+            write_asset(&path, &asset, &body)?;
+        }
+    } else if matches!(
+        asset.asset_status,
+        AssetStatus::Changed | AssetStatus::Missing
+    ) {
+        let previous = previous_durable_state(&asset);
+        transition_asset(&mut asset, previous, clock.now_utc())?;
+        write_asset(&path, &asset, &body)?;
+    }
+    Ok(asset)
+}
+
+pub fn accept_changed_asset(request: AssetOperationRequest) -> Result<AssetRecord, MkoError> {
+    accept_changed_asset_with_clock(request, &SystemClock)
+}
+
+pub fn accept_changed_asset_with_clock(
+    request: AssetOperationRequest,
+    clock: &dyn Clock,
+) -> Result<AssetRecord, MkoError> {
+    let config = load_capture_config(
+        &request.repository_root,
+        request.local_config_path.as_deref(),
+    )?;
+    let _lock = AssetLock::acquire(
+        &config.repository_root,
+        &request.asset_id,
+        "mko asset accept-change",
+        clock,
+        request.clear_stale_lock,
+    )?;
+    let (mut old_asset, old_body, old_path) =
+        read_asset_document(&config.repository_root, &request.asset_id)?;
+    if old_asset.asset_status != AssetStatus::Changed {
+        return Err(MkoError::new(
+            "invalid_state_transition",
+            "accept-change requires an asset in the changed state",
+        ));
+    }
+    let candidate = config.provider_root.join(&old_asset.provider.locator);
+    let mut provider_file = provider_path(&config.provider_root, &candidate)?.file;
+    let snapshot = fingerprint_open_file(&mut provider_file)?;
+    if snapshot.fingerprint == old_asset.fingerprint {
+        return Err(MkoError::new(
+            "change_not_detected",
+            "provider content matches the original asset fingerprint",
+        ));
+    }
+    let new_id = asset_id(&snapshot.fingerprint)?;
+    let now = clock.now_utc();
+    let new_asset = AssetRecord {
+        id: new_id.clone(),
+        record_type: "asset".into(),
+        schema_version: 1,
+        scope: "personal".into(),
+        title: old_asset.title.clone(),
+        classification: old_asset.classification.clone(),
+        asset_class: old_asset.asset_class.clone(),
+        media_type: old_asset.media_type.clone(),
+        provider: old_asset.provider.clone(),
+        size_bytes: snapshot.size_bytes,
+        modified_at: DateTime::<Utc>::from(snapshot.modified_at.into_std()),
+        fingerprint: snapshot.fingerprint,
+        asset_status: AssetStatus::Registered,
+        supersedes: Some(old_asset.id.clone()),
+        last_successful_step: LastSuccessfulStep::Registered,
+        last_error: LastError {
+            code: None,
+            retryable: false,
+        },
+        created_at: now,
+        updated_at: now,
+    };
+    let registry = registry_directory(&config.repository_root)?;
+    let new_path = registry.join(format!("{new_id}.md"));
+    let new_body = registry_body(now, &new_asset.provider.locator);
+    let document = render_markdown(&new_asset, &new_body)?;
+    match write_new(&new_path, document.as_bytes(), |existing| {
+        validate_accepted_successor(existing, &new_asset)
+    })? {
+        AtomicWriteResult::Created | AtomicWriteResult::Existing => {}
+    }
+
+    transition_asset(&mut old_asset, AssetStatus::Superseded, now)?;
+    write_asset(&old_path, &old_asset, &old_body)?;
+    Ok(new_asset)
+}
+
+pub fn repair_lineage(request: AssetOperationRequest) -> Result<(), MkoError> {
+    repair_lineage_with_clock(request, &SystemClock)
+}
+
+pub fn repair_lineage_with_clock(
+    request: AssetOperationRequest,
+    clock: &dyn Clock,
+) -> Result<(), MkoError> {
+    let config = load_capture_config(
+        &request.repository_root,
+        request.local_config_path.as_deref(),
+    )?;
+    let _lock = AssetLock::acquire(
+        &config.repository_root,
+        &request.asset_id,
+        "mko asset repair-lineage",
+        clock,
+        request.clear_stale_lock,
+    )?;
+    let (mut old_asset, body, path) =
+        read_asset_document(&config.repository_root, &request.asset_id)?;
+    if old_asset.asset_status == AssetStatus::Superseded {
+        return Ok(());
+    }
+    if old_asset.asset_status != AssetStatus::Changed {
+        return Err(MkoError::new(
+            "invalid_state_transition",
+            "repair-lineage requires an asset in the changed state",
+        ));
+    }
+    if !has_successor(&config.repository_root, &old_asset.id)? {
+        return Err(MkoError::new(
+            "relation_missing",
+            "no authoritative successor registry record supersedes this asset",
+        ));
+    }
+    transition_asset(&mut old_asset, AssetStatus::Superseded, clock.now_utc())?;
+    write_asset(&path, &old_asset, &body)
+}
+
+pub fn read_asset(repository_root: &Path, asset_id: &str) -> Result<AssetRecord, MkoError> {
+    let repository_root = canonical_directory(repository_root, "repository_root_invalid")?;
+    read_asset_document(&repository_root, asset_id).map(|(asset, _, _)| asset)
 }
 
 pub fn capture_asset(request: CaptureRequest) -> Result<CaptureResult, MkoError> {
@@ -197,6 +399,87 @@ fn validate_existing(
         ));
     }
     Ok(())
+}
+
+fn read_asset_document(
+    repository_root: &Path,
+    asset_id: &str,
+) -> Result<(AssetRecord, String, PathBuf), MkoError> {
+    validate_asset_id(asset_id)?;
+    let registry = registry_directory(repository_root)?;
+    let path = registry.join(format!("{asset_id}.md"));
+    let input = fs::read_to_string(&path).map_err(|error| {
+        let code = if error.kind() == std::io::ErrorKind::NotFound {
+            "registry_not_found"
+        } else {
+            "registry_unreadable"
+        };
+        MkoError::new(code, error.to_string())
+    })?;
+    let document = parse_markdown::<AssetRecord>(&input)?;
+    if document.metadata.id != asset_id {
+        return Err(MkoError::new(
+            "registry_conflict",
+            "registry filename and asset ID disagree",
+        ));
+    }
+    Ok((document.metadata, document.body, path))
+}
+
+fn write_asset(path: &Path, asset: &AssetRecord, body: &str) -> Result<(), MkoError> {
+    let document = render_markdown(asset, body)?;
+    write_replace(path, document.as_bytes())
+}
+
+fn validate_asset_id(asset_id: &str) -> Result<(), MkoError> {
+    if asset_id.is_empty()
+        || !asset_id.starts_with("personal-asset-")
+        || asset_id.contains(['/', '\\'])
+        || Path::new(asset_id).components().count() != 1
+    {
+        return Err(MkoError::new(
+            "asset_id_invalid",
+            "asset ID must be a single personal asset identifier",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_accepted_successor(path: &Path, expected: &AssetRecord) -> Result<(), MkoError> {
+    let input = fs::read_to_string(path)
+        .map_err(|error| MkoError::new("registry_unreadable", error.to_string()))?;
+    let existing: AssetRecord = parse_markdown(&input)?.metadata;
+    if existing.id != expected.id
+        || existing.fingerprint != expected.fingerprint
+        || existing.supersedes != expected.supersedes
+    {
+        return Err(MkoError::new(
+            "registry_conflict",
+            "deterministic successor registry path contains a different asset lineage",
+        ));
+    }
+    Ok(())
+}
+
+fn has_successor(repository_root: &Path, old_asset_id: &str) -> Result<bool, MkoError> {
+    let registry = registry_directory(repository_root)?;
+    for entry in fs::read_dir(registry)
+        .map_err(|error| MkoError::new("registry_unreadable", error.to_string()))?
+    {
+        let entry =
+            entry.map_err(|error| MkoError::new("registry_unreadable", error.to_string()))?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("md") {
+            continue;
+        }
+        let input = fs::read_to_string(&path)
+            .map_err(|error| MkoError::new("registry_unreadable", error.to_string()))?;
+        let asset: AssetRecord = parse_markdown(&input)?.metadata;
+        if asset.supersedes.as_deref() == Some(old_asset_id) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn title_from_logical_path(path: &str, id: &str) -> String {

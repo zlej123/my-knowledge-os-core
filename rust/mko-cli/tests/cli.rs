@@ -111,6 +111,50 @@ fn asset_capture_emits_complete_json_for_usage_errors() {
     );
 }
 
+#[test]
+#[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
+fn asset_lifecycle_commands_report_a_changed_asset_and_its_successor() {
+    let env = CliTestEnv::new();
+    let pdf = env.provider.join("paper.pdf");
+    fs::write(&pdf, b"%PDF-1.7\noriginal").unwrap();
+    let captured = env.capture_json(&pdf);
+    let old_asset_id = captured["asset_id"].as_str().unwrap();
+    fs::write(&pdf, b"%PDF-1.7\nreplacement").unwrap();
+
+    let inspected = Command::cargo_bin("mko")
+        .unwrap()
+        .args(env.lifecycle_arguments("inspect", old_asset_id))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        parse_json(&inspected),
+        json!({
+            "result": "changed",
+            "asset_id": old_asset_id,
+        })
+    );
+
+    let accepted = Command::cargo_bin("mko")
+        .unwrap()
+        .args(env.lifecycle_arguments("accept-change", old_asset_id))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let accepted = parse_json(&accepted);
+    assert_eq!(accepted["result"], "accepted");
+    assert_eq!(accepted["supersedes"], old_asset_id);
+    assert!(
+        accepted["asset_id"]
+            .as_str()
+            .is_some_and(|asset_id| asset_id != old_asset_id)
+    );
+}
+
 struct CliTestEnv {
     root: PathBuf,
     repository: PathBuf,
@@ -169,6 +213,20 @@ impl CliTestEnv {
             self.local_config.display().to_string(),
             "--file".into(),
             pdf.display().to_string(),
+            "--json".into(),
+        ]
+    }
+
+    fn lifecycle_arguments(&self, command: &str, asset_id: &str) -> Vec<String> {
+        vec![
+            "asset".into(),
+            command.into(),
+            "--repo".into(),
+            self.repository.display().to_string(),
+            "--local-config".into(),
+            self.local_config.display().to_string(),
+            "--asset-id".into(),
+            asset_id.into(),
             "--json".into(),
         ]
     }

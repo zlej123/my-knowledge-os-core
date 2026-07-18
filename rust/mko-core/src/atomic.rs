@@ -82,6 +82,64 @@ where
     write_result
 }
 
+pub fn write_replace(path: &Path, bytes: &[u8]) -> Result<(), MkoError> {
+    let parent = path.parent().ok_or_else(|| {
+        MkoError::new(
+            "registry_write_failed",
+            "registry path has no parent directory",
+        )
+    })?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            MkoError::new(
+                "registry_write_failed",
+                "registry filename must be valid UTF-8",
+            )
+        })?;
+    let _lock = PublicationLock::acquire(parent, filename)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(MkoError::new(
+                "registry_destination_invalid",
+                "registry destination exists but is not a regular file",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(MkoError::new(
+                "registry_not_found",
+                "registry record does not exist",
+            ));
+        }
+        Err(error) => return Err(MkoError::new("registry_write_failed", error.to_string())),
+    }
+    let temporary = parent.join(format!(
+        ".{filename}.{}.{}.tmp",
+        std::process::id(),
+        NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+    let write_result: Result<(), MkoError> = (|| {
+        file.write_all(bytes)
+            .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+        file.sync_all()
+            .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+        drop(file);
+        fs::rename(&temporary, path)
+            .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+        sync_directory(parent)?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&temporary);
+    write_result
+}
+
 struct PublicationLock {
     path: std::path::PathBuf,
 }

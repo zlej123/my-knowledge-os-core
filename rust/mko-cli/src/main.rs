@@ -1,7 +1,13 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use mko_core::registry::{CaptureRequest, capture_asset};
+use mko_core::{
+    model::AssetStatus,
+    registry::{
+        AssetOperationRequest, CaptureRequest, accept_changed_asset, capture_asset, inspect_asset,
+        repair_lineage,
+    },
+};
 
 #[derive(Parser)]
 #[command(name = "mko", version, about = "My Knowledge OS deterministic core")]
@@ -25,6 +31,9 @@ enum Command {
 #[derive(Subcommand)]
 enum AssetCommand {
     Capture(CaptureArgs),
+    Inspect(AssetOperationArgs),
+    AcceptChange(AssetOperationArgs),
+    RepairLineage(AssetOperationArgs),
 }
 
 #[derive(Args)]
@@ -41,6 +50,20 @@ struct CaptureArgs {
     domains: Vec<String>,
     #[arg(long)]
     slug: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct AssetOperationArgs {
+    #[arg(long)]
+    repo: PathBuf,
+    #[arg(long)]
+    local_config: Option<PathBuf>,
+    #[arg(long)]
+    asset_id: String,
+    #[arg(long)]
+    clear_stale_lock: bool,
     #[arg(long)]
     json: bool,
 }
@@ -74,7 +97,10 @@ fn cli_requests_json(cli: &Cli) -> bool {
     matches!(
         &cli.command,
         Command::Asset {
-            command: AssetCommand::Capture(CaptureArgs { json: true, .. }),
+            command: AssetCommand::Capture(CaptureArgs { json: true, .. })
+                | AssetCommand::Inspect(AssetOperationArgs { json: true, .. })
+                | AssetCommand::AcceptChange(AssetOperationArgs { json: true, .. })
+                | AssetCommand::RepairLineage(AssetOperationArgs { json: true, .. }),
         }
     )
 }
@@ -101,6 +127,15 @@ fn run(cli: Cli) -> Result<(), mko_core::error::MkoError> {
         Command::Asset {
             command: AssetCommand::Capture(arguments),
         } => capture(arguments),
+        Command::Asset {
+            command: AssetCommand::Inspect(arguments),
+        } => inspect(arguments),
+        Command::Asset {
+            command: AssetCommand::AcceptChange(arguments),
+        } => accept_change(arguments),
+        Command::Asset {
+            command: AssetCommand::RepairLineage(arguments),
+        } => repair_asset_lineage(arguments),
         Command::Source | Command::Check | Command::Human | Command::Hooks => Ok(()),
     }
 }
@@ -130,4 +165,84 @@ fn capture(arguments: CaptureArgs) -> Result<(), mko_core::error::MkoError> {
         );
     }
     Ok(())
+}
+
+fn inspect(arguments: AssetOperationArgs) -> Result<(), mko_core::error::MkoError> {
+    let json = arguments.json;
+    let asset = inspect_asset(operation_request(&arguments))?;
+    let status = asset_status_name(&asset.asset_status);
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "result": status,
+                "asset_id": asset.id,
+            })
+        );
+    } else {
+        println!("{status} {}", asset.id);
+    }
+    Ok(())
+}
+
+fn accept_change(arguments: AssetOperationArgs) -> Result<(), mko_core::error::MkoError> {
+    let json = arguments.json;
+    let asset = accept_changed_asset(operation_request(&arguments))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "result": "accepted",
+                "asset_id": asset.id,
+                "supersedes": asset.supersedes,
+            })
+        );
+    } else {
+        println!(
+            "accepted {} supersedes {}",
+            asset.id,
+            asset.supersedes.unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+fn repair_asset_lineage(arguments: AssetOperationArgs) -> Result<(), mko_core::error::MkoError> {
+    let json = arguments.json;
+    let asset_id = arguments.asset_id.clone();
+    repair_lineage(operation_request(&arguments))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "result": "repaired",
+                "asset_id": asset_id,
+            })
+        );
+    } else {
+        println!("repaired {asset_id}");
+    }
+    Ok(())
+}
+
+fn operation_request(arguments: &AssetOperationArgs) -> AssetOperationRequest {
+    let mut request = AssetOperationRequest::new(&arguments.repo, &arguments.asset_id)
+        .with_clear_stale_lock(arguments.clear_stale_lock);
+    if let Some(local_config) = &arguments.local_config {
+        request = request.with_local_config(local_config);
+    }
+    request
+}
+
+fn asset_status_name(status: &AssetStatus) -> &'static str {
+    match status {
+        AssetStatus::Registered => "registered",
+        AssetStatus::Extracted => "extracted",
+        AssetStatus::ReviewPending => "review_pending",
+        AssetStatus::Processed => "processed",
+        AssetStatus::Changed => "changed",
+        AssetStatus::Missing => "missing",
+        AssetStatus::Superseded => "superseded",
+        AssetStatus::Failed => "failed",
+    }
 }
