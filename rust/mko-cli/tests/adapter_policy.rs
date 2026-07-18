@@ -68,13 +68,30 @@ fn command_key(surface: &str) -> Option<String> {
     let lowercase_command_name = executable
         .bytes()
         .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_".contains(&byte));
-    let absolute_command_path = executable.starts_with('/');
-    let uppercase_hyphenated_command =
-        executable.contains('-') && executable.bytes().any(|byte| byte.is_ascii_uppercase());
-    let looks_like_inline_command = absolute_command_path
-        || uppercase_hyphenated_command
+    let unix_command_path = executable.starts_with('/')
+        || executable.starts_with("./")
+        || executable.starts_with("../");
+    let windows_command_path = executable
+        .as_bytes()
+        .get(1..3)
+        .is_some_and(|separator| separator == b":\\" || separator == b":/")
+        || executable.starts_with("\\\\");
+    let camel_case_command = executable
+        .bytes()
+        .enumerate()
+        .any(|(index, byte)| index > 0 && byte.is_ascii_uppercase())
+        && executable.bytes().any(|byte| byte.is_ascii_lowercase());
+    let looks_like_inline_command = unix_command_path
+        || windows_command_path
+        || camel_case_command
         || (words.len() > 1 && lowercase_command_name);
     (is_shell || looks_like_inline_command).then(|| executable.to_string())
+}
+
+fn contains_shell_syntax(command: &str) -> bool {
+    command
+        .bytes()
+        .any(|byte| matches!(byte, b'$' | b'`' | b'&' | b'|' | b';' | b'<' | b'>'))
 }
 
 fn validate_command_policy(markdown: &str, allowed: &[&str]) -> Result<(), String> {
@@ -83,17 +100,15 @@ fn validate_command_policy(markdown: &str, allowed: &[&str]) -> Result<(), Strin
             .trim()
             .strip_prefix("$ ")
             .unwrap_or_else(|| surface.trim());
-        if command
-            .bytes()
-            .any(|byte| matches!(byte, b'&' | b'|' | b';'))
-        {
-            return Err("exposes a compound command surface".into());
+        let Some(command_key) = command_key(surface) else {
+            continue;
+        };
+        if contains_shell_syntax(command) {
+            return Err("exposes command substitution, control, or redirection syntax".into());
         }
-        if let Some(command) = command_key(surface)
-            && !allowed.contains(&command.as_str())
-        {
+        if !allowed.contains(&command_key.as_str()) {
             return Err(format!(
-                "exposes command outside the adapter policy: {command}"
+                "exposes command outside the adapter policy: {command_key}"
             ));
         }
     }
@@ -249,6 +264,23 @@ fn command_policy_rejects_compound_absolute_and_uppercase_executables() {
         assert!(
             validate_command_policy(malicious, &allowed).is_err(),
             "policy accepted a compound or unclassified executable: {malicious}"
+        );
+    }
+}
+
+#[test]
+fn command_policy_rejects_substitution_redirection_and_unclassified_paths() {
+    let allowed = ["mko asset capture"];
+    for malicious in [
+        "Run `mko asset capture --repo kb --local-config local.yaml --file paper.pdf --json $(git push)`.",
+        "Run `mko asset capture --repo kb --local-config local.yaml --file paper.pdf --json > sources/published.md`.",
+        "Run `./publish args`.",
+        "Run `InvokeWebRequest`.",
+        "Run `C:\\Windows\\System32\\curl.exe https://example.invalid`.",
+    ] {
+        assert!(
+            validate_command_policy(malicious, &allowed).is_err(),
+            "policy accepted substitution, redirection, or an unclassified path: {malicious}"
         );
     }
 }
@@ -421,14 +453,19 @@ fn process_skill_uses_the_canonical_prepared_bundle_path() {
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("{} must exist and be readable: {error}", path.display()));
     let commands = executable_surfaces(&text);
-    let canonical_path = ".knowledge-os/runtime/prepared/<asset-id>.json";
+    let canonical_contract = ".knowledge-os/runtime/prepared/<asset-id>.json";
+    let canonical_example = ".knowledge-os/runtime/prepared/PERSONAL_ASSET_ID.json";
 
     assert!(
-        commands.contains(&format!("--output \"{canonical_path}\"")),
+        text.contains(canonical_contract),
+        "process Skill must state the canonical bundle-path contract"
+    );
+    assert!(
+        commands.contains(&format!("--output \"{canonical_example}\"")),
         "process Skill prepare command must use the canonical bundle path"
     );
     assert!(
-        commands.contains(&format!("--bundle \"{canonical_path}\"")),
+        commands.contains(&format!("--bundle \"{canonical_example}\"")),
         "process Skill write-draft command must reuse the canonical bundle path"
     );
     assert!(

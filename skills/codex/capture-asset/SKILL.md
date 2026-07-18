@@ -21,10 +21,10 @@ Stop without mutation when the Scope, repository config, provider root, file, or
 Run exactly one mutation command:
 
 ```bash
-mko asset capture --repo "<personal-kb-path>" --local-config "<local-config-path>" --file "<pdf-path>" --json
+mko asset capture --repo "/absolute/path/to/personal-kb" --local-config "/absolute/path/to/knowledge-os.local.yaml" --file "/absolute/path/to/document.pdf" --json
 ```
 
-Omit `--local-config` only when `MKO_LOCAL_CONFIG` already names the local config file. Optional title, domain, and ASCII slug arguments may be added only when the user supplied them.
+Replace the example path values with the actual absolute paths. Omit `--local-config` only when `MKO_LOCAL_CONFIG` already names the local config file. Optional title, domain, and ASCII slug arguments may be added only when the user supplied them.
 
 If the command reports a provider, root-boundary, hydration, secret, validation, or file error, report the error and stop. Do not work around it.
 

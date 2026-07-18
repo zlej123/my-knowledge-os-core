@@ -20,10 +20,10 @@ Stop without mutation when any precondition is missing, ambiguous, invalid, or s
 Use exactly `.knowledge-os/runtime/prepared/<asset-id>.json`, replacing `<asset-id>` with the requested Asset ID, and run:
 
 ```bash
-mko source prepare --repo "<personal-kb-path>" --local-config "<local-config-path>" --asset-id "<asset-id>" --output ".knowledge-os/runtime/prepared/<asset-id>.json"
+mko source prepare --repo "/absolute/path/to/personal-kb" --local-config "/absolute/path/to/knowledge-os.local.yaml" --asset-id "PERSONAL_ASSET_ID" --output ".knowledge-os/runtime/prepared/PERSONAL_ASSET_ID.json"
 ```
 
-Omit `--local-config` only when `MKO_LOCAL_CONFIG` already names the local config file. Stop on every error; do not bypass locks, state checks, fingerprints, provider boundaries, or PDF validation.
+Replace `PERSONAL_ASSET_ID` with the requested Asset ID and replace the example path values with the actual absolute paths. Omit `--local-config` only when `MKO_LOCAL_CONFIG` already names the local config file. Stop on every error; do not bypass locks, state checks, fingerprints, provider boundaries, or PDF validation.
 
 ## Semantic response
 
@@ -67,8 +67,8 @@ Use `null` only where the schema allows it, empty arrays for unknown lists, and 
 Store the semantic JSON in a temporary or `.knowledge-os/runtime/` file, then run:
 
 ```bash
-mko source write-draft --repo "<personal-kb-path>" --bundle ".knowledge-os/runtime/prepared/<asset-id>.json" --response "<semantic-response-path>" --json
-mko check --repo "<personal-kb-path>" --json
+mko source write-draft --repo "/absolute/path/to/personal-kb" --bundle ".knowledge-os/runtime/prepared/PERSONAL_ASSET_ID.json" --response "/absolute/path/to/semantic-response.json" --json
+mko check --repo "/absolute/path/to/personal-kb" --json
 ```
 
 Report the returned pending Source path and the check result, then stop.
