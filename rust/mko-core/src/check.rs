@@ -1,9 +1,16 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::Read,
-    path::{Component, Path, PathBuf},
+    io::{self, Read},
+    path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
+    thread,
+    time::Duration,
 };
 
 use cap_std::{ambient_authority, fs::Dir};
@@ -13,24 +20,25 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::{
     CORE_VERSION,
+    canonical_source::validate_canonical_source,
     error::MkoError,
     front_matter::parse_markdown,
     hooks::PRE_COMMIT_SCRIPT,
-    model::{
-        AssetRecord, AssetStatus, Classification, LastSuccessfulStep, ReviewStatus, SourceRecord,
-        SourceStatus,
-    },
+    model::{AssetRecord, AssetStatus, Classification, ReviewStatus, SourceRecord, SourceStatus},
+    path_policy::validate_portable_relative_path,
     pdf::{EXTRACTOR_NAME, EXTRACTOR_VERSION},
     prepare::{PROCESSOR_VERSION, PROMPT_VERSION},
     revision::calculate_source_revision,
     secret,
-    state::transition_allowed,
+    state::validate_asset_state,
 };
 
 const MAX_CHECK_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_CHECK_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_CHECK_FILES: usize = 20_000;
 const MAX_GIT_LIST_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_RUNTIME_LOCKS: usize = 4_096;
+const MAX_RUNTIME_LOCK_BYTES: u64 = 16 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct CheckRequest {
@@ -318,46 +326,8 @@ fn validate_asset(path: &str, asset: &AssetRecord, issues: &mut Vec<CheckIssue>)
             None,
         ));
     }
-    if matches!(
-        asset.asset_status,
-        AssetStatus::Changed | AssetStatus::Missing | AssetStatus::Failed
-    ) && asset.durable_state_history.is_empty()
-    {
-        issues.push(issue(
-            "invalid_state_transition",
-            Some(path),
-            None,
-            "recoverable Asset state has no durable checkpoint",
-            None,
-        ));
-    }
-    for pair in asset.durable_state_history.windows(2) {
-        if !transition_allowed(pair[0].clone(), pair[1].clone()) {
-            issues.push(issue(
-                "invalid_state_transition",
-                Some(path),
-                None,
-                "durable state history contains a forbidden transition",
-                None,
-            ));
-            break;
-        }
-    }
-    let step_matches = match asset.asset_status {
-        AssetStatus::Registered => asset.last_successful_step == LastSuccessfulStep::Registered,
-        AssetStatus::Extracted => asset.last_successful_step == LastSuccessfulStep::Extracted,
-        AssetStatus::ReviewPending => asset.last_successful_step == LastSuccessfulStep::Drafted,
-        AssetStatus::Processed => asset.last_successful_step == LastSuccessfulStep::Reviewed,
-        _ => true,
-    };
-    if !step_matches {
-        issues.push(issue(
-            "invalid_state_transition",
-            Some(path),
-            None,
-            "Asset state disagrees with its last successful step",
-            None,
-        ));
+    if let Err(error) = validate_asset_state(asset) {
+        issues.push(parse_issue(path, error));
     }
 }
 
@@ -467,6 +437,9 @@ fn validate_source(
             ));
             return;
         };
+        if let Err(error) = validate_canonical_source(path, source, body, asset) {
+            issues.push(parse_issue(path, error));
+        }
         if source.id != asset.id.replacen("asset", "source", 1)
             || source.generation.asset_fingerprint != asset.fingerprint.value
         {
@@ -738,69 +711,238 @@ fn staged_files(root: &Path) -> Result<(Vec<RepositoryFile>, Vec<CheckIssue>), M
 }
 
 fn run_git_bounded(root: &Path, arguments: &[&str], limit: u64) -> Result<Vec<u8>, MkoError> {
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(arguments)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| MkoError::new("git_unavailable", error.to_string()))?;
-    let mut output = Vec::new();
-    child
-        .stdout
-        .take()
-        .ok_or_else(|| MkoError::new("git_unavailable", "Git stdout was not captured"))?
-        .take(limit + 1)
-        .read_to_end(&mut output)
-        .map_err(|error| MkoError::new("git_unavailable", error.to_string()))?;
-    let status = child
-        .wait()
-        .map_err(|error| MkoError::new("git_unavailable", error.to_string()))?;
-    if !status.success() {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(root).args(arguments);
+    let output = run_command_bounded(command, limit)?;
+    if !output.status.success() {
         return Err(MkoError::new(
             "git_index_invalid",
             "cannot read the staged Git index",
         ));
     }
-    if output.len() as u64 > limit {
+    Ok(output.stdout)
+}
+
+#[derive(Debug)]
+struct BoundedCommandOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    #[allow(dead_code)]
+    stderr: Vec<u8>,
+}
+
+fn run_command_bounded(
+    mut command: Command,
+    aggregate_limit: u64,
+) -> Result<BoundedCommandOutput, MkoError> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| MkoError::new("git_unavailable", error.to_string()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| MkoError::new("git_unavailable", "command stdout was not captured"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| MkoError::new("git_unavailable", "command stderr was not captured"))?;
+    let total = Arc::new(AtomicU64::new(0));
+    let (limit_sender, limit_receiver) = mpsc::channel();
+    let stdout_thread = drain_bounded_pipe(
+        stdout,
+        Arc::clone(&total),
+        aggregate_limit,
+        limit_sender.clone(),
+    );
+    let stderr_thread =
+        drain_bounded_pipe(stderr, Arc::clone(&total), aggregate_limit, limit_sender);
+
+    let (status, exceeded) = loop {
+        if limit_receiver.try_recv().is_ok() || total.load(Ordering::SeqCst) > aggregate_limit {
+            let _ = child.kill();
+            let status = child
+                .wait()
+                .map_err(|error| MkoError::new("git_unavailable", error.to_string()))?;
+            break (status, true);
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| MkoError::new("git_unavailable", error.to_string()))?
+        {
+            break (status, false);
+        }
+        thread::sleep(Duration::from_millis(2));
+    };
+
+    let stdout = join_pipe(stdout_thread)?;
+    let stderr = join_pipe(stderr_thread)?;
+    if exceeded || total.load(Ordering::SeqCst) > aggregate_limit {
         return Err(MkoError::new(
             "check_input_too_large",
-            "Git command output exceeds its bounded transport",
+            "Git command stdout and stderr exceed the aggregate bounded transport",
         ));
     }
-    Ok(output)
+    Ok(BoundedCommandOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn drain_bounded_pipe<R: Read + Send + 'static>(
+    mut pipe: R,
+    total: Arc<AtomicU64>,
+    limit: u64,
+    limit_sender: mpsc::Sender<()>,
+) -> thread::JoinHandle<io::Result<Vec<u8>>> {
+    thread::spawn(move || {
+        let mut collected = Vec::new();
+        let mut buffer = [0u8; 8 * 1024];
+        loop {
+            let count = pipe.read(&mut buffer)?;
+            if count == 0 {
+                return Ok(collected);
+            }
+            let previous = total.fetch_add(count as u64, Ordering::SeqCst);
+            if previous.saturating_add(count as u64) > limit {
+                let _ = limit_sender.send(());
+                return Ok(collected);
+            }
+            collected.extend_from_slice(&buffer[..count]);
+        }
+    })
+}
+
+fn join_pipe(handle: thread::JoinHandle<io::Result<Vec<u8>>>) -> Result<Vec<u8>, MkoError> {
+    handle
+        .join()
+        .map_err(|_| MkoError::new("git_unavailable", "command pipe reader panicked"))?
+        .map_err(|error| MkoError::new("git_unavailable", error.to_string()))
 }
 
 fn inspect_locks(repository_root: &Path, issues: &mut Vec<CheckIssue>) {
-    let locks = repository_root.join(".knowledge-os/runtime/locks");
-    let Ok(metadata) = fs::symlink_metadata(&locks) else {
+    let Ok(repository) = Dir::open_ambient_dir(repository_root, ambient_authority()) else {
         return;
     };
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        issues.push(issue(
-            "runtime_path_invalid",
-            Some(".knowledge-os/runtime/locks"),
-            None,
-            "runtime lock path is not a real directory",
-            None,
-        ));
+    let Some(knowledge) =
+        open_optional_real_directory(&repository, ".knowledge-os", ".knowledge-os", issues)
+    else {
         return;
-    }
-    if let Ok(entries) = fs::read_dir(locks) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".lock") || name.ends_with(".lock.takeover") {
-                issues.push(issue(
-                    "lock_held",
-                    Some(&format!(".knowledge-os/runtime/locks/{}", name)),
-                    None,
-                    "an Asset operation lock exists",
-                    Some("verify the owner process before using --clear-stale-lock".into()),
-                ));
-            }
+    };
+    let Some(runtime) =
+        open_optional_real_directory(&knowledge, "runtime", ".knowledge-os/runtime", issues)
+    else {
+        return;
+    };
+    let Some(locks) =
+        open_optional_real_directory(&runtime, "locks", ".knowledge-os/runtime/locks", issues)
+    else {
+        return;
+    };
+    let Ok(mut entries) = locks.entries() else {
+        issues.push(runtime_invalid(".knowledge-os/runtime/locks"));
+        return;
+    };
+    for (index, entry) in entries.by_ref().enumerate() {
+        if index >= MAX_RUNTIME_LOCKS {
+            issues.push(limit_issue(
+                Some(".knowledge-os/runtime/locks"),
+                "runtime lock count exceeds the check limit",
+            ));
+            break;
+        }
+        let Ok(entry) = entry else {
+            issues.push(runtime_invalid(".knowledge-os/runtime/locks"));
+            continue;
+        };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            issues.push(runtime_invalid(".knowledge-os/runtime/locks"));
+            continue;
+        };
+        if name.len() > 255 {
+            issues.push(runtime_invalid(".knowledge-os/runtime/locks"));
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            issues.push(runtime_invalid(".knowledge-os/runtime/locks"));
+            continue;
+        };
+        if file_type.is_symlink() || !file_type.is_file() {
+            issues.push(runtime_invalid(&format!(
+                ".knowledge-os/runtime/locks/{name}"
+            )));
+            continue;
+        }
+        let Ok(mut file) = entry.open() else {
+            issues.push(runtime_invalid(&format!(
+                ".knowledge-os/runtime/locks/{name}"
+            )));
+            continue;
+        };
+        let mut bounded = Vec::new();
+        if file
+            .by_ref()
+            .take(MAX_RUNTIME_LOCK_BYTES + 1)
+            .read_to_end(&mut bounded)
+            .is_err()
+            || bounded.len() as u64 > MAX_RUNTIME_LOCK_BYTES
+        {
+            issues.push(limit_issue(
+                Some(&format!(".knowledge-os/runtime/locks/{name}")),
+                "runtime lock exceeds the check limit",
+            ));
+            continue;
+        }
+        if name.ends_with(".lock") || name.ends_with(".lock.takeover") {
+            issues.push(issue(
+                "lock_held",
+                Some(&format!(".knowledge-os/runtime/locks/{name}")),
+                None,
+                "an Asset operation lock exists",
+                Some("verify the owner process before using --clear-stale-lock".into()),
+            ));
         }
     }
+}
+
+fn open_optional_real_directory(
+    parent: &Dir,
+    name: &str,
+    display_path: &str,
+    issues: &mut Vec<CheckIssue>,
+) -> Option<Dir> {
+    let metadata = match parent.symlink_metadata(name) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => {
+            issues.push(runtime_invalid(display_path));
+            return None;
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        issues.push(runtime_invalid(display_path));
+        return None;
+    }
+    match parent.open_dir(name) {
+        Ok(directory) => Some(directory),
+        Err(_) => {
+            issues.push(runtime_invalid(display_path));
+            None
+        }
+    }
+}
+
+fn runtime_invalid(path: &str) -> CheckIssue {
+    issue(
+        "runtime_path_invalid",
+        Some(path),
+        None,
+        "runtime path is not a retained real directory or bounded regular file",
+        None,
+    )
 }
 
 fn inspect_hook(repository_root: &Path, files: &[RepositoryFile], issues: &mut Vec<CheckIssue>) {
@@ -892,13 +1034,7 @@ fn canonical_source_path(path: &str, source: &SourceRecord) -> bool {
 }
 
 fn portable_relative_path(path: &str) -> bool {
-    !path.is_empty()
-        && !path.contains('\0')
-        && !path.contains('\\')
-        && !Path::new(path).is_absolute()
-        && Path::new(path)
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
+    validate_portable_relative_path(path).is_ok()
 }
 
 fn has_conflict_marker(bytes: &[u8]) -> bool {
@@ -948,4 +1084,41 @@ fn sort_and_deduplicate(issues: &mut Vec<CheckIssue>) {
         ))
     });
     issues.dedup();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::Write,
+        process::{Command, Stdio},
+    };
+
+    use super::run_command_bounded;
+
+    #[test]
+    fn bounded_command_child_emits_large_stdout_and_stderr() {
+        if std::env::var_os("MKO_BOUNDED_COMMAND_CHILD").is_none() {
+            return;
+        }
+        let block = vec![b'x'; 256 * 1024];
+        std::io::stdout().write_all(&block).unwrap();
+        std::io::stderr().write_all(&block).unwrap();
+    }
+
+    #[test]
+    fn bounded_runner_drains_both_pipes_and_terminates_on_aggregate_limit() {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "check::tests::bounded_command_child_emits_large_stdout_and_stderr",
+                "--nocapture",
+            ])
+            .env("MKO_BOUNDED_COMMAND_CHILD", "1")
+            .stdin(Stdio::null());
+
+        let error = run_command_bounded(command, 32 * 1024).unwrap_err();
+
+        assert_eq!(error.code(), "check_input_too_large");
+    }
 }

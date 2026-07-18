@@ -85,6 +85,17 @@ where
 }
 
 pub fn write_replace(path: &Path, bytes: &[u8]) -> Result<(), MkoError> {
+    write_replace_checked(path, bytes, || Ok(()))
+}
+
+pub fn write_replace_checked<F>(
+    path: &Path,
+    bytes: &[u8],
+    validate_current: F,
+) -> Result<(), MkoError>
+where
+    F: FnOnce() -> Result<(), MkoError>,
+{
     let parent = path.parent().ok_or_else(|| {
         MkoError::new(
             "registry_write_failed",
@@ -117,6 +128,7 @@ pub fn write_replace(path: &Path, bytes: &[u8]) -> Result<(), MkoError> {
         }
         Err(error) => return Err(MkoError::new("registry_write_failed", error.to_string())),
     }
+    validate_current()?;
     let mut file = AtomicWriteFile::open(path)
         .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
     file.write_all(bytes)

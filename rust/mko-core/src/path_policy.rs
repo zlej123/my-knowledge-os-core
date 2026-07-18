@@ -12,6 +12,9 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::error::MkoError;
 
+pub const MAX_PORTABLE_COMPONENT_BYTES: usize = 255;
+pub const MAX_PORTABLE_RELATIVE_PATH_BYTES: usize = 240;
+
 pub struct ProviderPath {
     pub file: File,
     pub logical_path: String,
@@ -135,6 +138,39 @@ pub fn validate_ascii_slug(slug: &str) -> Result<(), MkoError> {
     Ok(())
 }
 
+pub fn validate_portable_relative_path(path: &str) -> Result<(), MkoError> {
+    if path.is_empty()
+        || path.len() > MAX_PORTABLE_RELATIVE_PATH_BYTES
+        || path.starts_with('/')
+        || path.starts_with('\\')
+        || path.contains('\\')
+    {
+        return Err(MkoError::new(
+            "path_not_portable",
+            "path must be a bounded portable relative path",
+        ));
+    }
+    for component in path.split('/') {
+        if component.is_empty()
+            || component == "."
+            || component == ".."
+            || component.len() > MAX_PORTABLE_COMPONENT_BYTES
+        {
+            return Err(MkoError::new(
+                "path_not_portable",
+                "path contains an empty, traversal, or oversized component",
+            ));
+        }
+        reject_windows_component(component).map_err(|_| {
+            MkoError::new(
+                "path_not_portable",
+                "path contains a Windows-incompatible component",
+            )
+        })?;
+    }
+    Ok(())
+}
+
 fn normalized_logical_path(path: &Path) -> Result<String, MkoError> {
     let mut components = Vec::new();
     for component in path.components() {
@@ -255,6 +291,17 @@ fn collision_key(value: &str) -> String {
 }
 
 fn reject_windows_component(value: &str) -> Result<(), MkoError> {
+    if value.len() > MAX_PORTABLE_COMPONENT_BYTES
+        || value.chars().any(|character| {
+            character <= '\u{1f}'
+                || matches!(character, '<' | '>' | ':' | '"' | '\\' | '|' | '?' | '*')
+        })
+    {
+        return Err(MkoError::new(
+            "windows_reserved_name",
+            "path contains a Windows-forbidden character or oversized component",
+        ));
+    }
     let trimmed = value.trim_end_matches(['.', ' ']);
     if trimmed != value || trimmed.is_empty() {
         return Err(MkoError::new(
@@ -280,17 +327,21 @@ fn reject_windows_component(value: &str) -> Result<(), MkoError> {
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use std::{
         fs,
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use super::provider_path_with_before_open;
+    use super::{
+        MAX_PORTABLE_COMPONENT_BYTES, MAX_PORTABLE_RELATIVE_PATH_BYTES,
+        provider_path_with_before_open, validate_portable_relative_path,
+    };
 
     static NEXT_TEST_ENV: AtomicU64 = AtomicU64::new(0);
 
+    #[cfg(unix)]
     #[test]
     fn swap_to_outside_symlink_cannot_redirect_capability_read() {
         let unique = NEXT_TEST_ENV.fetch_add(1, Ordering::Relaxed);
@@ -314,5 +365,36 @@ mod tests {
 
         assert_eq!(error.code(), "outside_allowed_root");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn portable_paths_reject_cross_platform_hazards_and_bounds() {
+        for path in [
+            "../secret",
+            "/absolute",
+            "C:/windows",
+            "notes\\windows.md",
+            "notes/CON.txt",
+            "notes/trailing. ",
+            "notes/forbidden?.md",
+            "notes/control\u{001f}.md",
+        ] {
+            assert!(validate_portable_relative_path(path).is_err(), "{path}");
+        }
+        assert!(
+            validate_portable_relative_path(&format!(
+                "notes/{}",
+                "a".repeat(MAX_PORTABLE_COMPONENT_BYTES + 1)
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_portable_relative_path(&format!(
+                "{}/file.md",
+                "a".repeat(MAX_PORTABLE_RELATIVE_PATH_BYTES)
+            ))
+            .is_err()
+        );
+        assert!(validate_portable_relative_path("notes/good-file.md").is_ok());
     }
 }

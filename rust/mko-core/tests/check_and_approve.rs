@@ -9,7 +9,10 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use mko_core::{
-    approve::{ApprovalTerminal, ApproveSourceRequest, approve_source_with_terminal_and_clock},
+    approve::{
+        ApprovalObserver, ApprovalTerminal, ApproveSourceRequest,
+        approve_source_with_terminal_and_clock, approve_source_with_terminal_clock_and_observer,
+    },
     check::{CheckRequest, check_repository},
     clock::Clock,
     front_matter::{parse_markdown, render_markdown},
@@ -132,6 +135,59 @@ struct FakeTerminal {
     stdout_tty: bool,
     input: String,
     output: String,
+}
+
+struct MutatingTerminal {
+    input: String,
+    output: String,
+    source_path: PathBuf,
+    replacement: Vec<u8>,
+}
+
+struct PublicationMutator {
+    source_path: PathBuf,
+    replacement: Vec<u8>,
+}
+
+#[cfg(unix)]
+struct PublicationSymlinkSwap {
+    source_path: PathBuf,
+    outside_path: PathBuf,
+}
+
+#[cfg(unix)]
+impl ApprovalObserver for PublicationSymlinkSwap {
+    fn before_publication(&mut self) -> io::Result<()> {
+        fs::remove_file(&self.source_path)?;
+        std::os::unix::fs::symlink(&self.outside_path, &self.source_path)
+    }
+}
+
+impl ApprovalObserver for PublicationMutator {
+    fn before_publication(&mut self) -> io::Result<()> {
+        fs::write(&self.source_path, &self.replacement)
+    }
+}
+
+impl ApprovalTerminal for MutatingTerminal {
+    fn stdin_is_terminal(&self) -> bool {
+        true
+    }
+
+    fn stdout_is_terminal(&self) -> bool {
+        true
+    }
+
+    fn write_all(&mut self, text: &str) -> io::Result<()> {
+        self.output.push_str(text);
+        Ok(())
+    }
+
+    fn read_line(&mut self, output: &mut String) -> io::Result<usize> {
+        fs::write(&self.source_path, &self.replacement)?;
+        output.push_str(&self.input);
+        Ok(self.input.len())
+    }
 }
 
 impl ApprovalTerminal for FakeTerminal {
@@ -281,6 +337,285 @@ fn incorrect_confirmation_does_not_publish_or_process() {
             .status,
         SourceStatus::ReviewPending
     );
+}
+
+#[test]
+fn source_changed_after_prompt_is_not_overwritten_or_approved() {
+    let env = TestEnv::pending_source();
+    let replacement = b"external edit made while approval prompt was open\n".to_vec();
+    let mut terminal = MutatingTerminal {
+        input: format!("APPROVE {}\n", env.source_id),
+        output: String::new(),
+        source_path: env.source_path.clone(),
+        replacement: replacement.clone(),
+    };
+
+    let error = approve_source_with_terminal_and_clock(
+        ApproveSourceRequest::new(&env.repository, &env.source_id),
+        &mut terminal,
+        &env.clock,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "source_changed_during_approval");
+    assert_eq!(fs::read(&env.source_path).unwrap(), replacement);
+    assert_eq!(
+        read_asset(&env.repository, &env.asset_id)
+            .unwrap()
+            .asset_status,
+        AssetStatus::ReviewPending
+    );
+}
+
+#[test]
+fn approval_rejects_a_revision_consistent_but_noncanonical_source() {
+    let env = TestEnv::pending_source();
+    let input = fs::read_to_string(&env.source_path).unwrap();
+    let parsed = parse_markdown::<SourceRecord>(&input).unwrap();
+    let mut source = parsed.metadata;
+    source.ai_assisted = false;
+    source.content_revision = calculate_source_revision(&source, &parsed.body).unwrap();
+    fs::write(
+        &env.source_path,
+        render_markdown(&source, &parsed.body).unwrap(),
+    )
+    .unwrap();
+    let mut terminal = FakeTerminal {
+        stdin_tty: true,
+        stdout_tty: true,
+        input: format!("APPROVE {}\n", env.source_id),
+        output: String::new(),
+    };
+
+    let error = approve_source_with_terminal_and_clock(
+        ApproveSourceRequest::new(&env.repository, &env.source_id),
+        &mut terminal,
+        &env.clock,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "source_invalid");
+    assert_eq!(
+        read_asset(&env.repository, &env.asset_id)
+            .unwrap()
+            .asset_status,
+        AssetStatus::ReviewPending
+    );
+}
+
+#[test]
+fn approval_prompt_includes_deterministic_diff_summary() {
+    let env = TestEnv::pending_source();
+    let mut terminal = FakeTerminal {
+        stdin_tty: true,
+        stdout_tty: true,
+        input: "decline\n".into(),
+        output: String::new(),
+    };
+
+    approve_source_with_terminal_and_clock(
+        ApproveSourceRequest::new(&env.repository, &env.source_id),
+        &mut terminal,
+        &env.clock,
+    )
+    .unwrap_err();
+
+    assert!(
+        terminal
+            .output
+            .contains("Status: review_pending -> approved")
+    );
+    assert!(terminal.output.contains("Source bytes:"));
+    assert!(terminal.output.contains("Source lines:"));
+    assert!(terminal.output.contains("Git diff:"));
+}
+
+#[test]
+fn source_changed_immediately_before_publication_is_not_overwritten() {
+    let env = TestEnv::pending_source();
+    let replacement = b"external edit immediately before publication\n".to_vec();
+    let mut terminal = FakeTerminal {
+        stdin_tty: true,
+        stdout_tty: true,
+        input: format!("APPROVE {}\n", env.source_id),
+        output: String::new(),
+    };
+    let mut observer = PublicationMutator {
+        source_path: env.source_path.clone(),
+        replacement: replacement.clone(),
+    };
+
+    let error = approve_source_with_terminal_clock_and_observer(
+        ApproveSourceRequest::new(&env.repository, &env.source_id),
+        &mut terminal,
+        &env.clock,
+        &mut observer,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "source_changed_during_approval");
+    assert_eq!(fs::read(&env.source_path).unwrap(), replacement);
+    assert_eq!(
+        read_asset(&env.repository, &env.asset_id)
+            .unwrap()
+            .asset_status,
+        AssetStatus::ReviewPending
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn final_publication_rejects_a_source_symlink_swap_without_touching_outside() {
+    let env = TestEnv::pending_source();
+    let original = fs::read(&env.source_path).unwrap();
+    let outside = env._root.path().join("outside-source.md");
+    fs::write(&outside, &original).unwrap();
+    let mut terminal = FakeTerminal {
+        stdin_tty: true,
+        stdout_tty: true,
+        input: format!("APPROVE {}\n", env.source_id),
+        output: String::new(),
+    };
+    let mut observer = PublicationSymlinkSwap {
+        source_path: env.source_path.clone(),
+        outside_path: outside.clone(),
+    };
+
+    let error = approve_source_with_terminal_clock_and_observer(
+        ApproveSourceRequest::new(&env.repository, &env.source_id),
+        &mut terminal,
+        &env.clock,
+        &mut observer,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "source_changed_during_approval");
+    assert_eq!(fs::read(outside).unwrap(), original);
+    assert_eq!(
+        read_asset(&env.repository, &env.asset_id)
+            .unwrap()
+            .asset_status,
+        AssetStatus::ReviewPending
+    );
+}
+
+#[test]
+fn check_rejects_a_revision_consistent_noncanonical_body_shape() {
+    let env = TestEnv::pending_source();
+    let input = fs::read_to_string(&env.source_path).unwrap();
+    let parsed = parse_markdown::<SourceRecord>(&input).unwrap();
+    let body = parsed.body.replace("\n\n## Related Knowledge\n\n", "\n\n");
+    let mut source = parsed.metadata;
+    source.content_revision = calculate_source_revision(&source, &body).unwrap();
+    fs::write(&env.source_path, render_markdown(&source, &body).unwrap()).unwrap();
+
+    let report = env.check();
+
+    assert!(report.has_code("source_invalid"));
+}
+
+#[test]
+fn working_tree_and_staged_checks_apply_full_portability_rules() {
+    let env = TestEnv::pending_source();
+    fs::create_dir_all(env.repository.join("notes")).unwrap();
+    fs::write(env.repository.join("notes/CON.txt"), "reserved\n").unwrap();
+    fs::write(env.repository.join("notes/trailing."), "trailing\n").unwrap();
+    fs::write(env.repository.join("notes/forbidden:name.md"), "colon\n").unwrap();
+    let long_path = format!("notes/{}/{}/long.md", "a".repeat(120), "b".repeat(120));
+    fs::create_dir_all(env.repository.join(Path::new(&long_path).parent().unwrap())).unwrap();
+    fs::write(env.repository.join(&long_path), "long\n").unwrap();
+
+    let working = env.check();
+    assert!(
+        working
+            .issues
+            .iter()
+            .filter(|issue| issue.code == "path_not_portable")
+            .count()
+            >= 4
+    );
+
+    git(&env.repository, &["init"]);
+    git(&env.repository, &["add", "."]);
+    let staged = check_repository(CheckRequest::new(&env.repository).with_staged(true)).unwrap();
+    assert!(
+        staged
+            .issues
+            .iter()
+            .filter(|issue| issue.code == "path_not_portable")
+            .count()
+            >= 4
+    );
+}
+
+#[test]
+fn stable_asset_state_rejects_a_manipulated_recovery_checkpoint() {
+    let env = TestEnv::pending_source();
+    let path = env
+        .repository
+        .join("assets/registry")
+        .join(format!("{}.md", env.asset_id));
+    let input = fs::read_to_string(&path).unwrap();
+    let parsed = parse_markdown::<mko_core::model::AssetRecord>(&input).unwrap();
+    let mut asset = parsed.metadata;
+    asset.durable_state_history = vec![AssetStatus::Registered];
+    fs::write(&path, render_markdown(&asset, &parsed.body).unwrap()).unwrap();
+
+    assert!(env.check().has_code("invalid_state_transition"));
+}
+
+#[test]
+fn failed_asset_rejects_an_impossible_nested_checkpoint_history() {
+    let env = TestEnv::pending_source();
+    let path = env
+        .repository
+        .join("assets/registry")
+        .join(format!("{}.md", env.asset_id));
+    let input = fs::read_to_string(&path).unwrap();
+    let parsed = parse_markdown::<mko_core::model::AssetRecord>(&input).unwrap();
+    let mut asset = parsed.metadata;
+    asset.asset_status = AssetStatus::Failed;
+    asset.durable_state_history = vec![AssetStatus::ReviewPending, AssetStatus::Registered];
+    fs::write(&path, render_markdown(&asset, &parsed.body).unwrap()).unwrap();
+
+    assert!(env.check().has_code("invalid_state_transition"));
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_lock_scan_rejects_an_intermediate_symlink_without_listing_outside() {
+    let env = TestEnv::pending_source();
+    let outside = env._root.path().join("outside-runtime");
+    fs::create_dir_all(outside.join("locks")).unwrap();
+    fs::write(
+        outside.join("locks/external-secret-name.lock"),
+        "secret lock\n",
+    )
+    .unwrap();
+    fs::create_dir_all(env.repository.join(".knowledge-os")).unwrap();
+    fs::remove_dir_all(env.repository.join(".knowledge-os/runtime")).unwrap();
+    std::os::unix::fs::symlink(&outside, env.repository.join(".knowledge-os/runtime")).unwrap();
+
+    let report = env.check();
+    let serialized = serde_json::to_string(&report).unwrap();
+
+    assert!(report.has_code("runtime_path_invalid"));
+    assert!(!serialized.contains("external-secret-name"));
+}
+
+#[test]
+fn auth_configuration_filenames_are_secret_findings() {
+    let env = TestEnv::pending_source();
+    for name in [".netrc", ".npmrc", ".pypirc"] {
+        fs::write(env.repository.join(name), "placeholder\n").unwrap();
+    }
+
+    let report = env.check();
+    for name in [".netrc", ".npmrc", ".pypirc"] {
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == "secret_detected" && issue.path.as_deref() == Some(name)
+        }));
+    }
 }
 
 #[test]

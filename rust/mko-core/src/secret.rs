@@ -50,6 +50,12 @@ fn credential_filename_rule(path: &Path) -> Option<&'static str> {
     if name == ".env" || name.starts_with(".env.") {
         return Some("environment_file");
     }
+    if matches!(
+        name.as_str(),
+        ".netrc" | "_netrc" | ".npmrc" | ".pypirc" | ".dockercfg" | "auth.json"
+    ) {
+        return Some("auth_configuration_file");
+    }
     if name.contains("credential")
         || name.contains("password")
         || name == "id_rsa"

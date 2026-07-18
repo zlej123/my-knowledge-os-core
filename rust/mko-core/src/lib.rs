@@ -2,6 +2,7 @@
 
 pub mod approve;
 pub mod atomic;
+pub mod canonical_source;
 pub mod check;
 pub mod clock;
 pub mod config;

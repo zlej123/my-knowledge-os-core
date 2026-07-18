@@ -10,8 +10,8 @@ use serde::Serialize;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
-    CORE_VERSION,
     atomic::{AtomicWriteResult, write_new, write_replace},
+    canonical_source::validate_canonical_source,
     clock::{Clock, SystemClock},
     error::MkoError,
     front_matter::{parse_markdown, render_markdown},
@@ -21,10 +21,7 @@ use crate::{
         SourceStatus,
     },
     path_policy::{canonical_directory, validate_ascii_slug},
-    pdf::{EXTRACTOR_NAME, EXTRACTOR_VERSION},
-    prepare::{
-        PROCESSOR_VERSION, PROMPT_VERSION, PreparedSourceBundle, load_prepared_source_bundle,
-    },
+    prepare::{PreparedSourceBundle, load_prepared_source_bundle},
     registry::{mark_asset_processed_with_clock, mark_asset_review_pending_with_clock, read_asset},
     revision::calculate_source_revision,
 };
@@ -222,6 +219,7 @@ pub fn write_source_draft_with_clock(
     };
 
     source.content_revision = calculate_source_revision(&source, &body)?;
+    validate_canonical_source(&relative_path, &source, &body, &asset)?;
     let document = render_markdown(&source, &body)?;
     let result = if replacing {
         ensure_regular_source_destination(&destination)?;
@@ -715,133 +713,19 @@ fn validate_existing_source_document(
     document: &SourceDocument,
     asset: &crate::model::AssetRecord,
 ) -> Result<(), MkoError> {
-    let source = &document.record;
-    let expected_source_id = asset.id.replacen("asset", "source", 1);
-    if source.id != expected_source_id
-        || source.record_type != "source"
-        || source.schema_version != 1
-        || source.scope != "personal"
-        || !source.ai_assisted
-        || source.relations.asset_ids != [asset.id.clone()]
-        || source.generation.extractor_name != EXTRACTOR_NAME
-        || source.generation.extractor_version != EXTRACTOR_VERSION
-        || source.generation.core_version != CORE_VERSION
-        || source.generation.processor_version != PROCESSOR_VERSION
-        || source.generation.prompt_version != PROMPT_VERSION
-        || source.generation.asset_fingerprint != asset.fingerprint.value
-    {
-        return Err(existing_source_error(
-            "existing Source identity, relation, or generation metadata is invalid",
-        ));
-    }
-    validate_review_invariants(source)?;
-    let actual_revision = calculate_source_revision(source, &document.body)?;
-    if actual_revision != source.content_revision {
-        return Err(existing_source_error(
-            "existing Source content revision does not match its semantic content",
-        ));
-    }
-    validate_canonical_source_path(document)?;
-    validate_canonical_headings(source, &document.body)?;
-    Ok(())
-}
-
-fn validate_review_invariants(source: &SourceRecord) -> Result<(), MkoError> {
-    let valid = match source.status {
-        SourceStatus::ReviewPending => {
-            source.review.status == ReviewStatus::Pending
-                && source.review.approved_revision.is_none()
-                && source.review.reviewed_at.is_none()
-        }
-        SourceStatus::Approved => {
-            source.review.status == ReviewStatus::Approved
-                && source.review.approved_revision.as_deref()
-                    == Some(source.content_revision.as_str())
-                && source.review.reviewed_at.is_some()
-        }
-        SourceStatus::Rejected => {
-            source.review.status == ReviewStatus::Rejected
-                && source.review.approved_revision.is_none()
-                && source.review.reviewed_at.is_some()
-        }
-        SourceStatus::Stale | SourceStatus::Archived => match source.review.status {
-            ReviewStatus::Pending => {
-                source.review.approved_revision.is_none() && source.review.reviewed_at.is_none()
-            }
-            ReviewStatus::Approved => {
-                source.review.approved_revision.is_some() && source.review.reviewed_at.is_some()
-            }
-            ReviewStatus::Rejected => {
-                source.review.approved_revision.is_none() && source.review.reviewed_at.is_some()
-            }
-        },
-    };
-    if !valid {
-        return Err(existing_source_error(
-            "existing Source status and review metadata are inconsistent",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_canonical_source_path(document: &SourceDocument) -> Result<(), MkoError> {
     let filename = document
         .path
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| existing_source_error("existing Source filename is not UTF-8"))?;
-    let hash = document
-        .record
-        .id
-        .strip_prefix("personal-source-")
-        .filter(|hash| hash.len() == 64)
-        .ok_or_else(|| existing_source_error("existing Source ID is invalid"))?;
-    let date = document
-        .record
-        .created_at
-        .with_timezone(&Seoul)
-        .date_naive()
-        .to_string();
-    let prefix = format!("{date}-");
-    let suffix = format!("-{}.md", &hash[..12]);
-    let slug = filename
-        .strip_prefix(&prefix)
-        .and_then(|value| value.strip_suffix(&suffix))
-        .ok_or_else(|| existing_source_error("existing Source path is not deterministic"))?;
-    validate_source_slug(slug)
-        .map_err(|_| existing_source_error("existing Source slug is not portable"))
-}
-
-fn validate_canonical_headings(source: &SourceRecord, body: &str) -> Result<(), MkoError> {
-    let mut expected = vec![format!("# {}", source.title)];
-    expected.extend(
-        [
-            "## Source Metadata",
-            "## One-Sentence Summary",
-            "## Problem",
-            "## Method",
-            "## Contributions",
-            "## Reported Evidence",
-            "## Stated Limitations",
-            "## Domain Perspective",
-            "## Implementation Considerations",
-            "## Questions and Unknowns",
-            "## Related Knowledge",
-        ]
-        .into_iter()
-        .map(str::to_owned),
-    );
-    let actual = body
-        .lines()
-        .filter(|line| line.starts_with('#'))
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    if actual != expected {
-        return Err(existing_source_error(
-            "existing Source body does not have canonical headings",
-        ));
-    }
-    Ok(())
+    validate_canonical_source(
+        &format!("sources/{filename}"),
+        &document.record,
+        &document.body,
+        asset,
+    )
+    .map(|_| ())
+    .map_err(|error| existing_source_error(error.message()))
 }
 
 fn find_source(sources: &Path, source_id: &str) -> Result<Option<SourceDocument>, MkoError> {
