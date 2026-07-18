@@ -49,11 +49,19 @@ pub fn transition_asset(
         AssetStatus::Changed | AssetStatus::Missing | AssetStatus::Failed
     ) && to != AssetStatus::Failed
         && !(from == AssetStatus::Changed && to == AssetStatus::Superseded);
-    if recovery_transition && to != previous_durable_state(asset) {
+    if recovery_transition && previous_durable_state(asset) != Some(to.clone()) {
         return Err(MkoError::new(
             "invalid_state_transition",
             "recovery must return the asset to its previous durable state",
         ));
+    }
+    if matches!(
+        to,
+        AssetStatus::Changed | AssetStatus::Missing | AssetStatus::Failed
+    ) {
+        asset.durable_state_history.push(from.clone());
+    } else if recovery_transition {
+        asset.durable_state_history.pop();
     }
     asset.asset_status = to;
     match asset.asset_status {
@@ -70,11 +78,6 @@ pub fn transition_asset(
     Ok(())
 }
 
-pub fn previous_durable_state(asset: &AssetRecord) -> AssetStatus {
-    match asset.last_successful_step {
-        LastSuccessfulStep::Registered => AssetStatus::Registered,
-        LastSuccessfulStep::Extracted => AssetStatus::Extracted,
-        LastSuccessfulStep::Drafted => AssetStatus::ReviewPending,
-        LastSuccessfulStep::Reviewed => AssetStatus::Processed,
-    }
+pub fn previous_durable_state(asset: &AssetRecord) -> Option<AssetStatus> {
+    asset.durable_state_history.last().cloned()
 }

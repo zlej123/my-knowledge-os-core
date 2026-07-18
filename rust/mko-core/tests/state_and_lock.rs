@@ -1,7 +1,11 @@
 use std::{
     fs,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, Barrier,
+        atomic::{AtomicU64, Ordering},
+    },
+    thread,
 };
 
 use chrono::{DateTime, Utc};
@@ -11,7 +15,7 @@ use mko_core::{
     model::AssetStatus,
     registry::{
         AssetOperationRequest, CaptureRequest, accept_changed_asset_with_clock, capture_asset,
-        inspect_asset_with_clock, read_asset, repair_lineage_with_clock,
+        inspect_asset_with_clock, lineage_repair_needed, read_asset, repair_lineage_with_clock,
     },
     state::{transition_allowed, transition_asset},
 };
@@ -97,6 +101,12 @@ impl TestEnv {
         )
     }
 
+    fn old_registry_path(&self) -> PathBuf {
+        self.repository
+            .join("assets/registry")
+            .join(format!("{}.md", self.old_asset_id))
+    }
+
     fn replace_provider_bytes(&self, bytes: &[u8]) {
         fs::write(self.provider.join("paper.pdf"), bytes).unwrap();
     }
@@ -134,20 +144,25 @@ fn fixed_clock() -> FixedClock {
     FixedClock { now: fixed_time() }
 }
 
+fn test_asset_id() -> String {
+    format!("personal-asset-{}", "a".repeat(64))
+}
+
 #[test]
 fn second_process_cannot_acquire_asset_lock() {
     let env = TestEnv::new();
-    let first = env.lock("personal-asset-deadbeef").unwrap();
-    let error = env.lock("personal-asset-deadbeef").unwrap_err();
+    let asset_id = test_asset_id();
+    let first = env.lock(&asset_id).unwrap();
+    let error = env.lock(&asset_id).unwrap_err();
     assert_eq!(error.code(), "lock_held");
     drop(first);
-    assert!(env.lock("personal-asset-deadbeef").is_ok());
+    assert!(env.lock(&asset_id).is_ok());
 }
 
 #[test]
 fn stale_asset_lock_requires_an_explicit_clear_request() {
     let env = TestEnv::new();
-    let asset_id = "personal-asset-deadbeef";
+    let asset_id = test_asset_id();
     let lock_path = env
         .repository
         .join(".knowledge-os/runtime/locks")
@@ -160,7 +175,8 @@ fn stale_asset_lock_requires_an_explicit_clear_request() {
             .unwrap()
             .with_timezone(&Utc),
         command: "interrupted-operation".into(),
-        asset_id: asset_id.into(),
+        asset_id: asset_id.clone(),
+        owner_token: "interrupted-owner".into(),
     };
     fs::write(&lock_path, serde_json::to_vec(&record).unwrap()).unwrap();
 
@@ -170,12 +186,114 @@ fn stale_asset_lock_requires_an_explicit_clear_request() {
             .with_timezone(&Utc),
     };
     let error =
-        AssetLock::acquire(&env.repository, asset_id, "retry", &later_clock, false).unwrap_err();
+        AssetLock::acquire(&env.repository, &asset_id, "retry", &later_clock, false).unwrap_err();
     assert_eq!(error.code(), "lock_held");
     assert!(lock_path.exists());
 
-    let recovered = AssetLock::acquire(&env.repository, asset_id, "retry", &later_clock, true);
+    let recovered = AssetLock::acquire(&env.repository, &asset_id, "retry", &later_clock, true);
     assert!(recovered.is_ok());
+}
+
+#[test]
+fn malformed_asset_ids_cannot_create_runtime_lock_paths() {
+    let env = TestEnv::new();
+    for asset_id in [
+        "personal-asset-deadbeef",
+        "../personal-asset-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "/tmp/personal-asset-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ] {
+        let error = env.lock(asset_id).unwrap_err();
+        assert_eq!(error.code(), "asset_id_invalid");
+    }
+    assert!(!env.repository.join(".knowledge-os/runtime/locks").exists());
+}
+
+#[test]
+fn dropping_a_lock_does_not_remove_a_different_owner_lock() {
+    let env = TestEnv::new();
+    let asset_id = test_asset_id();
+    let lock = env.lock(&asset_id).unwrap();
+    let path = env
+        .repository
+        .join(".knowledge-os/runtime/locks")
+        .join(format!("{asset_id}.lock"));
+    let replacement = LockRecord {
+        pid: std::process::id(),
+        hostname: hostname::get().unwrap().to_string_lossy().into_owned(),
+        started_at: fixed_time(),
+        command: "replacement-owner".into(),
+        asset_id,
+        owner_token: "replacement-owner-token".into(),
+    };
+    fs::write(&path, serde_json::to_vec(&replacement).unwrap()).unwrap();
+
+    drop(lock);
+
+    assert!(path.exists());
+}
+
+#[test]
+fn dropping_a_lock_does_not_race_a_stale_lock_takeover() {
+    let env = TestEnv::new();
+    let asset_id = test_asset_id();
+    let lock = env.lock(&asset_id).unwrap();
+    let path = env
+        .repository
+        .join(".knowledge-os/runtime/locks")
+        .join(format!("{asset_id}.lock"));
+    fs::write(path.with_extension("lock.takeover"), b"active takeover").unwrap();
+
+    drop(lock);
+
+    assert!(path.exists());
+}
+
+#[test]
+fn concurrent_stale_clearers_leave_one_live_lock_intact() {
+    let env = TestEnv::new();
+    let asset_id = test_asset_id();
+    let lock_path = env
+        .repository
+        .join(".knowledge-os/runtime/locks")
+        .join(format!("{asset_id}.lock"));
+    fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    let stale = LockRecord {
+        pid: u32::MAX,
+        hostname: hostname::get().unwrap().to_string_lossy().into_owned(),
+        started_at: DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc),
+        command: "interrupted-operation".into(),
+        asset_id: asset_id.clone(),
+        owner_token: "interrupted-owner".into(),
+    };
+    fs::write(&lock_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+    let later_clock = Arc::new(FixedClock {
+        now: DateTime::parse_from_rfc3339("2026-07-18T00:16:00Z")
+            .unwrap()
+            .with_timezone(&Utc),
+    });
+    let barrier = Arc::new(Barrier::new(2));
+    let results = thread::scope(|scope| {
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let repository = env.repository.clone();
+            let asset_id = asset_id.clone();
+            let barrier = Arc::clone(&barrier);
+            let clock = Arc::clone(&later_clock);
+            workers.push(scope.spawn(move || {
+                barrier.wait();
+                AssetLock::acquire(&repository, &asset_id, "concurrent-clear", &*clock, true)
+            }));
+        }
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert!(lock_path.exists());
 }
 
 #[test]
@@ -238,6 +356,27 @@ fn durable_transitions_update_the_checkpoint_used_for_change_and_failure_recover
 }
 
 #[test]
+fn failed_recovery_returns_to_changed_missing_and_superseded_checkpoints() {
+    let env = TestEnv::with_asset();
+
+    let mut changed = env.old_asset();
+    transition_asset(&mut changed, AssetStatus::Changed, fixed_time()).unwrap();
+    transition_asset(&mut changed, AssetStatus::Failed, fixed_time()).unwrap();
+    transition_asset(&mut changed, AssetStatus::Changed, fixed_time()).unwrap();
+
+    let mut missing = env.old_asset();
+    transition_asset(&mut missing, AssetStatus::Missing, fixed_time()).unwrap();
+    transition_asset(&mut missing, AssetStatus::Failed, fixed_time()).unwrap();
+    transition_asset(&mut missing, AssetStatus::Missing, fixed_time()).unwrap();
+
+    let mut superseded = env.old_asset();
+    transition_asset(&mut superseded, AssetStatus::Changed, fixed_time()).unwrap();
+    transition_asset(&mut superseded, AssetStatus::Superseded, fixed_time()).unwrap();
+    transition_asset(&mut superseded, AssetStatus::Failed, fixed_time()).unwrap();
+    transition_asset(&mut superseded, AssetStatus::Superseded, fixed_time()).unwrap();
+}
+
+#[test]
 fn changed_asset_is_superseded_by_new_content_record() {
     let env = TestEnv::with_asset();
     env.replace_provider_bytes(b"%PDF-1.7\nnew-content");
@@ -258,6 +397,71 @@ fn inspecting_a_superseded_asset_preserves_its_terminal_state() {
     env.inspect_asset().unwrap();
 
     assert_eq!(env.old_asset().asset_status, AssetStatus::Superseded);
+}
+
+#[test]
+fn inspect_marks_missing_assets_and_restores_the_original_state_when_bytes_return() {
+    let env = TestEnv::with_asset();
+    fs::remove_file(env.provider.join("paper.pdf")).unwrap();
+    env.inspect_asset().unwrap();
+    assert_eq!(env.old_asset().asset_status, AssetStatus::Missing);
+
+    env.replace_provider_bytes(b"%PDF-1.7\nold-content");
+    env.inspect_asset().unwrap();
+
+    assert_eq!(env.old_asset().asset_status, AssetStatus::Registered);
+}
+
+#[test]
+fn inspect_restores_changed_assets_when_the_original_fingerprint_returns() {
+    let env = TestEnv::with_asset();
+    env.replace_provider_bytes(b"%PDF-1.7\nnew-content");
+    env.inspect_asset().unwrap();
+    assert_eq!(env.old_asset().asset_status, AssetStatus::Changed);
+
+    env.replace_provider_bytes(b"%PDF-1.7\nold-content");
+    env.inspect_asset().unwrap();
+
+    assert_eq!(env.old_asset().asset_status, AssetStatus::Registered);
+}
+
+#[test]
+fn accept_change_rejects_replacement_without_a_pdf_signature() {
+    let env = TestEnv::with_asset();
+    env.replace_provider_bytes(b"not a PDF");
+    env.inspect_asset().unwrap();
+
+    let error = env.accept_change().unwrap_err();
+
+    assert_eq!(error.code(), "invalid_pdf");
+    assert_eq!(env.old_asset().asset_status, AssetStatus::Changed);
+}
+
+#[test]
+fn interrupted_acceptance_is_reported_and_repaired_idempotently() {
+    let env = TestEnv::with_asset();
+    env.replace_provider_bytes(b"%PDF-1.7\nnew-content");
+    env.inspect_asset().unwrap();
+    let publication_lock = env
+        .old_registry_path()
+        .with_file_name(format!(".{}.md.publish.lock", env.old_asset_id()));
+    fs::write(&publication_lock, b"interrupted old-record update").unwrap();
+
+    let error = env.accept_change().unwrap_err();
+
+    assert_eq!(error.code(), "registry_locked");
+    assert_eq!(env.old_asset().asset_status, AssetStatus::Changed);
+    assert_eq!(
+        lineage_repair_needed(&env.repository).unwrap(),
+        vec![env.old_asset_id().to_owned()]
+    );
+    fs::remove_file(publication_lock).unwrap();
+
+    repair_lineage_with_clock(env.operation(), &fixed_clock()).unwrap();
+    repair_lineage_with_clock(env.operation(), &fixed_clock()).unwrap();
+
+    assert_eq!(env.old_asset().asset_status, AssetStatus::Superseded);
+    assert!(lineage_repair_needed(&env.repository).unwrap().is_empty());
 }
 
 #[test]

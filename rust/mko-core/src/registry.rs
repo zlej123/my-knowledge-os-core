@@ -148,7 +148,12 @@ pub fn inspect_asset_with_clock(
         asset.asset_status,
         AssetStatus::Changed | AssetStatus::Missing
     ) {
-        let previous = previous_durable_state(&asset);
+        let previous = previous_durable_state(&asset).ok_or_else(|| {
+            MkoError::new(
+                "invalid_state_transition",
+                "changed or missing asset has no durable recovery checkpoint",
+            )
+        })?;
         transition_asset(&mut asset, previous, clock.now_utc())?;
         write_asset(&path, &asset, &body)?;
     }
@@ -163,6 +168,28 @@ pub fn accept_changed_asset_with_clock(
     request: AssetOperationRequest,
     clock: &dyn Clock,
 ) -> Result<AssetRecord, MkoError> {
+    accept_changed_asset_with_before_publish_and_clock(request, clock, || {})
+}
+
+#[cfg(test)]
+fn accept_changed_asset_with_before_publish<F>(
+    request: AssetOperationRequest,
+    before_publish: F,
+) -> Result<AssetRecord, MkoError>
+where
+    F: FnOnce(),
+{
+    accept_changed_asset_with_before_publish_and_clock(request, &SystemClock, before_publish)
+}
+
+fn accept_changed_asset_with_before_publish_and_clock<F>(
+    request: AssetOperationRequest,
+    clock: &dyn Clock,
+    before_publish: F,
+) -> Result<AssetRecord, MkoError>
+where
+    F: FnOnce(),
+{
     let config = load_capture_config(
         &request.repository_root,
         request.local_config_path.as_deref(),
@@ -184,14 +211,15 @@ pub fn accept_changed_asset_with_clock(
     }
     let candidate = config.provider_root.join(&old_asset.provider.locator);
     let mut provider_file = provider_path(&config.provider_root, &candidate)?.file;
-    let snapshot = fingerprint_open_file(&mut provider_file)?;
-    if snapshot.fingerprint == old_asset.fingerprint {
+    validate_pdf_content(&mut provider_file)?;
+    let before = fingerprint_open_file(&mut provider_file)?;
+    if before.fingerprint == old_asset.fingerprint {
         return Err(MkoError::new(
             "change_not_detected",
             "provider content matches the original asset fingerprint",
         ));
     }
-    let new_id = asset_id(&snapshot.fingerprint)?;
+    let new_id = asset_id(&before.fingerprint)?;
     let now = clock.now_utc();
     let new_asset = AssetRecord {
         id: new_id.clone(),
@@ -203,10 +231,11 @@ pub fn accept_changed_asset_with_clock(
         asset_class: old_asset.asset_class.clone(),
         media_type: old_asset.media_type.clone(),
         provider: old_asset.provider.clone(),
-        size_bytes: snapshot.size_bytes,
-        modified_at: DateTime::<Utc>::from(snapshot.modified_at.into_std()),
-        fingerprint: snapshot.fingerprint,
+        size_bytes: before.size_bytes,
+        modified_at: DateTime::<Utc>::from(before.modified_at.into_std()),
+        fingerprint: before.fingerprint.clone(),
         asset_status: AssetStatus::Registered,
+        durable_state_history: Vec::new(),
         supersedes: Some(old_asset.id.clone()),
         last_successful_step: LastSuccessfulStep::Registered,
         last_error: LastError {
@@ -220,6 +249,14 @@ pub fn accept_changed_asset_with_clock(
     let new_path = registry.join(format!("{new_id}.md"));
     let new_body = registry_body(now, &new_asset.provider.locator);
     let document = render_markdown(&new_asset, &new_body)?;
+    before_publish();
+    let after = fingerprint_open_file(&mut provider_file)?;
+    if before != after {
+        return Err(MkoError::new(
+            "fingerprint_changed",
+            "file changed during accept-change; no successor registry record was published",
+        ));
+    }
     match write_new(&new_path, document.as_bytes(), |existing| {
         validate_accepted_successor(existing, &new_asset)
     })? {
@@ -274,6 +311,24 @@ pub fn repair_lineage_with_clock(
 pub fn read_asset(repository_root: &Path, asset_id: &str) -> Result<AssetRecord, MkoError> {
     let repository_root = canonical_directory(repository_root, "repository_root_invalid")?;
     read_asset_document(&repository_root, asset_id).map(|(asset, _, _)| asset)
+}
+
+pub fn lineage_repair_needed(repository_root: &Path) -> Result<Vec<String>, MkoError> {
+    let repository_root = canonical_directory(repository_root, "repository_root_invalid")?;
+    let registry = registry_directory(&repository_root)?;
+    let assets = read_registry_assets(&registry)?;
+    let mut affected = assets
+        .iter()
+        .filter(|asset| asset.asset_status == AssetStatus::Changed)
+        .filter(|asset| {
+            assets
+                .iter()
+                .any(|successor| successor.supersedes.as_deref() == Some(&asset.id))
+        })
+        .map(|asset| asset.id.clone())
+        .collect::<Vec<_>>();
+    affected.sort();
+    Ok(affected)
 }
 
 pub fn capture_asset(request: CaptureRequest) -> Result<CaptureResult, MkoError> {
@@ -343,6 +398,7 @@ where
         modified_at: DateTime::<Utc>::from(before.modified_at.into_std()),
         fingerprint: before.fingerprint.clone(),
         asset_status: AssetStatus::Registered,
+        durable_state_history: Vec::new(),
         supersedes: None,
         last_successful_step: LastSuccessfulStep::Registered,
         last_error: LastError {
@@ -432,14 +488,16 @@ fn write_asset(path: &Path, asset: &AssetRecord, body: &str) -> Result<(), MkoEr
 }
 
 fn validate_asset_id(asset_id: &str) -> Result<(), MkoError> {
-    if asset_id.is_empty()
-        || !asset_id.starts_with("personal-asset-")
-        || asset_id.contains(['/', '\\'])
-        || Path::new(asset_id).components().count() != 1
-    {
+    let hash = asset_id.strip_prefix("personal-asset-");
+    if hash.is_none_or(|hash| {
+        hash.len() != 64
+            || !hash
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    }) {
         return Err(MkoError::new(
             "asset_id_invalid",
-            "asset ID must be a single personal asset identifier",
+            "asset ID must be a content-addressed asset ID",
         ));
     }
     Ok(())
@@ -463,6 +521,13 @@ fn validate_accepted_successor(path: &Path, expected: &AssetRecord) -> Result<()
 
 fn has_successor(repository_root: &Path, old_asset_id: &str) -> Result<bool, MkoError> {
     let registry = registry_directory(repository_root)?;
+    Ok(read_registry_assets(&registry)?
+        .iter()
+        .any(|asset| asset.supersedes.as_deref() == Some(old_asset_id)))
+}
+
+fn read_registry_assets(registry: &Path) -> Result<Vec<AssetRecord>, MkoError> {
+    let mut assets = Vec::new();
     for entry in fs::read_dir(registry)
         .map_err(|error| MkoError::new("registry_unreadable", error.to_string()))?
     {
@@ -475,11 +540,9 @@ fn has_successor(repository_root: &Path, old_asset_id: &str) -> Result<bool, Mko
         let input = fs::read_to_string(&path)
             .map_err(|error| MkoError::new("registry_unreadable", error.to_string()))?;
         let asset: AssetRecord = parse_markdown(&input)?.metadata;
-        if asset.supersedes.as_deref() == Some(old_asset_id) {
-            return Ok(true);
-        }
+        assets.push(asset);
     }
-    Ok(false)
+    Ok(assets)
 }
 
 fn title_from_logical_path(path: &str, id: &str) -> String {
@@ -505,7 +568,10 @@ mod tests {
 
     use chrono::{DateTime, Utc};
 
-    use super::{CaptureRequest, capture_asset_with_before_verify};
+    use super::{
+        AssetOperationRequest, CaptureRequest, accept_changed_asset_with_before_publish,
+        capture_asset, capture_asset_with_before_verify, inspect_asset,
+    };
 
     static NEXT_TEST_ENV: AtomicU64 = AtomicU64::new(0);
 
@@ -551,6 +617,53 @@ mod tests {
                 .map(|entries| entries.count())
                 .unwrap_or_default()
                 == 0
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn accept_change_discards_a_successor_when_the_retained_provider_file_changes() {
+        let unique = NEXT_TEST_ENV.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "mko-accept-mutation-test-{}-{unique}",
+            std::process::id()
+        ));
+        let repository = root.join("repository");
+        let provider = root.join("provider");
+        let local_config = root.join("local-config.yaml");
+        fs::create_dir_all(&repository).unwrap();
+        fs::create_dir_all(&provider).unwrap();
+        fs::write(
+            repository.join("knowledge-os.yaml"),
+            "system: my-knowledge-os\nscope: personal\ncore_version: 0.1.0\nschema_version: 1\nprovider:\n  name: personal_google_drive\n  type: google-drive-stream\n  root_env: MKO_PERSONAL_PROVIDER_ROOT\n",
+        )
+        .unwrap();
+        fs::write(
+            &local_config,
+            format!("provider_root: {}\n", provider.display()),
+        )
+        .unwrap();
+        let pdf = provider.join("paper.pdf");
+        fs::write(&pdf, b"%PDF-1.7\noriginal").unwrap();
+        let captured =
+            capture_asset(CaptureRequest::new(&repository, &pdf).with_local_config(&local_config))
+                .unwrap();
+        fs::write(&pdf, b"%PDF-1.7\nreplacement").unwrap();
+        let request = AssetOperationRequest::new(&repository, &captured.asset_id)
+            .with_local_config(&local_config);
+        inspect_asset(request.clone()).unwrap();
+
+        let error = accept_changed_asset_with_before_publish(request, || {
+            fs::write(&pdf, b"%PDF-1.7\nchanged during acceptance").unwrap();
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code(), "fingerprint_changed");
+        assert_eq!(
+            fs::read_dir(repository.join("assets/registry"))
+                .unwrap()
+                .count(),
+            1
         );
         let _ = fs::remove_dir_all(root);
     }

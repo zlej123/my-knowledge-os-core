@@ -7,6 +7,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use atomic_write_file::AtomicWriteFile;
+
 use crate::error::MkoError;
 
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
@@ -115,29 +117,13 @@ pub fn write_replace(path: &Path, bytes: &[u8]) -> Result<(), MkoError> {
         }
         Err(error) => return Err(MkoError::new("registry_write_failed", error.to_string())),
     }
-    let temporary = parent.join(format!(
-        ".{filename}.{}.{}.tmp",
-        std::process::id(),
-        NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
+    let mut file = AtomicWriteFile::open(path)
         .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
-    let write_result: Result<(), MkoError> = (|| {
-        file.write_all(bytes)
-            .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
-        file.sync_all()
-            .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
-        drop(file);
-        fs::rename(&temporary, path)
-            .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
-        sync_directory(parent)?;
-        Ok(())
-    })();
-    let _ = fs::remove_file(&temporary);
-    write_result
+    file.write_all(bytes)
+        .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+    file.commit()
+        .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+    sync_directory(parent)
 }
 
 struct PublicationLock {

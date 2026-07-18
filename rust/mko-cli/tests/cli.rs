@@ -155,6 +155,50 @@ fn asset_lifecycle_commands_report_a_changed_asset_and_its_successor() {
     );
 }
 
+#[test]
+#[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
+fn check_reports_interrupted_asset_lineage_that_needs_repair() {
+    let env = CliTestEnv::new();
+    let pdf = env.provider.join("paper.pdf");
+    fs::write(&pdf, b"%PDF-1.7\noriginal").unwrap();
+    let captured = env.capture_json(&pdf);
+    let old_asset_id = captured["asset_id"].as_str().unwrap();
+    fs::write(&pdf, b"%PDF-1.7\nreplacement").unwrap();
+    Command::cargo_bin("mko")
+        .unwrap()
+        .args(env.lifecycle_arguments("inspect", old_asset_id))
+        .assert()
+        .success();
+    let publication_lock = env
+        .repository
+        .join("assets/registry")
+        .join(format!(".{old_asset_id}.md.publish.lock"));
+    fs::write(&publication_lock, b"interrupt old record update").unwrap();
+    Command::cargo_bin("mko")
+        .unwrap()
+        .args(env.lifecycle_arguments("accept-change", old_asset_id))
+        .assert()
+        .failure();
+    fs::remove_file(publication_lock).unwrap();
+
+    let output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(env.check_arguments())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(
+        parse_json(&output),
+        json!({
+            "result": "repair_needed",
+            "asset_ids": [old_asset_id],
+        })
+    );
+}
+
 struct CliTestEnv {
     root: PathBuf,
     repository: PathBuf,
@@ -227,6 +271,15 @@ impl CliTestEnv {
             self.local_config.display().to_string(),
             "--asset-id".into(),
             asset_id.into(),
+            "--json".into(),
+        ]
+    }
+
+    fn check_arguments(&self) -> Vec<String> {
+        vec![
+            "check".into(),
+            "--repo".into(),
+            self.repository.display().to_string(),
             "--json".into(),
         ]
     }

@@ -86,6 +86,7 @@ pub struct AssetRecord {
     pub modified_at: DateTime<Utc>,
     pub fingerprint: Fingerprint,
     pub asset_status: AssetStatus,
+    pub durable_state_history: Vec<AssetStatus>,
     pub supersedes: Option<String>,
     pub last_successful_step: LastSuccessfulStep,
     pub last_error: LastError,

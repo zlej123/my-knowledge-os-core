@@ -10,6 +10,7 @@ name = "mko_core"
 path = "src/lib.rs"
 
 [dependencies]
+atomic-write-file.workspace = true
 cap-std = "=4.0.2"
 chrono.workspace = true
 chrono-tz.workspace = true

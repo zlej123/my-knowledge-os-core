@@ -4,7 +4,7 @@
   "title": "My Knowledge OS Asset Record v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "record_type", "schema_version", "scope", "title", "classification", "asset_class", "media_type", "provider", "size_bytes", "modified_at", "fingerprint", "asset_status", "supersedes", "last_successful_step", "last_error", "created_at", "updated_at"],
+  "required": ["id", "record_type", "schema_version", "scope", "title", "classification", "asset_class", "media_type", "provider", "size_bytes", "modified_at", "fingerprint", "asset_status", "durable_state_history", "supersedes", "last_successful_step", "last_error", "created_at", "updated_at"],
   "properties": {
     "id": { "$ref": "#/$defs/asset_id" },
     "record_type": { "const": "asset" },
@@ -36,6 +36,10 @@
       }
     },
     "asset_status": { "enum": ["registered", "extracted", "review_pending", "processed", "changed", "missing", "superseded", "failed"] },
+    "durable_state_history": {
+      "type": "array",
+      "items": { "enum": ["registered", "extracted", "review_pending", "processed", "changed", "missing", "superseded"] }
+    },
     "supersedes": { "anyOf": [{ "$ref": "#/$defs/asset_id" }, { "type": "null" }] },
     "last_successful_step": { "enum": ["registered", "extracted", "drafted", "reviewed"] },
     "last_error": {

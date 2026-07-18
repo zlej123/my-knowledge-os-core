@@ -5,7 +5,7 @@ use mko_core::{
     model::AssetStatus,
     registry::{
         AssetOperationRequest, CaptureRequest, accept_changed_asset, capture_asset, inspect_asset,
-        repair_lineage,
+        lineage_repair_needed, repair_lineage,
     },
 };
 
@@ -23,7 +23,7 @@ enum Command {
         command: AssetCommand,
     },
     Source,
-    Check,
+    Check(CheckArgs),
     Human,
     Hooks,
 }
@@ -68,6 +68,14 @@ struct AssetOperationArgs {
     json: bool,
 }
 
+#[derive(Args)]
+struct CheckArgs {
+    #[arg(long)]
+    repo: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
 fn main() {
     let json_requested = std::env::args_os().any(|argument| argument == "--json");
     match Cli::try_parse() {
@@ -101,7 +109,7 @@ fn cli_requests_json(cli: &Cli) -> bool {
                 | AssetCommand::Inspect(AssetOperationArgs { json: true, .. })
                 | AssetCommand::AcceptChange(AssetOperationArgs { json: true, .. })
                 | AssetCommand::RepairLineage(AssetOperationArgs { json: true, .. }),
-        }
+        } | Command::Check(CheckArgs { json: true, .. })
     )
 }
 
@@ -136,7 +144,8 @@ fn run(cli: Cli) -> Result<(), mko_core::error::MkoError> {
         Command::Asset {
             command: AssetCommand::RepairLineage(arguments),
         } => repair_asset_lineage(arguments),
-        Command::Source | Command::Check | Command::Human | Command::Hooks => Ok(()),
+        Command::Check(arguments) => check(arguments),
+        Command::Source | Command::Human | Command::Hooks => Ok(()),
     }
 }
 
@@ -221,6 +230,29 @@ fn repair_asset_lineage(arguments: AssetOperationArgs) -> Result<(), mko_core::e
         );
     } else {
         println!("repaired {asset_id}");
+    }
+    Ok(())
+}
+
+fn check(arguments: CheckArgs) -> Result<(), mko_core::error::MkoError> {
+    let asset_ids = lineage_repair_needed(&arguments.repo)?;
+    let result = if asset_ids.is_empty() {
+        "ok"
+    } else {
+        "repair_needed"
+    };
+    if arguments.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "result": result,
+                "asset_ids": asset_ids,
+            })
+        );
+    } else if asset_ids.is_empty() {
+        println!("ok");
+    } else {
+        println!("repair_needed {}", asset_ids.join(","));
     }
     Ok(())
 }
