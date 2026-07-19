@@ -243,6 +243,7 @@ impl Harness {
             "steps": steps,
         });
         normalize_transcript(&mut transcript);
+        self.assert_no_harness_paths(&transcript);
         assert_no_machine_paths(&transcript);
         transcript
     }
@@ -285,6 +286,7 @@ impl Harness {
             ]
         });
         normalize_transcript(&mut transcript);
+        self.assert_no_harness_paths(&transcript);
         assert_no_machine_paths(&transcript);
         let commands = transcript["steps"]
             .as_array()
@@ -428,8 +430,28 @@ impl Harness {
         steps.push(step("mko check --format json-v1", checked));
         let mut transcript = json!({"fixture": "mixed-inbox", "steps": steps});
         normalize_transcript(&mut transcript);
+        self.assert_no_harness_paths(&transcript);
         assert_no_machine_paths(&transcript);
         transcript
+    }
+
+    fn assert_no_harness_paths(&self, transcript: &Value) {
+        let text = serde_json::to_string(transcript).unwrap();
+        let profile = self.config_home.join("mko/profiles.yaml");
+        for forbidden in [
+            self._root.path(),
+            &self.repository,
+            &self.provider,
+            &self.home,
+            &self.config_home,
+            &profile,
+        ] {
+            let forbidden = forbidden.to_str().expect("fixture paths are UTF-8");
+            assert!(
+                !text.contains(forbidden),
+                "harness path leaked into a normalized transcript: {forbidden}"
+            );
+        }
     }
 
     fn run_json<const N: usize>(&self, arguments: [&str; N]) -> Value {

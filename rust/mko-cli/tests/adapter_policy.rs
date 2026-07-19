@@ -24,6 +24,10 @@ fn forward_rubric_path() -> PathBuf {
         .join("../../tests/skill-forward/my-knowledge-os-rubric.md")
 }
 
+fn repository_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
 fn executable_surfaces(markdown: &str) -> String {
     let mut output = String::new();
     let mut in_shell_block = false;
@@ -745,6 +749,9 @@ fn batch_forward_contract_is_future_blind_and_requires_safe_blocker_reporting() 
         "Scenario 5: mixed Inbox batch",
         "healthy-batch.json",
         "only the result of the worker's previous action",
+        "must begin with `mko doctor --format json-v1`",
+        "data.healthy == true",
+        "mko add --inbox --format json-v1",
     ] {
         assert!(
             scenarios.contains(required),
@@ -752,6 +759,7 @@ fn batch_forward_contract_is_future_blind_and_requires_safe_blocker_reporting() 
         );
     }
     for required in [
+        "batch_health_gate",
         "batch_core_discovery",
         "next_action_only",
         "blockers_reported_not_executed",
@@ -761,6 +769,69 @@ fn batch_forward_contract_is_future_blind_and_requires_safe_blocker_reporting() 
         assert!(
             rubric.contains(required),
             "missing batch rubric field: {required}"
+        );
+    }
+}
+
+#[test]
+fn release_guide_and_manual_smoke_preserve_human_only_v0_2_boundaries() {
+    let repository = repository_path();
+    let readme = std::fs::read_to_string(repository.join("README.md"))
+        .expect("README must exist for the release guide");
+    let smoke = std::fs::read_to_string(repository.join("docs/manual-smoke-v0.2.md"))
+        .expect("manual smoke procedure must exist");
+    let skill = std::fs::read_to_string(knowledge_os_skill_path())
+        .expect("canonical My Knowledge OS Skill must exist");
+
+    for required in [
+        "cargo install --path rust/mko-cli --locked",
+        "mko setup",
+        "mko doctor",
+        "이 PDF 정리해줘",
+        "mko add",
+        "mko inbox",
+        "mko status",
+        "mko review",
+        "Advanced v0.1 commands",
+        "generated from the canonical repository copy",
+        "manual",
+    ] {
+        assert!(readme.contains(required), "README is missing: {required}");
+    }
+    for forbidden in ["automatic commit", "automatic push"] {
+        assert!(
+            !readme.to_lowercase().contains(forbidden),
+            "README must not promise {forbidden}"
+        );
+    }
+    for required in [
+        "PENDING USER-ASSISTED LIVE GATE",
+        "Google Drive",
+        "mko setup",
+        "mko doctor",
+        "mko review",
+        "mko check --repo",
+        "manual commit",
+        "Do not record PDF bytes",
+        "absolute provider, repository, or profile paths",
+        "Do not record credentials, tokens, OAuth material, extracted text, runtime bundles, or locks.",
+        "Result: pending",
+    ] {
+        assert!(
+            smoke.contains(required),
+            "manual smoke is missing: {required}"
+        );
+    }
+    assert!(
+        skill.contains("canonical repository copy"),
+        "the installed Skill must identify its repository source of truth"
+    );
+    for forbidden in ["approve", "commit", "push"] {
+        assert!(
+            skill
+                .to_lowercase()
+                .contains(&format!("do not {forbidden}")),
+            "Skill must retain the human-only boundary for {forbidden}"
         );
     }
 }

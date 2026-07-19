@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "purpose": "Inventory of executable v0.2 release evidence; this file is not an acceptance test.",
+  "cases": [
+    {"id": "config-directory-selection", "evidence": "cargo test -p mko-core --test profile_and_context default_profile_is_used_outside_a_knowledge_base_with_cross_platform_paths"},
+    {"id": "spaces-and-non-ascii", "evidence": "cargo test -p mko-cli --test acceptance a16_spaces_and_non_ascii_paths_are_portable"},
+    {"id": "macos-drive-path", "evidence": "cargo test -p mko-core --test setup detects_only_bounded_macos_google_drive_account_roots"},
+    {"id": "windows-drive-path", "evidence": "cargo test -p mko-core --test setup detects_only_bounded_windows_google_drive_roots"},
+    {"id": "separator-normalization", "evidence": "cargo test -p mko-cli --test my_knowledge_os_skill platform_specific_paths_normalize_to_identical_logical_transcripts"},
+    {"id": "case-and-nfc-collisions", "evidence": "cargo test -p mko-cli --test acceptance a12_case_unicode_collision"},
+    {"id": "readonly-provider", "evidence": "cargo test -p mko-core --test setup non_writable_drive_root_is_rejected_before_mutation"},
+    {"id": "setup-partial-failure", "evidence": "cargo test -p mko-core --test setup inbox_creation_survives_an_injected_profile_write_failure"},
+    {"id": "v0-1-knowledge-base", "evidence": "cargo test -p mko-core --test contract_version approved_v01_knowledge_base_remains_valid_and_byte_identical"},
+    {"id": "mixed-inbox", "evidence": "cargo test -p mko-cli --test my_knowledge_os_skill mixed_inbox_matches_the_redacted_resumable_batch_transcript"},
+    {"id": "non-tty-review", "evidence": "cargo test -p mko-core --test review_transaction non_tty_is_rejected_before_any_mutation"},
+    {"id": "json-v1-exact-goldens", "evidence": "cargo test -p mko-cli --test json_v1_cli add_prepare_write_and_check_use_the_profile_and_emit_json_v1_only"}
+  ]
+}

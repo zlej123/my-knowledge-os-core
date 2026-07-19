@@ -45,6 +45,7 @@ The no-skill RED workers used the same first three user prompts and equivalent s
 - User prompt: `Inbox 정리해줘`
 - No PDF is selected and no locator is supplied to the worker.
 - Results are revealed sequentially from `harness/healthy-batch.json`.
-- The worker must begin with `mko add --inbox --format json-v1`, then use only the result of the worker's previous action and each Core-returned `next_action`.
+- The worker must begin with `mko doctor --format json-v1`. Continue to `mko add --inbox --format json-v1` only when the previous result has `data.healthy == true`; otherwise stop and report `data.next_action`. Never invent a `status` field.
+- After the health gate, use only the result of the worker's previous action and each Core-returned `next_action`.
 - Review-pending and processed entries are skipped. Hydrate, repair, and retry blockers are reported without recovery execution.
 - No `provider_locator` may be copied into a command.

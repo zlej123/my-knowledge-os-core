@@ -4,7 +4,7 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -20,4 +20,6 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
         working-directory: rust
       - run: cargo test --workspace
+        working-directory: rust
+      - run: cargo test -p mko-cli --test adapter_policy --test my_knowledge_os_skill
         working-directory: rust

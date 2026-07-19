@@ -7,6 +7,11 @@ description: Use when the user asks to 정리 a personal PDF, 논문, or Inbox i
 
 Turn selected Personal Scope PDFs into checked pending Sources. The Core owns discovery and every durable Markdown or YAML mutation; the agent supplies only strict semantic JSON.
 
+This canonical repository copy is the source of truth. No `mko` command installs Skills: use this
+checked-in file in a workspace, and treat any Codex-installed copy as generated from the canonical
+repository copy. Refresh an installed copy through the host's normal skill mechanism; never edit a
+generated copy as the source of truth.
+
 ## Workflow
 
 For `Inbox 정리해줘`, inspect health, then let the Core discover and register the bounded batch:
