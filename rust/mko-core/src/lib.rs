@@ -22,6 +22,7 @@ pub mod registry;
 pub mod revision;
 pub mod safe_yaml;
 pub mod secret;
+pub mod setup;
 pub mod source;
 pub mod state;
 pub mod version;
