@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod add;
 pub mod approve;
 pub mod atomic;
 pub mod canonical_source;
@@ -18,6 +19,7 @@ pub mod path_policy;
 pub mod pdf;
 pub mod prepare;
 pub mod profile;
+pub mod provider_scan;
 pub mod registry;
 pub mod revision;
 pub mod safe_yaml;

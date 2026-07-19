@@ -13,7 +13,7 @@ use crate::{
     config::{CaptureConfig, load_capture_config},
     context::ResolvedPersonalContext,
     error::MkoError,
-    fingerprint::{asset_id, fingerprint_open_file, validate_pdf_content},
+    fingerprint::{FileSnapshot, asset_id, fingerprint_open_file, validate_pdf_content},
     front_matter::{parse_markdown, render_markdown},
     lock::AssetLock,
     model::{AssetRecord, AssetStatus, Classification, LastError, LastSuccessfulStep, Provider},
@@ -31,6 +31,8 @@ pub struct CaptureRequest {
     domains: Vec<String>,
     slug: Option<String>,
     captured_at: DateTime<Utc>,
+    expected_fingerprint: Option<String>,
+    expected_size_bytes: Option<u64>,
 }
 
 impl CaptureRequest {
@@ -44,6 +46,8 @@ impl CaptureRequest {
             domains: Vec::new(),
             slug: None,
             captured_at: Utc::now(),
+            expected_fingerprint: None,
+            expected_size_bytes: None,
         }
     }
 
@@ -74,6 +78,12 @@ impl CaptureRequest {
 
     pub fn with_captured_at(mut self, captured_at: DateTime<Utc>) -> Self {
         self.captured_at = captured_at;
+        self
+    }
+
+    pub fn with_expected_snapshot(mut self, snapshot: &FileSnapshot) -> Self {
+        self.expected_fingerprint = Some(snapshot.fingerprint.value.clone());
+        self.expected_size_bytes = Some(snapshot.size_bytes);
         self
     }
 }
@@ -397,6 +407,19 @@ where
     let mut file = provider_path.file;
     let before = fingerprint_open_file(&mut file)?;
     validate_pdf_content(&mut file)?;
+    if request
+        .expected_fingerprint
+        .as_ref()
+        .is_some_and(|expected| expected != &before.fingerprint.value)
+        || request
+            .expected_size_bytes
+            .is_some_and(|expected| expected != before.size_bytes)
+    {
+        return Err(MkoError::new(
+            "fingerprint_changed",
+            "PDF no longer matches the snapshot selected for capture",
+        ));
+    }
     let id = asset_id(&before.fingerprint)?;
     let title = request
         .title
