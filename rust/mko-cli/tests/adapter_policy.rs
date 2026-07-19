@@ -24,6 +24,11 @@ fn forward_rubric_path() -> PathBuf {
         .join("../../tests/skill-forward/my-knowledge-os-rubric.md")
 }
 
+fn forward_review_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/reviews/my-knowledge-os-forward-test.md")
+}
+
 fn repository_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -793,7 +798,7 @@ fn release_guide_and_manual_smoke_preserve_human_only_v0_2_boundaries() {
         "mko status",
         "mko review",
         "Advanced v0.1 commands",
-        "generated from the canonical repository copy",
+        "Skill installer or generator.",
         "manual",
     ] {
         assert!(readme.contains(required), "README is missing: {required}");
@@ -805,6 +810,19 @@ fn release_guide_and_manual_smoke_preserve_human_only_v0_2_boundaries() {
         );
     }
     for required in [
+        "mko asset capture --repo <personal-kb> --local-config <private-local-config> --file <provider-pdf> --json",
+        "mko source prepare --repo <personal-kb> --local-config <private-local-config> --asset-id <asset-id> --output <bundle>",
+        "mko source write-draft --repo <personal-kb> --bundle <bundle> --response <semantic-response.json> --json",
+        "mko hooks install --repo <personal-kb> --json",
+        "mko human approve-source --repo <personal-kb> --source-id <source-id> --json",
+        "mko check --repo <personal-kb> --staged",
+    ] {
+        assert!(
+            readme.contains(required),
+            "README advanced command is missing or changed: {required}"
+        );
+    }
+    for required in [
         "PENDING USER-ASSISTED LIVE GATE",
         "Google Drive",
         "mko setup",
@@ -813,6 +831,8 @@ fn release_guide_and_manual_smoke_preserve_human_only_v0_2_boundaries() {
         "mko check --repo",
         "manual commit",
         "Do not record PDF bytes",
+        "Allow the Core and Skill to create their required transient extracted bundle and runtime artifacts",
+        "Do not commit, copy, or record extracted text or those runtime artifacts.",
         "absolute provider, repository, or profile paths",
         "Do not record credentials, tokens, OAuth material, extracted text, runtime bundles, or locks.",
         "Result: pending",
@@ -834,4 +854,29 @@ fn release_guide_and_manual_smoke_preserve_human_only_v0_2_boundaries() {
             "Skill must retain the human-only boundary for {forbidden}"
         );
     }
+}
+
+#[test]
+fn forward_review_labels_historical_evidence_and_current_manual_gates() {
+    let review =
+        std::fs::read_to_string(forward_review_path()).expect("forward review record must exist");
+
+    for required in [
+        "## Historical Task 8 and Task 10 evidence",
+        "## Current release validation",
+        "23 adapter-policy tests",
+        "6 deterministic forward-harness tests",
+        "quick_validate.py: PENDING",
+        "fresh-context worker evaluation: PENDING",
+        "Google Drive smoke: PENDING",
+    ] {
+        assert!(
+            review.contains(required),
+            "forward review is missing: {required}"
+        );
+    }
+    assert!(
+        !review.contains("human_review_boundary"),
+        "forward review must not cite a nonexistent rubric field"
+    );
 }

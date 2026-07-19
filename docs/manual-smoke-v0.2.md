@@ -10,7 +10,8 @@ non-sensitive, locally hydrated Google Drive PDF must perform every interactive 
 
 - Use one Personal Scope PDF that is already available offline in Google Drive streaming storage.
 - Use a private Personal KB with no unrelated staged changes.
-- Do not place the PDF, a copy, or extracted text in the KB.
+- Do not place the PDF or a copy in the KB.
+- Allow the Core and Skill to create their required transient extracted bundle and runtime artifacts below `.knowledge-os/runtime/` while processing. Do not commit, copy, or record extracted text or those runtime artifacts.
 - Do not record PDF bytes, PDF name, or absolute provider, repository, or profile paths in this
   document, Git, issue trackers, or chat logs.
 - Do not record credentials, tokens, OAuth material, extracted text, runtime bundles, or locks.

@@ -48,9 +48,9 @@ explicit manual decisions by the human reviewer.
 
 The canonical Skill source is
 [`skills/codex/my-knowledge-os/SKILL.md`](skills/codex/my-knowledge-os/SKILL.md). There is no
-`mko` Skill installer. Use the checked-in canonical Skill in a workspace; if a Codex environment
-creates an installed copy, it is generated from the canonical repository copy and must be refreshed
-through that environment's normal Skill mechanism. Do not hand-edit a generated installed copy.
+`mko` Skill installer or generator. Use the checked-in canonical Skill in a workspace. If a Codex
+host creates a derived installed copy, that host owns its refresh mechanism; do not hand-edit the
+derived copy as a source of truth.
 
 ## Safety and scope
 
@@ -74,6 +74,8 @@ setup flow above.
 mko asset capture --repo <personal-kb> --local-config <private-local-config> --file <provider-pdf> --json
 mko source prepare --repo <personal-kb> --local-config <private-local-config> --asset-id <asset-id> --output <bundle>
 mko source write-draft --repo <personal-kb> --bundle <bundle> --response <semantic-response.json> --json
+mko hooks install --repo <personal-kb> --json
+mko human approve-source --repo <personal-kb> --source-id <source-id> --json
 mko check --repo <personal-kb> --staged
 ```
 

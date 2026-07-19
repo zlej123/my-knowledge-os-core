@@ -98,6 +98,24 @@ fn platform_specific_paths_normalize_to_identical_logical_transcripts() {
     assert!(!normalized.contains("C:\\\\"));
 }
 
+#[test]
+fn windows_forward_slash_root_leak_is_rejected() {
+    let transcript = json!({
+        "steps": [{
+            "result": {
+                "nested": {"leak": "C:/Knowledge/personal-kb/.knowledge-os/runtime/prepared/a.json"}
+            }
+        }]
+    });
+
+    let roots = vec![r"C:\Knowledge\personal-kb".to_owned()];
+    let result = std::panic::catch_unwind(|| assert_no_known_path_leaks(&transcript, &roots));
+    assert!(
+        result.is_err(),
+        "Windows slash-form root leak was not rejected"
+    );
+}
+
 struct Harness {
     _root: TempDir,
     repository: PathBuf,
@@ -436,22 +454,19 @@ impl Harness {
     }
 
     fn assert_no_harness_paths(&self, transcript: &Value) {
-        let text = serde_json::to_string(transcript).unwrap();
         let profile = self.config_home.join("mko/profiles.yaml");
-        for forbidden in [
+        let roots = [
             self._root.path(),
             &self.repository,
             &self.provider,
             &self.home,
             &self.config_home,
             &profile,
-        ] {
-            let forbidden = forbidden.to_str().expect("fixture paths are UTF-8");
-            assert!(
-                !text.contains(forbidden),
-                "harness path leaked into a normalized transcript: {forbidden}"
-            );
-        }
+        ]
+        .into_iter()
+        .map(|path| path.to_str().expect("fixture paths are UTF-8").to_owned())
+        .collect::<Vec<_>>();
+        assert_no_known_path_leaks(transcript, &roots);
     }
 
     fn run_json<const N: usize>(&self, arguments: [&str; N]) -> Value {
@@ -588,13 +603,47 @@ fn normalize_path_field(value: &mut Value) {
 }
 
 fn assert_no_machine_paths(transcript: &Value) {
-    let text = serde_json::to_string(transcript).unwrap();
-    for forbidden in ["/private/tmp", "/var/folders/", "C:\\\\", "AppData"] {
-        assert!(
-            !text.contains(forbidden),
-            "machine path leaked: {forbidden}"
-        );
+    for value in json_string_values(transcript) {
+        let normalized = normalize_path_for_comparison(value);
+        for forbidden in ["/private/tmp", "/var/folders/", "c:/", "appdata"] {
+            assert!(
+                !normalized.contains(forbidden),
+                "machine path leaked: {value}"
+            );
+        }
     }
+}
+
+fn assert_no_known_path_leaks(transcript: &Value, roots: &[String]) {
+    for value in json_string_values(transcript) {
+        let normalized = normalize_path_for_comparison(value);
+        for root in roots {
+            let root = normalize_path_for_comparison(root);
+            assert!(
+                !normalized.contains(&root),
+                "known harness path leaked into a normalized transcript: {value}"
+            );
+        }
+    }
+}
+
+fn json_string_values(value: &Value) -> Vec<&str> {
+    fn visit<'a>(value: &'a Value, strings: &mut Vec<&'a str>) {
+        match value {
+            Value::String(value) => strings.push(value),
+            Value::Array(values) => values.iter().for_each(|value| visit(value, strings)),
+            Value::Object(values) => values.values().for_each(|value| visit(value, strings)),
+            Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        }
+    }
+
+    let mut strings = Vec::new();
+    visit(value, &mut strings);
+    strings
+}
+
+fn normalize_path_for_comparison(value: &str) -> String {
+    value.replace('\\', "/").to_ascii_lowercase()
 }
 
 fn benign_response() -> Value {
