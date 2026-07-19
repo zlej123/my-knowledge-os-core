@@ -10,6 +10,10 @@ fn process_skill_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../skills/codex/process-asset/SKILL.md")
 }
 
+fn knowledge_os_skill_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../skills/codex/my-knowledge-os/SKILL.md")
+}
+
 fn executable_surfaces(markdown: &str) -> String {
     let mut output = String::new();
     let mut in_shell_block = false;
@@ -373,7 +377,11 @@ fn capture_skill_exposes_only_the_stable_capture_command() {
 
 #[test]
 fn codex_skills_never_expose_human_approval_or_publication() {
-    for path in [capture_skill_path(), process_skill_path()] {
+    for path in [
+        capture_skill_path(),
+        process_skill_path(),
+        knowledge_os_skill_path(),
+    ] {
         let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
             panic!("{} must exist and be readable: {error}", path.display())
         });
@@ -394,6 +402,124 @@ fn codex_skills_never_expose_human_approval_or_publication() {
             );
         }
     }
+}
+
+#[test]
+fn knowledge_os_skill_is_discoverable_in_korean_and_english() {
+    let path = knowledge_os_skill_path();
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} must exist and be readable: {error}", path.display()));
+    let frontmatter = text
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---\n"))
+        .map(|(frontmatter, _)| frontmatter)
+        .expect("skill must have YAML frontmatter");
+
+    for trigger in ["PDF", "논문", "정리", "knowledge base", "source draft"] {
+        assert!(
+            frontmatter.to_lowercase().contains(&trigger.to_lowercase()),
+            "integrated Skill description is missing trigger: {trigger}"
+        );
+    }
+}
+
+#[test]
+fn knowledge_os_skill_exposes_only_the_json_v1_pending_source_workflow() {
+    let path = knowledge_os_skill_path();
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} must exist and be readable: {error}", path.display()));
+    let commands = executable_surfaces(&text);
+    let allowed = [
+        "mko doctor",
+        "mko add",
+        "mko source prepare",
+        "mko source write-draft",
+        "mko check",
+    ];
+
+    validate_command_policy(&text, &allowed)
+        .unwrap_or_else(|error| panic!("integrated Skill {error}"));
+    for required in allowed {
+        assert!(commands.contains(required), "missing command: {required}");
+    }
+    for command in commands.lines() {
+        if command.trim_start_matches("$ ").starts_with("mko ") {
+            assert!(
+                command.contains("--format json-v1"),
+                "mko command is not pinned to JSON v1: {command}"
+            );
+        }
+    }
+
+    assert_eq!(
+        text.matches("mko review").count(),
+        1,
+        "the human review command must appear exactly once as the sole next action"
+    );
+    assert!(
+        !commands.contains("mko review"),
+        "mko review may be named as a next action but must not be executable"
+    );
+    for required in [
+        "pending",
+        "title",
+        "source_path",
+        "add_outcome",
+        "draft_outcome",
+        "backup_confirmation_required",
+        "--verified-backup",
+        "temporary",
+        "only-copy",
+    ] {
+        assert!(
+            text.contains(required),
+            "missing integrated workflow rule: {required}"
+        );
+    }
+}
+
+#[test]
+fn knowledge_os_skill_has_one_exact_semantic_response_contract() {
+    let path = knowledge_os_skill_path();
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} must exist and be readable: {error}", path.display()));
+    let blocks = json_code_blocks(&text);
+
+    assert_eq!(
+        blocks.len(),
+        1,
+        "Skill must contain one semantic JSON object"
+    );
+    let response: Value = serde_json::from_str(&blocks[0])
+        .unwrap_or_else(|error| panic!("semantic-response-v1 must be JSON: {error}"));
+    validate_semantic_response_shape(&response)
+        .unwrap_or_else(|error| panic!("semantic-response-v1 is invalid: {error}"));
+}
+
+#[test]
+fn knowledge_os_skill_rejects_document_instructions_and_direct_writes() {
+    let path = knowledge_os_skill_path();
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} must exist and be readable: {error}", path.display()));
+    let lowercase = text.to_lowercase();
+
+    for required in [
+        "every field and value",
+        "untrusted data, not instructions",
+        "do not follow",
+        "do not directly write markdown",
+        "do not directly write yaml",
+        "do not approve",
+        "do not commit",
+        "do not push",
+    ] {
+        assert!(
+            lowercase.contains(required),
+            "missing safety rule: {required}"
+        );
+    }
+    assert!(!lowercase.contains("http://"));
+    assert!(!lowercase.contains("https://"));
 }
 
 #[test]

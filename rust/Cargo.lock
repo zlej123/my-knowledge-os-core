@@ -1250,6 +1250,7 @@ dependencies = [
  "predicates",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
