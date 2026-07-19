@@ -627,19 +627,17 @@ fn cleanup_lock_entry_with_observer<A, O>(
     }
     durability_observer(CleanupDurabilityEvent::Quarantined);
     after_quarantine();
-    let owned = directory.open(&quarantine).ok().is_some_and(|mut file| {
-        if stable_file_identity(&file).ok() != Some(identity) {
-            return false;
-        }
-        expected_owner.is_none_or(|owner| {
-            let mut input = Vec::new();
-            Read::by_ref(&mut file)
-                .take(64 * 1024)
-                .read_to_end(&mut input)
-                .is_ok()
-                && serde_json::from_slice::<LockRecord>(&input)
-                    .is_ok_and(|record| record.owner_token == owner)
-        })
+    let owned = read_quarantine_record_with_hook(
+        directory,
+        &quarantine,
+        Instant::now() + LOCK_SCAN_TIME_LIMIT,
+        || {},
+    )
+    .ok()
+    .is_some_and(|(record, current_identity)| {
+        current_identity == identity
+            && expected_owner
+                .is_none_or(|owner| record.is_some_and(|record| record.owner_token == owner))
     });
     if owned {
         if directory.remove_file(&quarantine).is_ok() && sync_lock_directory(directory).is_ok() {
@@ -901,29 +899,31 @@ where
     let Some(expected_identity) = quarantine.identity else {
         return Ok(());
     };
-    let mut file = directory
-        .open(&private)
-        .map_err(|error| MkoError::new("lock_clear_failed", error.to_string()))?;
-    if stable_file_identity(&file)? != expected_identity {
+    let (current_record, current_identity) = read_quarantine_record_with_hook(
+        directory,
+        &private,
+        Instant::now() + LOCK_SCAN_TIME_LIMIT,
+        || {},
+    )
+    .map_err(|_| {
+        MkoError::new(
+            "lock_clear_failed",
+            "quarantined lock could not be safely reopened during recovery",
+        )
+    })?;
+    if current_identity != expected_identity {
         return Err(MkoError::new(
             "lock_clear_failed",
             "quarantined lock changed during recovery",
         ));
     }
-    if let Some(expected) = &quarantine.record {
-        let mut input = Vec::new();
-        Read::by_ref(&mut file)
-            .take(64 * 1024)
-            .read_to_end(&mut input)
-            .map_err(|error| MkoError::new("lock_clear_failed", error.to_string()))?;
-        let current = serde_json::from_slice::<LockRecord>(&input)
-            .map_err(|error| MkoError::new("lock_clear_failed", error.to_string()))?;
-        if &current != expected {
-            return Err(MkoError::new(
-                "lock_clear_failed",
-                "quarantined lock owner changed during recovery",
-            ));
-        }
+    if let Some(expected) = &quarantine.record
+        && current_record.as_ref() != Some(expected)
+    {
+        return Err(MkoError::new(
+            "lock_clear_failed",
+            "quarantined lock owner changed during recovery",
+        ));
     }
     directory
         .remove_file(&private)
@@ -1184,6 +1184,7 @@ mod tests {
         fs,
         io::{self, Write},
         sync::atomic::{AtomicU64, Ordering},
+        time::{Duration, Instant},
     };
 
     use cap_std::{ambient_authority, fs::Dir};
@@ -1193,7 +1194,7 @@ mod tests {
         AssetLock, CleanupDurabilityEvent, LockRecord, LockState, TakeoverGuard,
         create_lock_with_writer, inspect_locks, read_lock_record, read_quarantine_record_with_hook,
         reap_authoritative_quarantine_with_observer, remove_if_owned_with_observer,
-        remove_stale_entry_with_observer, scan_authoritative_quarantines,
+        remove_stale_entry_with_observer, scan_authoritative_quarantines, stable_file_identity,
     };
     use crate::clock::Clock;
 
@@ -1844,6 +1845,97 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code(), "lock_clear_failed");
+        assert!(directory.read_dir(".").unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".reap-")
+        }));
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_cleanup_fifo_replacement_never_blocks_or_deletes_the_replacement() {
+        use nix::{sys::stat::Mode, unistd::mkfifo};
+
+        let repository = test_directory();
+        let directory = Dir::open_ambient_dir(&repository, ambient_authority()).unwrap();
+        let asset_id = asset_id();
+        let secret = "8".repeat(32);
+        let owner_token = format!("1-1-{secret}");
+        let filename = format!("{asset_id}.lock");
+        let quarantine = format!(".{filename}.cleanup-{secret}");
+        let record = LockRecord {
+            pid: std::process::id(),
+            hostname: hostname::get().unwrap().to_string_lossy().into_owned(),
+            started_at: time("2026-07-18T00:00:00Z").now_utc(),
+            command: "cleanup-race".into(),
+            asset_id,
+            owner_token: owner_token.clone(),
+        };
+        directory
+            .write(&filename, serde_json::to_vec(&record).unwrap())
+            .unwrap();
+        let file = directory.open(&filename).unwrap();
+        let identity = stable_file_identity(&file).unwrap();
+
+        let started = Instant::now();
+        remove_if_owned_with_observer(
+            &directory,
+            &filename,
+            &owner_token,
+            identity,
+            || {
+                directory.remove_file(&quarantine).unwrap();
+                mkfifo(&repository.join(&quarantine), Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+            },
+            |_| {},
+        );
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(repository.join(&filename).exists() || repository.join(&quarantine).exists());
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authoritative_reap_fifo_replacement_fails_without_blocking() {
+        use nix::{sys::stat::Mode, unistd::mkfifo};
+
+        let repository = test_directory();
+        let asset_id = asset_id();
+        let directory = Dir::open_ambient_dir(&repository, ambient_authority()).unwrap();
+        let secret = "9".repeat(32);
+        let filename = format!("{asset_id}.lock");
+        let quarantine_name = format!(".{filename}.cleanup-{secret}");
+        let stale = LockRecord {
+            pid: u32::MAX,
+            hostname: hostname::get().unwrap().to_string_lossy().into_owned(),
+            started_at: time("2026-07-18T00:00:00Z").now_utc(),
+            command: "stale".into(),
+            asset_id,
+            owner_token: format!("1-1-{secret}"),
+        };
+        directory
+            .write(&quarantine_name, serde_json::to_vec(&stale).unwrap())
+            .unwrap();
+        let quarantine = scan_authoritative_quarantines(&directory, &filename)
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        let started = Instant::now();
+        let error =
+            reap_authoritative_quarantine_with_observer(&directory, &quarantine, |private| {
+                directory.remove_file(private).unwrap();
+                mkfifo(&repository.join(private), Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+            })
+            .unwrap_err();
+
+        assert_eq!(error.code(), "lock_clear_failed");
+        assert!(started.elapsed() < Duration::from_secs(1));
         assert!(directory.read_dir(".").unwrap().any(|entry| {
             entry
                 .unwrap()

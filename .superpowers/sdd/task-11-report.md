@@ -171,6 +171,24 @@ Full verification run from the repository-defined locations:
   two consecutive runs; formatting and warnings-denied Clippy remained green.
 - Fifth independent post-commit code/spec review: pending after this follow-up
   commit.
+- The fifth independent review was not approved because two post-rename cleanup
+  paths still reopened an attacker-replaceable quarantine name with ordinary
+  blocking I/O. An exact-name FIFO could therefore block AssetLock drop or
+  explicit stale-lock recovery despite the bounded scan path.
+- Both cleanup paths now reuse the retained-capability quarantine reader:
+  pre-open regular/non-link validation, no-follow and Unix nonblocking open,
+  post-open handle validation, stable identity comparison, a 4,097-byte read
+  cap, and the lock-scan deadline. Cleanup errors use a static path-free
+  `lock_clear_failed` message.
+- Added regressions that replace the public cleanup name and the private reap
+  name with FIFOs at the precise post-rename hooks. Both complete in under one
+  second, preserve the foreign FIFO under either its public or quarantine name,
+  and never delete or read it as an owned lock.
+- Final controller verification passed: the two focused FIFO cleanup races,
+  repository formatting, workspace Clippy with warnings denied, and the full
+  workspace test suite (86 Core unit tests plus every integration/doc suite).
+- Sixth independent post-commit review: pending after the final follow-up
+  commit.
 
 ## Commit
 
