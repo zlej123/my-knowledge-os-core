@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    ffi::OsString,
     path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
@@ -151,43 +150,7 @@ pub(crate) struct ProviderMetadataEntry {
     pub relative_path: PathBuf,
     hydration: ProviderHydrationDisposition,
     size_bytes: u64,
-    capability: Option<EnumeratedPdfCapability>,
-}
-
-#[derive(Debug)]
-struct EnumeratedPdfCapability {
-    parent: Arc<Dir>,
-    basename: OsString,
-}
-
-impl EnumeratedPdfCapability {
-    fn open_nofollow(&self) -> Result<File, MkoError> {
-        let mut options = OpenOptions::new();
-        options.read(true);
-        configure_nofollow(&mut options, false);
-        let file = self
-            .parent
-            .open_with(&self.basename, &options)
-            .map_err(|error| {
-                MkoError::new(
-                    "scan_file_unreadable",
-                    format!("cannot open enumerated PDF candidate: {error}"),
-                )
-            })?;
-        let metadata = file.metadata().map_err(|error| {
-            MkoError::new(
-                "scan_file_unreadable",
-                format!("cannot inspect enumerated PDF candidate: {error}"),
-            )
-        })?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(MkoError::new(
-                "scan_file_unreadable",
-                "enumerated PDF candidate changed to a non-file or link",
-            ));
-        }
-        Ok(file)
-    }
+    retained_file: Option<File>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -297,7 +260,7 @@ fn scan_provider_catalog_metadata_first_inner(
         let relative_path = entry.relative_path.clone();
         match materialize_metadata_entry(entry, |relative_path, file| {
             fingerprint_retained_pdf(relative_path, file, deadline)
-        })? {
+        }) {
             ProviderMetadataAccess::Placeholder => {
                 entries.push(ProviderCatalogEntry::Placeholder {
                     provider_locator: logical_locator(&relative_path)?,
@@ -345,21 +308,22 @@ fn catalog_locator(entry: &ProviderCatalogEntry) -> &str {
 
 fn materialize_metadata_entry<T>(
     mut entry: ProviderMetadataEntry,
-    inspect_content: impl FnOnce(&Path, &mut File) -> T,
-) -> Result<ProviderMetadataAccess<T>, MkoError> {
+    inspect_content: impl FnOnce(&Path, &mut File) -> Result<T, MkoError>,
+) -> ProviderMetadataAccess<Result<T, MkoError>> {
     let relative_path = entry.relative_path.clone();
     match entry.hydration {
-        ProviderHydrationDisposition::Placeholder => Ok(ProviderMetadataAccess::Placeholder),
+        ProviderHydrationDisposition::Placeholder => ProviderMetadataAccess::Placeholder,
         ProviderHydrationDisposition::Supported | ProviderHydrationDisposition::Unsupported => {
-            let capability = entry.capability.take().ok_or_else(|| {
-                MkoError::new(
-                    "provider_inspection_failed",
-                    "readable metadata entry has no retained parent capability",
-                )
-            })?;
-            let mut file = capability.open_nofollow()?;
-            let inspected = inspect_content(&relative_path, &mut file);
-            Ok(match entry.hydration {
+            let inspected = entry.retained_file.as_mut().map_or_else(
+                || {
+                    Err(MkoError::new(
+                        "scan_file_unreadable",
+                        "readable metadata entry has no retained file handle",
+                    ))
+                },
+                |file| inspect_content(&relative_path, file),
+            );
+            match entry.hydration {
                 ProviderHydrationDisposition::Supported => {
                     ProviderMetadataAccess::Supported(inspected)
                 }
@@ -367,7 +331,7 @@ fn materialize_metadata_entry<T>(
                     ProviderMetadataAccess::Unsupported(inspected)
                 }
                 ProviderHydrationDisposition::Placeholder => unreachable!(),
-            })
+            }
         }
     }
 }
@@ -410,6 +374,8 @@ fn metadata_issue_warning(issue: &ProviderMetadataIssue) -> ProviderScanWarning 
         "scan_byte_limit"
     } else if issue.message.contains("depth limit") {
         "scan_depth_limit"
+    } else if issue.message.contains("enumerated PDF candidate") {
+        "scan_file_unreadable"
     } else {
         "provider_inspection_failed"
     };
@@ -681,44 +647,60 @@ fn inspect_enumerated_pdf(
         enumerated.len(),
         || inspect_nofollow_pdf_metadata(directory, name),
     )?;
-    attach_enumerated_capability(&mut inspected, directory, entry.file_name());
+    attach_enumerated_file(&mut inspected, entry)?;
     Ok(inspected)
 }
 
 #[cfg(not(windows))]
 fn inspect_enumerated_pdf(
-    _: &DirEntry,
+    entry: &DirEntry,
     directory: &Arc<Dir>,
     name: &str,
     relative_path: PathBuf,
 ) -> Result<ProviderMetadataEntry, String> {
     let size_bytes = inspect_nofollow_pdf_metadata(directory, name)?;
     let hydration = non_windows_hydration_disposition(directory, name)?;
+    let retained_file = if hydration == ProviderHydrationDisposition::Placeholder {
+        None
+    } else {
+        Some(open_enumerated_file(entry, size_bytes)?)
+    };
     Ok(ProviderMetadataEntry {
         relative_path,
         hydration,
         size_bytes,
-        capability: (hydration != ProviderHydrationDisposition::Placeholder).then(|| {
-            EnumeratedPdfCapability {
-                parent: Arc::clone(directory),
-                basename: OsString::from(name),
-            }
-        }),
+        retained_file,
     })
 }
 
 #[cfg(windows)]
-fn attach_enumerated_capability(
+fn attach_enumerated_file(
     entry: &mut ProviderMetadataEntry,
-    directory: &Arc<Dir>,
-    basename: OsString,
-) {
+    directory_entry: &DirEntry,
+) -> Result<(), String> {
     if entry.hydration != ProviderHydrationDisposition::Placeholder {
-        entry.capability = Some(EnumeratedPdfCapability {
-            parent: Arc::clone(directory),
-            basename,
-        });
+        entry.retained_file = Some(open_enumerated_file(directory_entry, entry.size_bytes)?);
     }
+    Ok(())
+}
+
+fn open_enumerated_file(entry: &DirEntry, expected_size: u64) -> Result<File, String> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_nofollow(&mut options, false);
+    let file = entry
+        .open_with(&options)
+        .map_err(|error| format!("cannot open enumerated PDF candidate: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("cannot inspect enumerated PDF candidate: {error}"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("enumerated PDF candidate changed to a non-file or link".into());
+    }
+    if metadata.len() != expected_size {
+        return Err("enumerated PDF candidate changed size before its handle was retained".into());
+    }
+    Ok(file)
 }
 
 fn inspect_nofollow_pdf_metadata(directory: &Dir, name: &str) -> Result<u64, String> {
@@ -751,14 +733,14 @@ fn inspect_windows_enumerated_pdf(
             relative_path,
             hydration: ProviderHydrationDisposition::Placeholder,
             size_bytes: enumerated_size,
-            capability: None,
+            retained_file: None,
         });
     }
     Ok(ProviderMetadataEntry {
         relative_path,
         hydration: ProviderHydrationDisposition::Supported,
         size_bytes: inspect_metadata_handle()?,
-        capability: None,
+        retained_file: None,
     })
 }
 
@@ -1326,6 +1308,76 @@ mod metadata_walk_tests {
         assert_eq!(pdf.fingerprint, expected);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn materialization_uses_exact_enumerated_handle_after_same_basename_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let paper = root.path().join("paper.pdf");
+        fs::write(&paper, b"%PDF-1.7\noriginal\n%%EOF\n").unwrap();
+        let expected = fingerprint_file(&paper).unwrap();
+
+        let scan = scan_provider_catalog_metadata_first_with_after_walk(
+            ProviderScanRequest::new(root.path()),
+            &FixedElapsedClock,
+            || {
+                fs::rename(&paper, root.path().join("enumerated-original.pdf")).unwrap();
+                fs::write(&paper, b"%PDF-1.7\nreplacement\n%%EOF\n").unwrap();
+            },
+        )
+        .unwrap();
+
+        assert_eq!(only_readable_fingerprint(&scan), expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deletion_after_enumeration_does_not_become_a_top_level_error() {
+        let root = tempfile::tempdir().unwrap();
+        let paper = root.path().join("paper.pdf");
+        fs::write(&paper, b"%PDF-1.7\ndeleted name\n%%EOF\n").unwrap();
+        let expected = fingerprint_file(&paper).unwrap();
+
+        let scan = scan_provider_catalog_metadata_first_with_after_walk(
+            ProviderScanRequest::new(root.path()),
+            &FixedElapsedClock,
+            || fs::remove_file(&paper).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(only_readable_fingerprint(&scan), expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn basename_symlink_race_never_reads_the_link_target_or_errors_the_command() {
+        let root = tempfile::tempdir().unwrap();
+        let paper = root.path().join("paper.pdf");
+        fs::write(&paper, b"%PDF-1.7\noriginal handle\n%%EOF\n").unwrap();
+        let expected = fingerprint_file(&paper).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_paper = outside.path().join("outside.pdf");
+        fs::write(&outside_paper, b"%PDF-1.7\noutside target\n%%EOF\n").unwrap();
+
+        let scan = scan_provider_catalog_metadata_first_with_after_walk(
+            ProviderScanRequest::new(root.path()),
+            &FixedElapsedClock,
+            || {
+                fs::rename(&paper, root.path().join("enumerated-original.pdf")).unwrap();
+                symlink(&outside_paper, &paper).unwrap();
+            },
+        )
+        .unwrap();
+
+        assert_eq!(only_readable_fingerprint(&scan), expected);
+    }
+
+    fn only_readable_fingerprint(scan: &super::ProviderCatalogScan) -> crate::model::Fingerprint {
+        let [ProviderCatalogEntry::Readable(pdf)] = scan.entries.as_slice() else {
+            panic!("expected exactly one readable PDF: {:?}", scan.warnings);
+        };
+        pdf.fingerprint.clone()
+    }
+
     #[test]
     fn metadata_walk_enforces_the_shared_entry_bound_before_collecting_a_directory() {
         let root = tempfile::tempdir().unwrap();
@@ -1419,15 +1471,35 @@ mod metadata_walk_tests {
         .unwrap();
         let content_open_calls = Cell::new(0);
 
-        let materialized = materialize_metadata_entry(entry, |_, _| {
-            content_open_calls.set(content_open_calls.get() + 1);
-            unreachable!("placeholder content must never be opened")
-        })
-        .unwrap();
+        let materialized =
+            materialize_metadata_entry(entry, |_, _| -> Result<(), crate::error::MkoError> {
+                content_open_calls.set(content_open_calls.get() + 1);
+                unreachable!("placeholder content must never be opened")
+            });
 
         assert!(matches!(materialized, ProviderMetadataAccess::Placeholder));
         assert_eq!(metadata_calls.get(), 0);
         assert_eq!(content_open_calls.get(), 0);
+    }
+
+    #[test]
+    fn missing_retained_handle_is_a_per_entry_unreadable_result() {
+        let entry = super::ProviderMetadataEntry {
+            relative_path: PathBuf::from("missing-handle.pdf"),
+            hydration: super::ProviderHydrationDisposition::Supported,
+            size_bytes: 42,
+            retained_file: None,
+        };
+
+        let materialized =
+            materialize_metadata_entry(entry, |_, _| -> Result<(), crate::error::MkoError> {
+                unreachable!("a missing handle cannot be inspected")
+            });
+
+        let ProviderMetadataAccess::Supported(Err(error)) = materialized else {
+            panic!("missing handle must stay a per-entry error");
+        };
+        assert_eq!(error.code(), "scan_file_unreadable");
     }
 
     #[test]

@@ -477,6 +477,9 @@ fn read_lock_asset_ids_with_after_open(
     deadline: &ScanDeadline<'_>,
     after_open: impl FnOnce(),
 ) -> LockScan {
+    if deadline.check().is_err() {
+        return lock_scan_timeout();
+    }
     let directory = match open_lock_directory_nofollow(repository_root) {
         Ok(Some(directory)) => directory,
         Ok(None) => {
@@ -495,13 +498,7 @@ fn read_lock_asset_ids_with_after_open(
     let mut names = Vec::new();
     for entry in entries {
         if deadline.check().is_err() {
-            return LockScan {
-                complete: false,
-                warning: Some(lock_scan_warning(
-                    "The runtime lock scan reached its time limit.",
-                )),
-                ..LockScan::default()
-            };
+            return lock_scan_timeout();
         }
         let Ok(entry) = entry else {
             return incomplete_lock_scan("cannot enumerate every runtime lock");
@@ -529,6 +526,9 @@ fn read_lock_asset_ids_with_after_open(
             }
         }
     }
+    if deadline.check().is_err() {
+        return lock_scan_timeout();
+    }
     names.sort();
     let mut ids = BTreeSet::new();
     for name in names {
@@ -542,6 +542,16 @@ fn read_lock_asset_ids_with_after_open(
         asset_ids: ids,
         complete: true,
         warning: None,
+    }
+}
+
+fn lock_scan_timeout() -> LockScan {
+    LockScan {
+        complete: false,
+        warning: Some(lock_scan_warning(
+            "The runtime lock scan reached its time limit.",
+        )),
+        ..LockScan::default()
     }
 }
 
@@ -716,7 +726,10 @@ impl From<InboxScanResult> for InboxData {
 
 #[cfg(test)]
 mod lock_scan_tests {
-    use std::fs;
+    use std::{
+        fs,
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
@@ -762,5 +775,71 @@ mod lock_scan_tests {
         assert!(scan.complete);
         assert!(scan.asset_ids.contains("internal"));
         assert!(!scan.asset_ids.contains("external"));
+    }
+
+    #[test]
+    fn expired_deadline_fails_closed_before_opening_a_missing_lock_directory() {
+        let repository = tempfile::tempdir().unwrap();
+        let clock = MutableElapsedClock::default();
+        let deadline = ScanDeadline::start(
+            &clock,
+            crate::provider_scan::ScanLimits {
+                max_elapsed_ms: 1,
+                ..DEFAULT_SCAN_LIMITS
+            },
+        );
+        clock.elapsed_ms.store(1, Ordering::Relaxed);
+
+        let scan = super::read_lock_asset_ids(
+            repository.path(),
+            DEFAULT_SCAN_LIMITS.max_entries,
+            &deadline,
+        );
+
+        assert_lock_timeout(scan);
+    }
+
+    #[test]
+    fn expired_deadline_fails_closed_after_enumerating_an_empty_lock_directory() {
+        let repository = tempfile::tempdir().unwrap();
+        fs::create_dir_all(repository.path().join(".knowledge-os/runtime/locks")).unwrap();
+        let clock = MutableElapsedClock::default();
+        let deadline = ScanDeadline::start(
+            &clock,
+            crate::provider_scan::ScanLimits {
+                max_elapsed_ms: 1,
+                ..DEFAULT_SCAN_LIMITS
+            },
+        );
+        clock.elapsed_ms.store(1, Ordering::Relaxed);
+
+        let scan = super::read_lock_asset_ids(
+            repository.path(),
+            DEFAULT_SCAN_LIMITS.max_entries,
+            &deadline,
+        );
+
+        assert_lock_timeout(scan);
+    }
+
+    #[derive(Default)]
+    struct MutableElapsedClock {
+        elapsed_ms: AtomicU64,
+    }
+
+    impl ElapsedClock for MutableElapsedClock {
+        fn elapsed_ms(&self) -> u64 {
+            self.elapsed_ms.load(Ordering::Relaxed)
+        }
+    }
+
+    fn assert_lock_timeout(scan: super::LockScan) {
+        assert!(!scan.complete);
+        let warning = scan.warning.expect("timeout warning");
+        assert_eq!(warning.code, "lock_scan_incomplete");
+        assert_eq!(
+            warning.message,
+            "The runtime lock scan reached its time limit."
+        );
     }
 }
