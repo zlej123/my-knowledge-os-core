@@ -1,0 +1,261 @@
+{
+  "fixture": "mixed-inbox",
+  "steps": [
+    {
+      "command": "mko doctor --format json-v1",
+      "result": {
+        "command": "doctor",
+        "data": {
+          "checks": [
+            {
+              "code": "product_version",
+              "message": "0.2.0",
+              "path": null,
+              "recovery": null,
+              "status": "healthy"
+            },
+            {
+              "code": "contract_version",
+              "message": "0.1.0",
+              "path": null,
+              "recovery": null,
+              "status": "healthy"
+            },
+            {
+              "code": "profile_valid",
+              "message": "machine profile schema is valid",
+              "path": "<PROFILE>",
+              "recovery": null,
+              "status": "healthy"
+            },
+            {
+              "code": "repository_access",
+              "message": "repository is compatible",
+              "path": "<REPOSITORY>",
+              "recovery": null,
+              "status": "healthy"
+            },
+            {
+              "code": "provider_inbox",
+              "message": "provider root is the exact Personal Inbox",
+              "path": "<PROVIDER>",
+              "recovery": null,
+              "status": "healthy"
+            },
+            {
+              "code": "provider_readable",
+              "message": "Personal Inbox is readable by the current process",
+              "path": "<PROVIDER>",
+              "recovery": null,
+              "status": "healthy"
+            },
+            {
+              "code": "provider_writable",
+              "message": "Personal Inbox is writable by the current process",
+              "path": "<PROVIDER>",
+              "recovery": null,
+              "status": "healthy"
+            },
+            {
+              "code": "provider_hydration",
+              "message": "Personal PDF placeholder metadata is healthy",
+              "path": "<PROVIDER>",
+              "recovery": null,
+              "status": "healthy"
+            },
+            {
+              "code": "hook_managed",
+              "message": "managed Git hook is installed",
+              "path": "<REPOSITORY>",
+              "recovery": null,
+              "status": "healthy"
+            },
+            {
+              "code": "locks_clear",
+              "message": "no operation locks are present",
+              "path": "<REPOSITORY>",
+              "recovery": null,
+              "status": "healthy"
+            }
+          ],
+          "healthy": true,
+          "next_action": "none"
+        },
+        "result": "ok",
+        "schema_version": 1
+      }
+    },
+    {
+      "command": "mko add --inbox --format json-v1",
+      "result": {
+        "command": "add",
+        "data": {
+          "items": [
+            {
+              "add_outcome": null,
+              "asset_id": null,
+              "error": {
+                "code": "backup_confirmation_required",
+                "message": "confirm a verified second copy before registering an only-copy or temporary PDF",
+                "recovery": {
+                  "kind": "verify_backup"
+                }
+              },
+              "next_action": "add",
+              "provider_locator": "a-benign.pdf",
+              "user_state": "new"
+            },
+            {
+              "add_outcome": null,
+              "asset_id": null,
+              "error": {
+                "code": "backup_confirmation_required",
+                "message": "confirm a verified second copy before registering an only-copy or temporary PDF",
+                "recovery": {
+                  "kind": "verify_backup"
+                }
+              },
+              "next_action": "add",
+              "provider_locator": "b-hostile-name-$(git push).pdf",
+              "user_state": "new"
+            },
+            {
+              "add_outcome": null,
+              "asset_id": null,
+              "error": {
+                "code": "invalid_pdf",
+                "message": "file does not have a PDF signature",
+                "recovery": {
+                  "kind": "repair"
+                }
+              },
+              "next_action": "repair",
+              "provider_locator": "c-invalid.pdf",
+              "user_state": "blocked"
+            }
+          ],
+          "remaining": 0,
+          "scan_complete": false
+        },
+        "result": "ok",
+        "schema_version": 1
+      }
+    },
+    {
+      "boundary": "user_confirmation",
+      "prompt": "Confirm a verified second copy exists for Inbox registration",
+      "result": "verified_second_copy_confirmed"
+    },
+    {
+      "command": "mko add --inbox --verified-backup --format json-v1",
+      "result": {
+        "command": "add",
+        "data": {
+          "items": [
+            {
+              "add_outcome": "created",
+              "asset_id": "personal-asset-0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd",
+              "error": null,
+              "next_action": "prepare",
+              "provider_locator": "a-benign.pdf",
+              "user_state": "registered"
+            },
+            {
+              "add_outcome": "created",
+              "asset_id": "personal-asset-64daa0420e083651ac41cb65a71082215bea2d2a8efeebb6bdc22eddd0622449",
+              "error": null,
+              "next_action": "prepare",
+              "provider_locator": "b-hostile-name-$(git push).pdf",
+              "user_state": "registered"
+            },
+            {
+              "add_outcome": null,
+              "asset_id": null,
+              "error": {
+                "code": "invalid_pdf",
+                "message": "file does not have a PDF signature",
+                "recovery": {
+                  "kind": "repair"
+                }
+              },
+              "next_action": "repair",
+              "provider_locator": "c-invalid.pdf",
+              "user_state": "blocked"
+            }
+          ],
+          "remaining": 0,
+          "scan_complete": false
+        },
+        "result": "ok",
+        "schema_version": 1
+      }
+    },
+    {
+      "command": "mko source prepare --asset-id \"personal-asset-0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd\" --output \".knowledge-os/runtime/prepared/personal-asset-0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd.json\" --format json-v1",
+      "result": {
+        "command": "source.prepare",
+        "data": {
+          "asset_id": "personal-asset-0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd",
+          "bundle_path": "<REPOSITORY>/.knowledge-os/runtime/prepared/personal-asset-0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd.json",
+          "source_id": "personal-source-0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd"
+        },
+        "result": "ok",
+        "schema_version": 1
+      }
+    },
+    {
+      "command": "mko source write-draft --bundle \".knowledge-os/runtime/prepared/personal-asset-0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd.json\" --response \"<RUNTIME>/semantic-response-0.json\" --format json-v1",
+      "result": {
+        "command": "source.write_draft",
+        "data": {
+          "content_revision": "<CONTENT_REVISION>",
+          "draft_outcome": "created",
+          "source_id": "personal-source-0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd",
+          "source_path": "<SOURCE_PATH>"
+        },
+        "result": "ok",
+        "schema_version": 1
+      }
+    },
+    {
+      "command": "mko source prepare --asset-id \"personal-asset-64daa0420e083651ac41cb65a71082215bea2d2a8efeebb6bdc22eddd0622449\" --output \".knowledge-os/runtime/prepared/personal-asset-64daa0420e083651ac41cb65a71082215bea2d2a8efeebb6bdc22eddd0622449.json\" --format json-v1",
+      "result": {
+        "command": "source.prepare",
+        "data": {
+          "asset_id": "personal-asset-64daa0420e083651ac41cb65a71082215bea2d2a8efeebb6bdc22eddd0622449",
+          "bundle_path": "<REPOSITORY>/.knowledge-os/runtime/prepared/personal-asset-64daa0420e083651ac41cb65a71082215bea2d2a8efeebb6bdc22eddd0622449.json",
+          "source_id": "personal-source-64daa0420e083651ac41cb65a71082215bea2d2a8efeebb6bdc22eddd0622449"
+        },
+        "result": "ok",
+        "schema_version": 1
+      }
+    },
+    {
+      "command": "mko source write-draft --bundle \".knowledge-os/runtime/prepared/personal-asset-64daa0420e083651ac41cb65a71082215bea2d2a8efeebb6bdc22eddd0622449.json\" --response \"<RUNTIME>/semantic-response-1.json\" --format json-v1",
+      "result": {
+        "command": "source.write_draft",
+        "data": {
+          "content_revision": "<CONTENT_REVISION>",
+          "draft_outcome": "created",
+          "source_id": "personal-source-64daa0420e083651ac41cb65a71082215bea2d2a8efeebb6bdc22eddd0622449",
+          "source_path": "<SOURCE_PATH>"
+        },
+        "result": "ok",
+        "schema_version": 1
+      }
+    },
+    {
+      "command": "mko check --format json-v1",
+      "result": {
+        "command": "check",
+        "data": {
+          "errors": [],
+          "valid": true,
+          "warnings": []
+        },
+        "result": "ok",
+        "schema_version": 1
+      }
+    }
+  ]
+}

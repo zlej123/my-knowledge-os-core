@@ -16,8 +16,12 @@ use crate::{
     context::ResolvedPersonalContext,
     error::MkoError,
     fingerprint::{FileSnapshot, asset_id, fingerprint_open_file, validate_pdf_content},
-    json_v1::{AddOutcome, ImportOutcome},
+    inbox::{InboxScanRequest, scan_inbox_for_add},
+    json_v1::{
+        AddOutcome, ImportOutcome, JsonV1Error, NextAction, Recovery, RecoveryKind, UserState,
+    },
     model::AssetRecord,
+    path_policy::provider_path,
     path_policy::validate_portable_relative_path,
     provider_scan::{
         DEFAULT_SCAN_LIMITS, ElapsedClock, ProviderScanRequest, excluded_name, scan_provider_pdfs,
@@ -40,16 +44,16 @@ pub enum BackupAttestation {
 #[derive(Clone, Debug)]
 pub struct AddRequest {
     context: ResolvedPersonalContext,
-    source: PathBuf,
+    input: AddInput,
     backup_attestation: BackupAttestation,
     temporary_source: bool,
 }
 
 impl AddRequest {
-    pub fn new(context: ResolvedPersonalContext, source: impl AsRef<Path>) -> Self {
+    pub fn new(context: ResolvedPersonalContext, input: impl Into<AddInput>) -> Self {
         Self {
             context,
-            source: source.as_ref().to_path_buf(),
+            input: input.into(),
             backup_attestation: BackupAttestation::OutsideOriginalRetained,
             temporary_source: false,
         }
@@ -67,6 +71,18 @@ impl AddRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AddInput {
+    File(PathBuf),
+    InboxScan,
+}
+
+impl<T: AsRef<Path>> From<T> for AddInput {
+    fn from(path: T) -> Self {
+        Self::File(path.as_ref().to_path_buf())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AddResult {
     pub add_outcome: AddOutcome,
     pub import_outcome: ImportOutcome,
@@ -76,13 +92,64 @@ pub struct AddResult {
     pub provider_locator: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchItemResult {
+    pub provider_locator: String,
+    pub user_state: UserState,
+    pub next_action: NextAction,
+    pub asset_id: Option<String>,
+    pub add_outcome: Option<AddOutcome>,
+    pub error: Option<JsonV1Error>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchAddResult {
+    pub scan_complete: bool,
+    pub items: Vec<BatchItemResult>,
+    pub remaining: u64,
+}
+
+#[derive(Clone, Debug)]
+struct BatchItemSeed {
+    provider_locator: String,
+    user_state: UserState,
+    next_action: NextAction,
+    asset_id: Option<String>,
+    diagnostic: Option<crate::json_v1::DiagnosticData>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AddRunResult {
+    Single(AddResult),
+    Batch(BatchAddResult),
+}
+
+pub fn add(
+    request: AddRequest,
+    audit_clock: &dyn Clock,
+    elapsed_clock: &dyn ElapsedClock,
+) -> Result<AddRunResult, MkoError> {
+    match request.input {
+        AddInput::File(_) => add_pdf(request, audit_clock, elapsed_clock).map(AddRunResult::Single),
+        AddInput::InboxScan => {
+            add_inbox(request, audit_clock, elapsed_clock).map(AddRunResult::Batch)
+        }
+    }
+}
+
 pub fn add_pdf(
     request: AddRequest,
     audit_clock: &dyn Clock,
     elapsed_clock: &dyn ElapsedClock,
 ) -> Result<AddResult, MkoError> {
     let config = CaptureConfig::from_resolved_context(&request.context)?;
-    let source_path = absolute_path(&request.source)?;
+    let AddInput::File(source) = &request.input else {
+        return Err(MkoError::new(
+            "add_input_invalid",
+            "single PDF add requires a file input",
+        ));
+    };
+    let source_path = absolute_path(source)?;
     let (source_file, canonical_source) = open_source_nofollow(&source_path)?;
     let source_snapshot = validated_snapshot(&source_file)?;
     let id = asset_id(&source_snapshot.fingerprint)?;
@@ -227,6 +294,295 @@ pub fn add_pdf(
         registry_path: capture.registry_path,
         provider_locator,
     })
+}
+
+fn add_inbox(
+    request: AddRequest,
+    audit_clock: &dyn Clock,
+    elapsed_clock: &dyn ElapsedClock,
+) -> Result<BatchAddResult, MkoError> {
+    let scan = scan_inbox_for_add(
+        InboxScanRequest::new(
+            &request.context.repository_root,
+            &request.context.provider_root,
+        ),
+        elapsed_clock,
+    )?;
+    let report = scan.report;
+    let unsafe_partial =
+        !report.errors.is_empty() || report.warnings.iter().any(structural_scan_diagnostic);
+    let mut seeds = report
+        .items
+        .into_iter()
+        .filter(|item| item.next_action != NextAction::None)
+        .map(|item| BatchItemSeed {
+            provider_locator: item.provider_locator,
+            user_state: item.user_state,
+            next_action: item.next_action,
+            asset_id: item.asset_id,
+            diagnostic: item.diagnostic,
+        })
+        .collect::<Vec<_>>();
+    for diagnostic in report
+        .warnings
+        .iter()
+        .chain(report.errors.iter())
+        .filter(|diagnostic| provider_item_diagnostic(diagnostic))
+    {
+        let Some(locator) = diagnostic.path.clone() else {
+            continue;
+        };
+        if validate_portable_relative_path(&locator).is_err()
+            || seeds.iter().any(|item| item.provider_locator == locator)
+        {
+            continue;
+        }
+        seeds.push(BatchItemSeed {
+            provider_locator: locator,
+            user_state: UserState::Blocked,
+            next_action: recovery_action_for_code(&diagnostic.code),
+            asset_id: None,
+            diagnostic: Some(diagnostic.clone()),
+        });
+    }
+    seeds.sort_by(|left, right| {
+        normalized_locator_bytes(&left.provider_locator)
+            .cmp(&normalized_locator_bytes(&right.provider_locator))
+    });
+    let limit = usize::try_from(report.scan_limits.max_batch_items).unwrap_or(usize::MAX);
+    let extra = seeds.len().saturating_sub(limit) as u64;
+    seeds.truncate(limit);
+
+    let mut items = Vec::new();
+    for seed in seeds {
+        let output_priority = batch_output_priority(&seed.next_action);
+        let result = if seed.next_action == NextAction::Add && !unsafe_partial {
+            let outcome = if request.backup_attestation != BackupAttestation::UserVerified {
+                Err(backup_confirmation_required())
+            } else {
+                capture_discovered_item(
+                    &request.context,
+                    &seed.provider_locator,
+                    scan.snapshots.get(&seed.provider_locator),
+                    audit_clock,
+                )
+            };
+            match outcome {
+                Ok((add_outcome, asset_id)) => BatchItemResult {
+                    provider_locator: seed.provider_locator,
+                    user_state: UserState::Registered,
+                    next_action: NextAction::Prepare,
+                    asset_id: Some(asset_id),
+                    add_outcome: Some(add_outcome),
+                    error: None,
+                },
+                Err(error) => batch_error_item(
+                    seed.provider_locator,
+                    seed.user_state,
+                    seed.next_action,
+                    seed.asset_id,
+                    error,
+                ),
+            }
+        } else if seed.next_action == NextAction::Add {
+            batch_error_item(
+                seed.provider_locator,
+                UserState::Blocked,
+                NextAction::Retry,
+                seed.asset_id,
+                MkoError::new(
+                    "provider_scan_incomplete",
+                    "The inbox scan was incomplete; retry after resolving its blockers.",
+                ),
+            )
+        } else {
+            let add_outcome = (seed.asset_id.is_some() && seed.user_state != UserState::Blocked)
+                .then_some(AddOutcome::Existing);
+            BatchItemResult {
+                provider_locator: seed.provider_locator,
+                user_state: seed.user_state,
+                next_action: seed.next_action,
+                asset_id: seed.asset_id,
+                add_outcome,
+                error: seed.diagnostic.map(json_error_from_diagnostic),
+            }
+        };
+        items.push((output_priority, result));
+    }
+    items.sort_by(|(left_priority, left), (right_priority, right)| {
+        left_priority.cmp(right_priority).then_with(|| {
+            normalized_locator_bytes(&left.provider_locator)
+                .cmp(&normalized_locator_bytes(&right.provider_locator))
+        })
+    });
+    Ok(BatchAddResult {
+        scan_complete: report.scan_complete && !unsafe_partial && extra == 0,
+        items: items.into_iter().map(|(_, item)| item).collect(),
+        remaining: report.remaining.saturating_add(extra),
+    })
+}
+
+fn capture_discovered_item(
+    context: &ResolvedPersonalContext,
+    locator: &str,
+    expected: Option<&crate::inbox::DiscoveredPdfSnapshot>,
+    audit_clock: &dyn Clock,
+) -> Result<(AddOutcome, String), MkoError> {
+    validate_portable_relative_path(locator)?;
+    let config = CaptureConfig::from_resolved_context(context)?;
+    let relative = PathBuf::from(locator);
+    let source = config.provider_root.join(&relative);
+    let expected = expected.ok_or_else(|| {
+        MkoError::new(
+            "provider_scan_incomplete",
+            "The discovered inbox item has no readable content snapshot.",
+        )
+    })?;
+    let mut retained = provider_path(&config.provider_root, &source)?.file;
+    let actual = fingerprint_open_file(&mut retained)?;
+    validate_pdf_content(&mut retained)?;
+    if actual.fingerprint != expected.fingerprint || actual.size_bytes != expected.size_bytes {
+        return Err(MkoError::new(
+            "fingerprint_changed",
+            "The inbox item changed after discovery and was not registered.",
+        ));
+    }
+    let capture = capture_asset(
+        CaptureRequest::new(&config.repository_root, &source)
+            .with_resolved_context(ResolvedPersonalContext {
+                repository_root: config.repository_root,
+                provider_root: config.provider_root,
+                provider_type: config.provider_type,
+                profile_name: context.profile_name.clone(),
+                scope: context.scope,
+                source: context.source,
+            })
+            .with_captured_at(audit_clock.now_utc())
+            .with_expected_snapshot(&actual),
+    )?;
+    let outcome = match capture.result.as_str() {
+        "created" => AddOutcome::Created,
+        "existing" => AddOutcome::Existing,
+        _ => {
+            return Err(MkoError::new(
+                "capture_result_invalid",
+                "capture returned an unknown result",
+            ));
+        }
+    };
+    Ok((outcome, capture.asset_id))
+}
+
+fn normalized_locator_bytes(locator: &str) -> Vec<u8> {
+    locator.nfc().collect::<String>().into_bytes()
+}
+
+fn batch_output_priority(action: &NextAction) -> u8 {
+    match action {
+        NextAction::Add => 0,
+        NextAction::Prepare => 1,
+        NextAction::WriteDraft => 2,
+        NextAction::Review => 3,
+        NextAction::Repair => 4,
+        NextAction::Hydrate => 5,
+        NextAction::Retry => 6,
+        NextAction::Configure => 7,
+        NextAction::None => 8,
+    }
+}
+
+fn provider_item_diagnostic(diagnostic: &crate::json_v1::DiagnosticData) -> bool {
+    diagnostic.path.is_some()
+        && matches!(
+            diagnostic.code.as_str(),
+            "invalid_pdf" | "pdf_too_large" | "scan_file_unreadable"
+        )
+}
+
+fn batch_error_item(
+    provider_locator: String,
+    user_state: UserState,
+    next_action: NextAction,
+    asset_id: Option<String>,
+    error: MkoError,
+) -> BatchItemResult {
+    BatchItemResult {
+        provider_locator,
+        user_state,
+        next_action,
+        asset_id,
+        add_outcome: None,
+        error: Some(json_error(&error)),
+    }
+}
+
+fn json_error(error: &MkoError) -> JsonV1Error {
+    JsonV1Error {
+        code: error.code().into(),
+        message: if error.code() == "invalid_pdf" {
+            "The PDF could not be validated.".into()
+        } else {
+            error.message().into()
+        },
+        recovery: recovery_for_code(error.code()),
+    }
+}
+
+fn json_error_from_diagnostic(diagnostic: crate::json_v1::DiagnosticData) -> JsonV1Error {
+    JsonV1Error {
+        recovery: recovery_for_code(&diagnostic.code),
+        code: diagnostic.code,
+        message: diagnostic.message,
+    }
+}
+
+fn recovery_for_code(code: &str) -> Option<Recovery> {
+    let kind = match code {
+        "provider_missing" | "provider_hydration_failed" | "provider_not_hydrated" => {
+            RecoveryKind::Hydrate
+        }
+        "backup_confirmation_required" => RecoveryKind::VerifyBackup,
+        "lock_active"
+        | "lock_scan_incomplete"
+        | "provider_scan_incomplete"
+        | "provider_import_locked"
+        | "registry_locked"
+        | "lock_held" => RecoveryKind::Retry,
+        "invalid_pdf"
+        | "pdf_too_large"
+        | "scan_file_unreadable"
+        | "registry_provider_missing"
+        | "registry_provider_mismatch"
+        | "source_state_mismatch"
+        | "lineage_repair_needed"
+        | "repository_state_inconsistent" => RecoveryKind::Repair,
+        _ => return None,
+    };
+    Some(Recovery { kind })
+}
+
+fn recovery_action_for_code(code: &str) -> NextAction {
+    match code {
+        "provider_missing" => NextAction::Hydrate,
+        "lock_active" | "lock_scan_incomplete" | "provider_scan_incomplete" => NextAction::Retry,
+        _ => NextAction::Repair,
+    }
+}
+
+fn structural_scan_diagnostic(diagnostic: &crate::json_v1::DiagnosticData) -> bool {
+    matches!(
+        diagnostic.code.as_str(),
+        "scan_limit_reached"
+            | "provider_inspection_failed"
+            | "scan_file_unreadable"
+            | "repository_scan_limit_reached"
+            | "lock_scan_incomplete"
+            | "repository_unreadable"
+            | "registry_invalid"
+            | "path_not_portable"
+            | "invalid_state_transition"
+            | "duplicate_conflict"
+    )
 }
 
 fn import_outside_pdf(

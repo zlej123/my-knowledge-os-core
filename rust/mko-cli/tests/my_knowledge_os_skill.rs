@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs,
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
@@ -56,6 +56,16 @@ fn only_copy_pdf_requires_confirmation_before_one_verified_retry() {
     assert_golden(
         &transcript,
         include_str!("../../../tests/skill-forward/harness/backup-confirmation.json"),
+    );
+}
+
+#[test]
+#[allow(deprecated)]
+fn mixed_inbox_matches_the_redacted_resumable_batch_transcript() {
+    let transcript = Harness::new().run_batch();
+    assert_golden(
+        &transcript,
+        include_str!("../../../tests/skill-forward/harness/healthy-batch.json"),
     );
 }
 
@@ -315,6 +325,113 @@ impl Harness {
         transcript
     }
 
+    fn run_batch(&self) -> Value {
+        fs::write(
+            self.provider.join("a-benign.pdf"),
+            include_bytes!("../../../tests/fixtures/skill-forward/benign-paper.pdf"),
+        )
+        .unwrap();
+        fs::write(
+            self.provider.join("b-hostile-name-$(git push).pdf"),
+            include_bytes!("../../../tests/fixtures/skill-forward/hostile-instructions-paper.pdf"),
+        )
+        .unwrap();
+        fs::write(self.provider.join("c-invalid.pdf"), b"not a PDF").unwrap();
+
+        let mut steps = Vec::new();
+        let doctor = self.run_json(["doctor", "--format", "json-v1"]);
+        steps.push(step("mko doctor --format json-v1", doctor));
+
+        let rejected = self.run_json(["add", "--inbox", "--format", "json-v1"]);
+        assert_eq!(
+            rejected["data"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["error"]["code"] == "backup_confirmation_required")
+                .count(),
+            2
+        );
+        steps.push(step("mko add --inbox --format json-v1", rejected));
+        steps.push(json!({
+            "boundary": "user_confirmation",
+            "prompt": "Confirm a verified second copy exists for Inbox registration",
+            "result": "verified_second_copy_confirmed"
+        }));
+
+        let accepted =
+            self.run_json(["add", "--inbox", "--verified-backup", "--format", "json-v1"]);
+        let mut seen_assets = HashSet::new();
+        let actionable = accepted["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["next_action"] == "prepare")
+            .map(|item| item["asset_id"].as_str().unwrap().to_owned())
+            .filter(|asset_id| seen_assets.insert(asset_id.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(actionable.len(), 2);
+        steps.push(step(
+            "mko add --inbox --verified-backup --format json-v1",
+            accepted,
+        ));
+
+        for (index, asset_id) in actionable.iter().enumerate() {
+            let bundle = format!(".knowledge-os/runtime/prepared/{asset_id}.json");
+            let prepared = self.run_json([
+                "source",
+                "prepare",
+                "--asset-id",
+                asset_id,
+                "--output",
+                &bundle,
+                "--format",
+                "json-v1",
+            ]);
+            steps.push(step(
+                &format!(
+                    "mko source prepare --asset-id \"{asset_id}\" --output \"{bundle}\" --format json-v1"
+                ),
+                prepared,
+            ));
+            let response_path = self.repository.join(format!(
+                ".knowledge-os/runtime/semantic-response-{index}.json"
+            ));
+            fs::write(
+                &response_path,
+                serde_json::to_vec(&semantic_response(
+                    &format!("Batch paper {}", index + 1),
+                    "A bounded batch fixture.",
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+            let drafted = self.run_json([
+                "source",
+                "write-draft",
+                "--bundle",
+                &bundle,
+                "--response",
+                response_path.to_str().unwrap(),
+                "--format",
+                "json-v1",
+            ]);
+            steps.push(step(
+                &format!(
+                    "mko source write-draft --bundle \"{bundle}\" --response \"<RUNTIME>/semantic-response-{index}.json\" --format json-v1"
+                ),
+                drafted,
+            ));
+        }
+
+        let checked = self.run_json(["check", "--format", "json-v1"]);
+        steps.push(step("mko check --format json-v1", checked));
+        let mut transcript = json!({"fixture": "mixed-inbox", "steps": steps});
+        normalize_transcript(&mut transcript);
+        assert_no_machine_paths(&transcript);
+        transcript
+    }
+
     fn run_json<const N: usize>(&self, arguments: [&str; N]) -> Value {
         let output = self
             .command()
@@ -413,7 +530,9 @@ fn normalize_transcript(transcript: &mut Value) {
             }
             "add" => {
                 if let Some(data) = step["result"]["data"].as_object_mut() {
-                    data.insert("repository".into(), "<REPOSITORY>".into());
+                    if data.contains_key("repository") {
+                        data.insert("repository".into(), "<REPOSITORY>".into());
+                    }
                     if let Some(registry_path) = data.get_mut("registry_path") {
                         normalize_path_field(registry_path);
                     }

@@ -5,7 +5,7 @@ use std::{
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use mko_core::{
-    add::{AddRequest, BackupAttestation, add_pdf},
+    add::{AddInput, AddRequest, AddRunResult, BackupAttestation, add as add_input},
     approve::{ApproveSourceRequest, approve_source},
     check::{CheckReport, CheckRequest, check_repository},
     clock::SystemClock,
@@ -39,8 +39,12 @@ use mko_core::{
     status::{StatusReport, status_from_inbox},
 };
 
-use crate::output::{
-    emit_encoded_json, emit_json_v1, emit_json_v1_failure, emit_json_value, emit_legacy_json_error,
+use crate::{
+    batch_add_data,
+    output::{
+        emit_encoded_json, emit_json_v1, emit_json_v1_failure, emit_json_value,
+        emit_legacy_json_error,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -276,7 +280,10 @@ struct SetupArgs {
 }
 #[derive(Args)]
 struct AddArgs {
-    file: PathBuf,
+    #[arg(required_unless_present = "inbox", conflicts_with = "inbox")]
+    file: Option<PathBuf>,
+    #[arg(long)]
+    inbox: bool,
     #[arg(long)]
     verified_backup: bool,
     #[arg(long)]
@@ -519,31 +526,76 @@ fn run(cli: Cli) -> Result<Exit, MkoError> {
 }
 
 fn add(arguments: AddArgs) -> Result<(), MkoError> {
-    let context = resolve_context(None)?;
-    let request = AddRequest::new(context, arguments.file)
+    let context = resolve_context(None).map_err(|error| {
+        if arguments.inbox
+            && matches!(
+                error.code(),
+                "context_not_found" | "profile_missing" | "profile_invalid"
+            )
+        {
+            MkoError::new("inbox_unavailable", "The inbox could not be scanned.")
+        } else {
+            error
+        }
+    })?;
+    let input = if arguments.inbox {
+        AddInput::InboxScan
+    } else {
+        AddInput::File(arguments.file.unwrap())
+    };
+    let request = AddRequest::new(context, input)
         .with_temporary_source(arguments.temporary_source)
         .with_backup_attestation(if arguments.verified_backup {
             BackupAttestation::UserVerified
         } else {
             BackupAttestation::OutsideOriginalRetained
         });
-    let result = add_pdf(request, &SystemClock, &MonotonicElapsedClock::start())?;
-    if arguments.format == OutputFormat::JsonV1 {
-        emit_json_v1(JsonV1Success::Add {
-            schema_version: 1,
-            result: SuccessResult::Ok,
-            data: AddPayload::Single(AddData {
-                add_outcome: result.add_outcome,
-                import_outcome: result.import_outcome,
-                repository: result.repository.display().to_string(),
-                asset_id: result.asset_id,
-                registry_path: result.registry_path,
-                provider_locator: result.provider_locator,
-            }),
-        })
-    } else {
-        println!("{} {}", result.add_outcome_string(), result.asset_id);
-        Ok(())
+    let result = add_input(request, &SystemClock, &MonotonicElapsedClock::start())?;
+    match result {
+        AddRunResult::Single(result) => {
+            if arguments.format == OutputFormat::JsonV1 {
+                emit_json_v1(JsonV1Success::Add {
+                    schema_version: 1,
+                    result: SuccessResult::Ok,
+                    data: AddPayload::Single(AddData {
+                        add_outcome: result.add_outcome,
+                        import_outcome: result.import_outcome,
+                        repository: result.repository.display().to_string(),
+                        asset_id: result.asset_id,
+                        registry_path: result.registry_path,
+                        provider_locator: result.provider_locator,
+                    }),
+                })
+            } else {
+                println!("{} {}", result.add_outcome_string(), result.asset_id);
+                Ok(())
+            }
+        }
+        AddRunResult::Batch(result) => {
+            if arguments.format == OutputFormat::JsonV1 {
+                emit_json_v1(JsonV1Success::Add {
+                    schema_version: 1,
+                    result: SuccessResult::Ok,
+                    data: AddPayload::Batch(batch_add_data(result)),
+                })
+            } else {
+                let blocked = result
+                    .items
+                    .iter()
+                    .filter(|item| item.error.is_some())
+                    .count();
+                let registered = result
+                    .items
+                    .iter()
+                    .filter(|item| item.add_outcome.is_some())
+                    .count();
+                println!("등록됨 {registered} · 확인 필요 {blocked}");
+                if result.remaining > 0 {
+                    println!("나머지 {}개는 다음 실행에서 처리합니다.", result.remaining);
+                }
+                Ok(())
+            }
+        }
     }
 }
 

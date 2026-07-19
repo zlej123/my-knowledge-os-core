@@ -18,6 +18,7 @@ use crate::{
     error::MkoError,
     front_matter::parse_markdown,
     json_v1::{DiagnosticData, InboxData, InboxItemData, NextAction, ScanLimitsData, UserState},
+    model::Fingerprint,
     model::{AssetRecord, AssetStatus, SourceRecord, SourceStatus},
     provider_scan::{
         DEFAULT_SCAN_LIMITS, ElapsedClock, ProviderCatalogEntry, ProviderScanRequest,
@@ -66,6 +67,18 @@ pub struct InboxScanResult {
     pub recommended_action: NextAction,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DiscoveredPdfSnapshot {
+    pub fingerprint: Fingerprint,
+    pub size_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InboxAddScan {
+    pub report: InboxScanResult,
+    pub snapshots: HashMap<String, DiscoveredPdfSnapshot>,
+}
+
 type SourceScanResult = (
     HashMap<String, SourceObservation>,
     Vec<DiagnosticData>,
@@ -95,6 +108,21 @@ pub fn scan_inbox(
     request: InboxScanRequest,
     elapsed_clock: &dyn ElapsedClock,
 ) -> Result<InboxScanResult, MkoError> {
+    scan_inbox_internal(request, elapsed_clock, true).map(|scan| scan.report)
+}
+
+pub(crate) fn scan_inbox_for_add(
+    request: InboxScanRequest,
+    elapsed_clock: &dyn ElapsedClock,
+) -> Result<InboxAddScan, MkoError> {
+    scan_inbox_internal(request, elapsed_clock, false)
+}
+
+fn scan_inbox_internal(
+    request: InboxScanRequest,
+    elapsed_clock: &dyn ElapsedClock,
+    project_for_read_only_output: bool,
+) -> Result<InboxAddScan, MkoError> {
     let repository_root = canonical_readable_directory(
         &request.repository_root,
         "repository_unreadable",
@@ -105,6 +133,20 @@ pub fn scan_inbox(
         ProviderScanRequest::new(&request.provider_root).with_limits(request.limits),
         &deadline,
     )?;
+    let snapshots = scan
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ProviderCatalogEntry::Readable(pdf) => Some((
+                pdf.provider_locator.clone(),
+                DiscoveredPdfSnapshot {
+                    fingerprint: pdf.fingerprint.clone(),
+                    size_bytes: pdf.size_bytes,
+                },
+            )),
+            ProviderCatalogEntry::Placeholder { .. } => None,
+        })
+        .collect();
     let mut warnings = scan.warnings.iter().map(scan_warning).collect::<Vec<_>>();
     let mut scan_complete = scan.scan_complete;
     let (assets, mut errors, repository_complete) = read_assets(&repository_root, request.limits)?;
@@ -127,6 +169,7 @@ pub fn scan_inbox(
         warnings.push(warning);
     }
     let (assets_by_locator, locator_conflicts) = current_assets_by_locator(&assets, &mut errors);
+    let assets_by_fingerprint = current_assets_by_fingerprint(&assets);
     let mut seen_assets = BTreeSet::new();
     let mut catalog = Vec::new();
     for provider_entry in &scan.entries {
@@ -136,7 +179,21 @@ pub fn scan_inbox(
             } => (provider_locator.as_str(), None),
             ProviderCatalogEntry::Readable(pdf) => (pdf.provider_locator.as_str(), Some(pdf)),
         };
-        let Some(asset) = assets_by_locator.get(provider_locator).copied() else {
+        let asset = assets_by_locator
+            .get(provider_locator)
+            .copied()
+            .or_else(|| {
+                readable_pdf.and_then(|pdf| {
+                    assets_by_fingerprint
+                        .get(&(
+                            pdf.fingerprint.method.as_str(),
+                            pdf.fingerprint.value.as_str(),
+                            pdf.size_bytes,
+                        ))
+                        .copied()
+                })
+            });
+        let Some(asset) = asset else {
             catalog.push(classify_catalog_item(
                 provider_locator,
                 None,
@@ -212,7 +269,14 @@ pub fn scan_inbox(
         .collect::<BTreeSet<_>>()
         .len() as u64;
     *state_counts.entry(UserState::Blocked).or_default() += invalid_registry_records;
-    let projection = project_catalog_items(catalog, request.limits.max_batch_items);
+    let projection = if project_for_read_only_output {
+        project_catalog_items(catalog, request.limits.max_batch_items)
+    } else {
+        CatalogProjection {
+            items: catalog,
+            remaining: 0,
+        }
+    };
     let remaining = projection.remaining;
     let catalog = projection.items;
     if remaining > 0 {
@@ -232,17 +296,39 @@ pub fn scan_inbox(
     errors.dedup();
     let (primary_blocker, recommended_action) =
         select_status_decision(scan_complete, &catalog, &errors, &warnings);
-    Ok(InboxScanResult {
-        scan_complete,
-        scan_limits: request.limits,
-        items: catalog,
-        errors,
-        warnings,
-        remaining,
-        state_counts,
-        primary_blocker,
-        recommended_action,
+    Ok(InboxAddScan {
+        report: InboxScanResult {
+            scan_complete,
+            scan_limits: request.limits,
+            items: catalog,
+            errors,
+            warnings,
+            remaining,
+            state_counts,
+            primary_blocker,
+            recommended_action,
+        },
+        snapshots,
     })
+}
+
+fn current_assets_by_fingerprint(
+    assets: &[AssetRecord],
+) -> HashMap<(&str, &str, u64), &AssetRecord> {
+    assets
+        .iter()
+        .filter(|asset| asset.asset_status != AssetStatus::Superseded)
+        .map(|asset| {
+            (
+                (
+                    asset.fingerprint.method.as_str(),
+                    asset.fingerprint.value.as_str(),
+                    asset.size_bytes,
+                ),
+                asset,
+            )
+        })
+        .collect()
 }
 
 fn current_assets_by_locator<'a>(

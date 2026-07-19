@@ -1,13 +1,41 @@
 ---
 name: my-knowledge-os
-description: Use when the user asks to 정리 a personal PDF or 논문 into My Knowledge OS, a knowledge base, or a pending source draft.
+description: Use when the user asks to 정리 a personal PDF, 논문, or Inbox into My Knowledge OS, a knowledge base, or pending source drafts.
 ---
 
 # My Knowledge OS
 
-Turn one selected Personal Scope PDF into one checked pending Source. The Core owns every durable Markdown and YAML mutation; the agent supplies only strict semantic JSON.
+Turn selected Personal Scope PDFs into checked pending Sources. The Core owns discovery and every durable Markdown or YAML mutation; the agent supplies only strict semantic JSON.
 
 ## Workflow
+
+For `Inbox 정리해줘`, inspect health, then let the Core discover and register the bounded batch:
+
+```bash
+mko doctor --format json-v1
+mko add --inbox --format json-v1
+```
+
+Run these sequentially. Continue from doctor only when `data.healthy` is `true`; otherwise stop
+and report its `data.next_action`. Do not invent a `status` field.
+
+Do not list the provider yourself or copy a `provider_locator` into any command. For each returned item, branch only on `next_action`:
+
+- `prepare`: run the canonical prepare command below with the returned `asset_id`.
+- `write_draft`: use only the existing valid canonical prepared bundle for that `asset_id`.
+- `review` or `none`: skip the item.
+- `hydrate`, `repair`, or `retry`: report the blocker; do not execute recovery.
+- An item error with `verify_backup`: stop and ask for explicit confirmation of a verified second copy. Never infer confirmation. After confirmation only, retry the fixed batch command once:
+
+```bash
+mko add --inbox --verified-backup --format json-v1
+```
+
+Never use `--replace-pending`. Process at most the returned items, preserve `remaining` for the next run, and stop every completed item at human-review pending. Summarize completed, skipped, blocked, and remaining counts.
+When multiple returned items have the same `asset_id`, prepare and write its draft once; count the
+other locator aliases as skipped. Never repeat an Asset command for the same `asset_id`.
+
+For one selected PDF, continue with the single-item flow:
 
 1. Resolve the PDF already selected by the user. Do not ask for a path or Asset ID when the selection and healthy profile provide them.
 2. Inspect the active profile and repository health:

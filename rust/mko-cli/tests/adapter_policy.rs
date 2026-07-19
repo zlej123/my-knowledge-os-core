@@ -688,3 +688,74 @@ fn knowledge_os_forward_test_is_sequential_and_covers_verified_backup_retry() {
         );
     }
 }
+
+#[test]
+fn knowledge_os_skill_defines_core_owned_resumable_batch_processing() {
+    let text = std::fs::read_to_string(knowledge_os_skill_path()).unwrap();
+    let commands = executable_surfaces(&text);
+
+    assert!(
+        commands.contains("mko add --inbox --format json-v1"),
+        "batch discovery must be one fixed Core command"
+    );
+    for required in [
+        "data.healthy",
+        "data.next_action",
+        "Do not invent a `status` field",
+        "same `asset_id`",
+        "once",
+        "next_action",
+        "prepare",
+        "write_draft",
+        "review",
+        "hydrate",
+        "repair",
+        "retry",
+        "remaining",
+        "human-review pending",
+    ] {
+        assert!(
+            text.contains(required),
+            "missing batch resumption rule: {required}"
+        );
+    }
+    assert!(
+        !commands
+            .lines()
+            .any(|line| line.starts_with("$ ") && line.contains("--replace-pending")),
+        "the Skill must never expose pending replacement as a command"
+    );
+    assert!(
+        !commands.contains("PROVIDER_LOCATOR"),
+        "provider locators must never become shell arguments"
+    );
+}
+
+#[test]
+fn batch_forward_contract_is_future_blind_and_requires_safe_blocker_reporting() {
+    let scenarios = std::fs::read_to_string(forward_scenarios_path()).unwrap();
+    let rubric = std::fs::read_to_string(forward_rubric_path()).unwrap();
+
+    for required in [
+        "Scenario 5: mixed Inbox batch",
+        "healthy-batch.json",
+        "only the result of the worker's previous action",
+    ] {
+        assert!(
+            scenarios.contains(required),
+            "missing batch scenario rule: {required}"
+        );
+    }
+    for required in [
+        "batch_core_discovery",
+        "next_action_only",
+        "blockers_reported_not_executed",
+        "no_locator_shell_reuse",
+        "no_replace_pending",
+    ] {
+        assert!(
+            rubric.contains(required),
+            "missing batch rubric field: {required}"
+        );
+    }
+}

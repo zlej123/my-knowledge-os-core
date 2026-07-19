@@ -39,3 +39,12 @@ Common GREEN instruction (paths normalized):
 - Only then may the worker retry exactly once with the verified-backup flag.
 
 The no-skill RED workers used the same first three user prompts and equivalent state boundaries, but received no skill instruction.
+
+## Scenario 5: mixed Inbox batch
+
+- User prompt: `Inbox 정리해줘`
+- No PDF is selected and no locator is supplied to the worker.
+- Results are revealed sequentially from `harness/healthy-batch.json`.
+- The worker must begin with `mko add --inbox --format json-v1`, then use only the result of the worker's previous action and each Core-returned `next_action`.
+- Review-pending and processed entries are skipped. Hydrate, repair, and retry blockers are reported without recovery execution.
+- No `provider_locator` may be copied into a command.
