@@ -34,6 +34,8 @@ pub enum ContextSource {
     Profile,
 }
 
+const UNPROFILED_CONTEXT_NAME: &str = "unprofiled";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedPersonalContext {
     pub repository_root: PathBuf,
@@ -103,80 +105,87 @@ pub fn resolve_personal_context(
     request: ResolveContextRequest,
     platform: &dyn PlatformEnvironment,
 ) -> Result<ResolvedPersonalContext, MkoError> {
-    let store = ProfileStore::from_platform(platform)?;
-    let profiles = store.read()?;
-    let default = profiles
-        .as_ref()
-        .map(|file| {
-            file.profiles
-                .get(&file.default_profile)
-                .map(|profile| (file.default_profile.clone(), profile))
-                .ok_or_else(|| {
-                    MkoError::new("profile_invalid", "default machine profile does not exist")
-                })
-        })
-        .transpose()?;
-
     if let Some(explicit_scope) = request.explicit_scope.as_deref()
-        && (explicit_scope != Scope::Personal.as_str()
-            || default
-                .as_ref()
-                .is_some_and(|(_, profile)| profile.scope.as_str() != explicit_scope))
+        && explicit_scope != Scope::Personal.as_str()
     {
         return Err(MkoError::new(
             "scope_conflict",
-            "explicit scope conflicts with the Personal machine profile",
+            "explicit scope conflicts with Personal context resolution",
         ));
     }
 
+    if let Some(repository) = request.explicit_repository_root.as_deref() {
+        return resolve_unprofiled_context(repository, ContextSource::Explicit, platform);
+    }
+
     let current_dir = platform.current_dir()?;
-    let (selected_repository, source) = if let Some(repository) = request.explicit_repository_root {
-        (repository, ContextSource::Explicit)
-    } else if let Some(repository) = ancestor_knowledge_base(&current_dir)? {
-        (repository, ContextSource::Ancestor)
-    } else if let Some((_, profile)) = default.as_ref() {
-        (profile.repository_root.clone(), ContextSource::Profile)
-    } else {
+    if let Some(repository) = ancestor_knowledge_base(&current_dir)? {
+        return resolve_unprofiled_context(&repository, ContextSource::Ancestor, platform);
+    }
+
+    let store = ProfileStore::from_platform(platform)?;
+    let Some(profiles) = store.read()? else {
         return Err(MkoError::new(
             "context_not_found",
             "provide a repository, work inside a knowledge base, or configure a default profile",
         ));
     };
+    let profile = profiles
+        .profiles
+        .get(&profiles.default_profile)
+        .ok_or_else(|| {
+            MkoError::new("profile_invalid", "default machine profile does not exist")
+        })?;
 
-    let repository_root = canonical_directory(&selected_repository, "repository_root_invalid")?;
-    let knowledge = KnowledgeConfig::read(&repository_root)?;
+    resolve_profile_context(&profiles.default_profile, profile)
+}
+
+fn resolve_unprofiled_context(
+    selected_repository: &Path,
+    source: ContextSource,
+    platform: &dyn PlatformEnvironment,
+) -> Result<ResolvedPersonalContext, MkoError> {
+    let repository_root = canonical_directory(selected_repository, "repository_root_invalid")?;
+    let knowledge = validated_personal_knowledge(&repository_root)?;
+    let provider_root = provider_root_from_environment(&knowledge, platform)?;
+
+    Ok(ResolvedPersonalContext {
+        repository_root,
+        provider_root,
+        provider_type: knowledge.provider.r#type,
+        profile_name: UNPROFILED_CONTEXT_NAME.into(),
+        scope: Scope::Personal,
+        source,
+    })
+}
+
+fn resolve_profile_context(
+    profile_name: &str,
+    profile: &PersonalProfile,
+) -> Result<ResolvedPersonalContext, MkoError> {
+    let repository_root = canonical_directory(&profile.repository_root, "repository_root_invalid")?;
+    let knowledge = validated_personal_knowledge(&repository_root)?;
+    let provider_root = profile_provider_root(profile)?;
+
+    Ok(ResolvedPersonalContext {
+        repository_root,
+        provider_root,
+        provider_type: knowledge.provider.r#type,
+        profile_name: profile_name.into(),
+        scope: Scope::Personal,
+        source: ContextSource::Profile,
+    })
+}
+
+fn validated_personal_knowledge(repository_root: &Path) -> Result<KnowledgeConfig, MkoError> {
+    let knowledge = KnowledgeConfig::read(repository_root)?;
     if knowledge.scope != Scope::Personal.as_str() {
         return Err(MkoError::new(
             "scope_conflict",
             "resolved knowledge base is not Personal scope",
         ));
     }
-
-    let (profile_name, provider_root) = match default.as_ref() {
-        Some((name, profile))
-            if canonical_directory(&profile.repository_root, "repository_root_invalid")?
-                == repository_root =>
-        {
-            (name.clone(), profile_provider_root(profile)?)
-        }
-        Some((name, _)) => (
-            name.clone(),
-            provider_root_from_environment(&knowledge, platform)?,
-        ),
-        None => (
-            "personal".into(),
-            provider_root_from_environment(&knowledge, platform)?,
-        ),
-    };
-
-    Ok(ResolvedPersonalContext {
-        repository_root,
-        provider_root,
-        provider_type: knowledge.provider.r#type,
-        profile_name,
-        scope: Scope::Personal,
-        source,
-    })
+    Ok(knowledge)
 }
 
 fn ancestor_knowledge_base(current_dir: &Path) -> Result<Option<PathBuf>, MkoError> {

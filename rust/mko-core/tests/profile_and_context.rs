@@ -23,6 +23,37 @@ struct FakePlatform {
     environment: HashMap<OsString, OsString>,
 }
 
+struct UnavailableDiscoveryPlatform {
+    environment: HashMap<OsString, OsString>,
+}
+
+impl PlatformEnvironment for UnavailableDiscoveryPlatform {
+    fn config_home(&self) -> Result<PathBuf, mko_core::error::MkoError> {
+        Err(mko_core::error::MkoError::new(
+            "config_home_unavailable",
+            "configuration home is unavailable",
+        ))
+    }
+
+    fn home_dir(&self) -> Result<PathBuf, mko_core::error::MkoError> {
+        Err(mko_core::error::MkoError::new(
+            "home_unavailable",
+            "home is unavailable",
+        ))
+    }
+
+    fn current_dir(&self) -> Result<PathBuf, mko_core::error::MkoError> {
+        Err(mko_core::error::MkoError::new(
+            "current_dir_unavailable",
+            "current directory is unavailable",
+        ))
+    }
+
+    fn environment_value(&self, name: &OsStr) -> Option<OsString> {
+        self.environment.get(name).cloned()
+    }
+}
+
 impl PlatformEnvironment for FakePlatform {
     fn config_home(&self) -> Result<PathBuf, mko_core::error::MkoError> {
         Ok(self.config_home.clone())
@@ -197,6 +228,7 @@ fn explicit_context_wins_without_mutating_the_profile() {
 
     assert_eq!(result.source, ContextSource::Explicit);
     assert_eq!(result.scope, Scope::Personal);
+    assert_eq!(result.profile_name, "unprofiled");
     assert_eq!(
         result.repository_root,
         explicit_repository.canonicalize().unwrap()
@@ -206,6 +238,59 @@ fn explicit_context_wins_without_mutating_the_profile() {
         explicit_provider.canonicalize().unwrap()
     );
     assert_eq!(fs::read(fixture.store().path()).unwrap(), before);
+}
+
+#[test]
+fn explicit_context_does_not_require_discovery_platform_values() {
+    let fixture = Fixture::new();
+    let repository = fixture.repository("explicit repository");
+    let provider = fixture.provider("explicit provider");
+    let platform = UnavailableDiscoveryPlatform {
+        environment: HashMap::from([(
+            OsString::from("MKO_PERSONAL_PROVIDER_ROOT"),
+            provider.as_os_str().to_owned(),
+        )]),
+    };
+
+    let result = resolve_personal_context(
+        ResolveContextRequest::new().with_explicit_repository(&repository),
+        &platform,
+    )
+    .unwrap();
+
+    assert_eq!(result.source, ContextSource::Explicit);
+    assert_eq!(result.profile_name, "unprofiled");
+    assert_eq!(result.repository_root, repository.canonicalize().unwrap());
+    assert_eq!(result.provider_root, provider.canonicalize().unwrap());
+}
+
+#[test]
+fn explicit_context_ignores_an_unrelated_malformed_profile() {
+    let fixture = Fixture::new();
+    let repository = fixture.repository("explicit repository");
+    let provider = fixture.provider("explicit provider");
+    let profile_path = fixture.store().path().to_path_buf();
+    fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+    fs::write(&profile_path, "schema_version: [not valid").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&profile_path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let mut platform = fixture.platform.clone();
+    platform.environment.insert(
+        OsString::from("MKO_PERSONAL_PROVIDER_ROOT"),
+        provider.as_os_str().to_owned(),
+    );
+
+    let result = resolve_personal_context(
+        ResolveContextRequest::new().with_explicit_repository(&repository),
+        &platform,
+    )
+    .unwrap();
+
+    assert_eq!(result.source, ContextSource::Explicit);
+    assert_eq!(result.profile_name, "unprofiled");
 }
 
 #[test]
@@ -231,6 +316,7 @@ fn ancestor_knowledge_base_wins_over_the_default_profile() {
     let result = resolve_personal_context(ResolveContextRequest::new(), &platform).unwrap();
 
     assert_eq!(result.source, ContextSource::Ancestor);
+    assert_eq!(result.profile_name, "unprofiled");
     assert_eq!(
         result.repository_root,
         ancestor_repository.canonicalize().unwrap()
@@ -239,6 +325,62 @@ fn ancestor_knowledge_base_wins_over_the_default_profile() {
         result.provider_root,
         ancestor_provider.canonicalize().unwrap()
     );
+}
+
+#[test]
+fn ancestor_context_ignores_an_unrelated_malformed_profile() {
+    let fixture = Fixture::new();
+    let repository = fixture.repository("ancestor repository");
+    let provider = fixture.provider("ancestor provider");
+    let current_dir = repository.join("nested/working");
+    fs::create_dir_all(&current_dir).unwrap();
+    let profile_path = fixture.store().path().to_path_buf();
+    fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+    fs::write(&profile_path, "schema_version: [not valid").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&profile_path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let mut platform = fixture.platform.clone();
+    platform.current_dir = current_dir;
+    platform.environment.insert(
+        OsString::from("MKO_PERSONAL_PROVIDER_ROOT"),
+        provider.as_os_str().to_owned(),
+    );
+
+    let result = resolve_personal_context(ResolveContextRequest::new(), &platform).unwrap();
+
+    assert_eq!(result.source, ContextSource::Ancestor);
+    assert_eq!(result.profile_name, "unprofiled");
+    assert_eq!(result.repository_root, repository.canonicalize().unwrap());
+}
+
+#[test]
+fn ancestor_context_ignores_an_unrelated_stale_profile() {
+    let fixture = Fixture::new();
+    let repository = fixture.repository("ancestor repository");
+    let provider = fixture.provider("ancestor provider");
+    let stale_repository = fixture.root.join("removed profile repository");
+    let stale_provider = fixture.root.join("removed profile provider");
+    fixture
+        .store()
+        .write(&fixture.profile(&stale_repository, &stale_provider))
+        .unwrap();
+    let current_dir = repository.join("nested/working");
+    fs::create_dir_all(&current_dir).unwrap();
+    let mut platform = fixture.platform.clone();
+    platform.current_dir = current_dir;
+    platform.environment.insert(
+        OsString::from("MKO_PERSONAL_PROVIDER_ROOT"),
+        provider.as_os_str().to_owned(),
+    );
+
+    let result = resolve_personal_context(ResolveContextRequest::new(), &platform).unwrap();
+
+    assert_eq!(result.source, ContextSource::Ancestor);
+    assert_eq!(result.profile_name, "unprofiled");
+    assert_eq!(result.repository_root, repository.canonicalize().unwrap());
 }
 
 #[test]
