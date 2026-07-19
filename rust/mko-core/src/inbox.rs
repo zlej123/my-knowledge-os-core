@@ -1,11 +1,13 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs,
-    io::Read,
     path::{Path, PathBuf},
 };
 
-const MAX_RUNTIME_LOCK_BYTES: u64 = 16 * 1024;
+use cap_std::{
+    ambient_authority,
+    fs::{Dir, File, OpenOptions, OpenOptionsExt},
+};
 
 use crate::{
     asset_validation::validate_canonical_asset,
@@ -19,7 +21,8 @@ use crate::{
     model::{AssetRecord, AssetStatus, SourceRecord, SourceStatus},
     provider_scan::{
         DEFAULT_SCAN_LIMITS, ElapsedClock, ProviderCatalogEntry, ProviderScanRequest,
-        ProviderScanWarning, ScanLimits, scan_provider_catalog_metadata_first,
+        ProviderScanWarning, ScanDeadline, ScanLimits,
+        scan_provider_catalog_metadata_first_with_deadline,
     },
     status::select_status_decision,
 };
@@ -97,9 +100,10 @@ pub fn scan_inbox(
         "repository_unreadable",
         "The repository is not readable.",
     )?;
-    let scan = scan_provider_catalog_metadata_first(
+    let deadline = ScanDeadline::start(elapsed_clock, request.limits);
+    let scan = scan_provider_catalog_metadata_first_with_deadline(
         ProviderScanRequest::new(&request.provider_root).with_limits(request.limits),
-        elapsed_clock,
+        &deadline,
     )?;
     let mut warnings = scan.warnings.iter().map(scan_warning).collect::<Vec<_>>();
     let mut scan_complete = scan.scan_complete;
@@ -117,7 +121,7 @@ pub fn scan_inbox(
         });
     }
 
-    let lock_scan = read_lock_asset_ids(&repository_root, request.limits.max_entries);
+    let lock_scan = read_lock_asset_ids(&repository_root, request.limits.max_entries, &deadline);
     scan_complete &= lock_scan.complete;
     if let Some(warning) = lock_scan.warning.clone() {
         warnings.push(warning);
@@ -139,7 +143,9 @@ pub fn scan_inbox(
                 CatalogEvidence {
                     asset_status: None,
                     source: SourceObservation::Absent,
-                    blocker: if readable_pdf.is_some() && lock_scan.complete {
+                    blocker: if !lock_scan.complete {
+                        CatalogBlocker::ActiveLock
+                    } else if readable_pdf.is_some() {
                         CatalogBlocker::None
                     } else {
                         CatalogBlocker::ProviderMissing
@@ -457,25 +463,46 @@ struct LockScan {
     warning: Option<DiagnosticData>,
 }
 
-fn read_lock_asset_ids(repository_root: &Path, max_entries: u64) -> LockScan {
-    let directory = repository_root.join(".knowledge-os/runtime/locks");
-    match fs::symlink_metadata(&directory) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+fn read_lock_asset_ids(
+    repository_root: &Path,
+    max_entries: u64,
+    deadline: &ScanDeadline<'_>,
+) -> LockScan {
+    read_lock_asset_ids_with_after_open(repository_root, max_entries, deadline, || {})
+}
+
+fn read_lock_asset_ids_with_after_open(
+    repository_root: &Path,
+    max_entries: u64,
+    deadline: &ScanDeadline<'_>,
+    after_open: impl FnOnce(),
+) -> LockScan {
+    let directory = match open_lock_directory_nofollow(repository_root) {
+        Ok(Some(directory)) => directory,
+        Ok(None) => {
             return LockScan {
                 complete: true,
                 ..LockScan::default()
             };
         }
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-        Ok(_) => return incomplete_lock_scan("lock path is not a directory"),
         Err(error) => return incomplete_lock_scan(&error.to_string()),
-    }
-    let entries = match fs::read_dir(&directory) {
+    };
+    after_open();
+    let entries = match directory.entries() {
         Ok(entries) => entries,
         Err(error) => return incomplete_lock_scan(&error.to_string()),
     };
     let mut names = Vec::new();
     for entry in entries {
+        if deadline.check().is_err() {
+            return LockScan {
+                complete: false,
+                warning: Some(lock_scan_warning(
+                    "The runtime lock scan reached its time limit.",
+                )),
+                ..LockScan::default()
+            };
+        }
         let Ok(entry) = entry else {
             return incomplete_lock_scan("cannot enumerate every runtime lock");
         };
@@ -483,44 +510,28 @@ fn read_lock_asset_ids(repository_root: &Path, max_entries: u64) -> LockScan {
             continue;
         };
         if name.ends_with(".lock") || name.ends_with(".lock.takeover") {
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => return incomplete_lock_scan("cannot classify a runtime lock record"),
+            };
+            if !file_type.is_file() || file_type.is_symlink() {
+                return incomplete_lock_scan("a runtime lock record is not a regular file");
+            }
             names.push(name);
+            if names.len() as u64 > max_entries {
+                return LockScan {
+                    complete: false,
+                    warning: Some(lock_scan_warning(
+                        "The runtime lock scan reached its fixed record limit.",
+                    )),
+                    ..LockScan::default()
+                };
+            }
         }
     }
     names.sort();
-    let limit = usize::try_from(max_entries).unwrap_or(usize::MAX);
-    let complete = names.len() <= limit;
     let mut ids = BTreeSet::new();
-    for name in names.into_iter().take(limit) {
-        let path = directory.join(&name);
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata)
-                if metadata.is_file()
-                    && !metadata.file_type().is_symlink()
-                    && metadata.len() <= MAX_RUNTIME_LOCK_BYTES =>
-            {
-                metadata
-            }
-            _ => return incomplete_lock_scan("a runtime lock record is not safely readable"),
-        };
-        let mut contents = Vec::new();
-        let mut file = match fs::File::open(&path) {
-            Ok(file) => file,
-            Err(_) => return incomplete_lock_scan("a runtime lock record is not readable"),
-        };
-        let read_ok = file
-            .by_ref()
-            .take(MAX_RUNTIME_LOCK_BYTES + 1)
-            .read_to_end(&mut contents)
-            .is_ok();
-        let same_size_after_read =
-            fs::symlink_metadata(&path).is_ok_and(|after| after.len() == metadata.len());
-        if !read_ok
-            || contents.len() as u64 > MAX_RUNTIME_LOCK_BYTES
-            || metadata.len() != contents.len() as u64
-            || !same_size_after_read
-        {
-            return incomplete_lock_scan("a runtime lock record changed while it was read");
-        }
+    for name in names {
         if let Some(id) = name.strip_suffix(".lock") {
             ids.insert(id.to_owned());
         } else if let Some(id) = name.strip_suffix(".lock.takeover") {
@@ -529,11 +540,73 @@ fn read_lock_asset_ids(repository_root: &Path, max_entries: u64) -> LockScan {
     }
     LockScan {
         asset_ids: ids,
-        complete,
-        warning: (!complete)
-            .then(|| lock_scan_warning("The runtime lock scan reached its fixed record limit.")),
+        complete: true,
+        warning: None,
     }
 }
+
+fn open_lock_directory_nofollow(repository_root: &Path) -> std::io::Result<Option<Dir>> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_nofollow(&mut options, true);
+    let root = File::open_ambient_with(repository_root, &options, ambient_authority())?;
+    let root_metadata = root.metadata()?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err(std::io::Error::other(
+            "repository root is not a non-link directory",
+        ));
+    }
+    let mut directory = Dir::from_std_file(root.into_std());
+    for component in [".knowledge-os", "runtime", "locks"] {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        configure_nofollow(&mut options, true);
+        let file = match directory.open_with(component, &options) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let metadata = file.metadata()?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(std::io::Error::other(
+                "runtime lock path contains a link or non-directory",
+            ));
+        }
+        directory = Dir::from_std_file(file.into_std());
+    }
+    Ok(Some(directory))
+}
+
+#[cfg(target_os = "linux")]
+fn configure_nofollow(options: &mut OpenOptions, directory: bool) {
+    const O_NOFOLLOW: i32 = 0x20_000;
+    const O_DIRECTORY: i32 = 0x10_000;
+    options.custom_flags(O_NOFOLLOW | if directory { O_DIRECTORY } else { 0 });
+}
+
+#[cfg(target_os = "macos")]
+fn configure_nofollow(options: &mut OpenOptions, directory: bool) {
+    const O_NOFOLLOW: i32 = 0x100;
+    const O_DIRECTORY: i32 = 0x10_0000;
+    options.custom_flags(O_NOFOLLOW | if directory { O_DIRECTORY } else { 0 });
+}
+
+#[cfg(windows)]
+fn configure_nofollow(options: &mut OpenOptions, directory: bool) {
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    options.custom_flags(
+        FILE_FLAG_OPEN_REPARSE_POINT
+            | if directory {
+                FILE_FLAG_BACKUP_SEMANTICS
+            } else {
+                0
+            },
+    );
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn configure_nofollow(_options: &mut OpenOptions, _directory: bool) {}
 
 fn incomplete_lock_scan(message: &str) -> LockScan {
     LockScan {
@@ -638,5 +711,56 @@ impl From<InboxScanResult> for InboxData {
             errors: result.errors,
             warnings: result.warnings,
         }
+    }
+}
+
+#[cfg(test)]
+mod lock_scan_tests {
+    use std::fs;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+
+    use super::read_lock_asset_ids_with_after_open;
+    use crate::provider_scan::{DEFAULT_SCAN_LIMITS, ElapsedClock, ScanDeadline};
+
+    struct FixedElapsedClock;
+
+    impl ElapsedClock for FixedElapsedClock {
+        fn elapsed_ms(&self) -> u64 {
+            0
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_lock_directory_ignores_path_swapped_to_external_symlink() {
+        let repository = tempfile::tempdir().unwrap();
+        let locks = repository.path().join(".knowledge-os/runtime/locks");
+        fs::create_dir_all(&locks).unwrap();
+        fs::write(locks.join("internal.lock"), b"{}").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("external.lock"), b"{}").unwrap();
+        let deadline = ScanDeadline::start(&FixedElapsedClock, DEFAULT_SCAN_LIMITS);
+
+        let scan = read_lock_asset_ids_with_after_open(
+            repository.path(),
+            DEFAULT_SCAN_LIMITS.max_entries,
+            &deadline,
+            || {
+                fs::rename(
+                    &locks,
+                    repository
+                        .path()
+                        .join(".knowledge-os/runtime/locks-original"),
+                )
+                .unwrap();
+                symlink(outside.path(), &locks).unwrap();
+            },
+        );
+
+        assert!(scan.complete);
+        assert!(scan.asset_ids.contains("internal"));
+        assert!(!scan.asset_ids.contains("external"));
     }
 }

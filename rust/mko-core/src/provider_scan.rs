@@ -1,6 +1,8 @@
 use std::{
     collections::HashMap,
+    ffi::OsString,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Instant,
 };
 
@@ -12,7 +14,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::{
     error::MkoError,
-    fingerprint::{fingerprint_open_file, validate_pdf_content},
+    fingerprint::{fingerprint_open_file, fingerprint_open_file_with_guard, validate_pdf_content},
     model::Fingerprint,
     path_policy::{canonical_directory, validate_portable_relative_path},
 };
@@ -38,6 +40,39 @@ pub const DEFAULT_SCAN_LIMITS: ScanLimits = ScanLimits {
 
 pub trait ElapsedClock: Send + Sync {
     fn elapsed_ms(&self) -> u64;
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ScanDeadline<'a> {
+    elapsed_clock: &'a dyn ElapsedClock,
+    started_ms: u64,
+    max_elapsed_ms: u64,
+}
+
+impl<'a> ScanDeadline<'a> {
+    pub(crate) fn start(elapsed_clock: &'a dyn ElapsedClock, limits: ScanLimits) -> Self {
+        Self {
+            elapsed_clock,
+            started_ms: elapsed_clock.elapsed_ms(),
+            max_elapsed_ms: limits.max_elapsed_ms,
+        }
+    }
+
+    pub(crate) fn check(&self) -> Result<(), MkoError> {
+        if self
+            .elapsed_clock
+            .elapsed_ms()
+            .saturating_sub(self.started_ms)
+            < self.max_elapsed_ms
+        {
+            Ok(())
+        } else {
+            Err(MkoError::new(
+                "scan_time_limit",
+                "provider scan reached the time limit",
+            ))
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -111,11 +146,48 @@ pub struct ProviderScanResult {
     pub total_pdf_bytes: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct ProviderMetadataEntry {
     pub relative_path: PathBuf,
     hydration: ProviderHydrationDisposition,
     size_bytes: u64,
+    capability: Option<EnumeratedPdfCapability>,
+}
+
+#[derive(Debug)]
+struct EnumeratedPdfCapability {
+    parent: Arc<Dir>,
+    basename: OsString,
+}
+
+impl EnumeratedPdfCapability {
+    fn open_nofollow(&self) -> Result<File, MkoError> {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        configure_nofollow(&mut options, false);
+        let file = self
+            .parent
+            .open_with(&self.basename, &options)
+            .map_err(|error| {
+                MkoError::new(
+                    "scan_file_unreadable",
+                    format!("cannot open enumerated PDF candidate: {error}"),
+                )
+            })?;
+        let metadata = file.metadata().map_err(|error| {
+            MkoError::new(
+                "scan_file_unreadable",
+                format!("cannot inspect enumerated PDF candidate: {error}"),
+            )
+        })?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(MkoError::new(
+                "scan_file_unreadable",
+                "enumerated PDF candidate changed to a non-file or link",
+            ));
+        }
+        Ok(file)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -154,7 +226,7 @@ pub(crate) struct ProviderMetadataIssue {
     pub message: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct ProviderMetadataWalk {
     pub entries: Vec<ProviderMetadataEntry>,
     pub issues: Vec<ProviderMetadataIssue>,
@@ -176,12 +248,37 @@ pub(crate) struct ProviderCatalogScan {
     pub warnings: Vec<ProviderScanWarning>,
 }
 
-pub(crate) fn scan_provider_catalog_metadata_first(
+pub(crate) fn scan_provider_catalog_metadata_first_with_deadline(
+    request: ProviderScanRequest,
+    deadline: &ScanDeadline<'_>,
+) -> Result<ProviderCatalogScan, MkoError> {
+    scan_provider_catalog_metadata_first_inner(request, deadline, || {})
+}
+
+#[cfg(test)]
+fn scan_provider_catalog_metadata_first_with_after_walk(
     request: ProviderScanRequest,
     elapsed_clock: &dyn ElapsedClock,
+    after_walk: impl FnOnce(),
 ) -> Result<ProviderCatalogScan, MkoError> {
+    let deadline = ScanDeadline::start(elapsed_clock, request.limits);
+    scan_provider_catalog_metadata_first_inner(request, &deadline, after_walk)
+}
+
+fn scan_provider_catalog_metadata_first_inner(
+    request: ProviderScanRequest,
+    deadline: &ScanDeadline<'_>,
+    after_walk: impl FnOnce(),
+) -> Result<ProviderCatalogScan, MkoError> {
+    validate_limits(request.limits)?;
     let provider_root = canonical_directory(&request.provider_root, "provider_root_invalid")?;
-    let walk = inspect_provider_metadata(&provider_root, request.limits, elapsed_clock)?;
+    let walk = inspect_provider_metadata_with_deadline(
+        &provider_root,
+        request.limits,
+        deadline,
+        &mut |_| {},
+    )?;
+    after_walk();
     let mut warnings = walk
         .issues
         .iter()
@@ -189,10 +286,18 @@ pub(crate) fn scan_provider_catalog_metadata_first(
         .collect::<Vec<_>>();
     let mut entries = Vec::new();
     for entry in walk.entries {
+        if let Err(error) = deadline.check() {
+            warnings.push(ProviderScanWarning {
+                code: error.code().into(),
+                message: error.message().into(),
+                provider_locator: None,
+            });
+            break;
+        }
         let relative_path = entry.relative_path.clone();
-        match materialize_metadata_entry(entry, |relative_path| {
-            fingerprint_relative_pdf(&provider_root, relative_path)
-        }) {
+        match materialize_metadata_entry(entry, |relative_path, file| {
+            fingerprint_retained_pdf(relative_path, file, deadline)
+        })? {
             ProviderMetadataAccess::Placeholder => {
                 entries.push(ProviderCatalogEntry::Placeholder {
                     provider_locator: logical_locator(&relative_path)?,
@@ -202,11 +307,17 @@ pub(crate) fn scan_provider_catalog_metadata_first(
             ProviderMetadataAccess::Supported(result)
             | ProviderMetadataAccess::Unsupported(result) => match result {
                 Ok(pdf) => entries.push(ProviderCatalogEntry::Readable(pdf)),
-                Err(error) => warnings.push(ProviderScanWarning {
-                    code: error.code().into(),
-                    message: error.message().into(),
-                    provider_locator: logical_locator(&relative_path).ok(),
-                }),
+                Err(error) => {
+                    let timed_out = error.code() == "scan_time_limit";
+                    warnings.push(ProviderScanWarning {
+                        code: error.code().into(),
+                        message: error.message().into(),
+                        provider_locator: logical_locator(&relative_path).ok(),
+                    });
+                    if timed_out {
+                        break;
+                    }
+                }
             },
         }
     }
@@ -233,37 +344,49 @@ fn catalog_locator(entry: &ProviderCatalogEntry) -> &str {
 }
 
 fn materialize_metadata_entry<T>(
-    entry: ProviderMetadataEntry,
-    inspect_content: impl FnOnce(&Path) -> T,
-) -> ProviderMetadataAccess<T> {
+    mut entry: ProviderMetadataEntry,
+    inspect_content: impl FnOnce(&Path, &mut File) -> T,
+) -> Result<ProviderMetadataAccess<T>, MkoError> {
     let relative_path = entry.relative_path.clone();
-    entry.inspect_access(|| inspect_content(&relative_path))
+    match entry.hydration {
+        ProviderHydrationDisposition::Placeholder => Ok(ProviderMetadataAccess::Placeholder),
+        ProviderHydrationDisposition::Supported | ProviderHydrationDisposition::Unsupported => {
+            let capability = entry.capability.take().ok_or_else(|| {
+                MkoError::new(
+                    "provider_inspection_failed",
+                    "readable metadata entry has no retained parent capability",
+                )
+            })?;
+            let mut file = capability.open_nofollow()?;
+            let inspected = inspect_content(&relative_path, &mut file);
+            Ok(match entry.hydration {
+                ProviderHydrationDisposition::Supported => {
+                    ProviderMetadataAccess::Supported(inspected)
+                }
+                ProviderHydrationDisposition::Unsupported => {
+                    ProviderMetadataAccess::Unsupported(inspected)
+                }
+                ProviderHydrationDisposition::Placeholder => unreachable!(),
+            })
+        }
+    }
 }
 
-fn fingerprint_relative_pdf(
-    provider_root: &Path,
+fn fingerprint_retained_pdf(
     relative_path: &Path,
+    file: &mut File,
+    deadline: &ScanDeadline<'_>,
 ) -> Result<ProviderPdf, MkoError> {
     let locator = logical_locator(relative_path)?;
-    let root = Dir::open_ambient_dir(provider_root, ambient_authority()).map_err(|error| {
-        MkoError::new(
-            "provider_scan_failed",
-            format!("cannot open provider root: {error}"),
-        )
-    })?;
-    let mut options = OpenOptions::new();
-    options.read(true);
-    configure_nofollow(&mut options, false);
-    let mut file = root.open_with(relative_path, &options).map_err(|error| {
-        MkoError::new(
-            "scan_file_unreadable",
-            format!("cannot open PDF candidate: {error}"),
-        )
-    })?;
-    let before = fingerprint_open_file(&mut file)?;
-    validate_pdf_content(&mut file)?;
-    let after = fingerprint_open_file(&mut file)?;
-    validate_pdf_content(&mut file)?;
+    let mut check_deadline = || deadline.check();
+    let before = fingerprint_open_file_with_guard(file, &mut check_deadline)?;
+    deadline.check()?;
+    validate_pdf_content(file)?;
+    deadline.check()?;
+    let after = fingerprint_open_file_with_guard(file, &mut check_deadline)?;
+    deadline.check()?;
+    validate_pdf_content(file)?;
+    deadline.check()?;
     if before != after {
         return Err(MkoError::new(
             "fingerprint_changed",
@@ -315,6 +438,16 @@ fn inspect_provider_metadata_with_observer(
     observer: &mut dyn FnMut(&Path),
 ) -> Result<ProviderMetadataWalk, MkoError> {
     validate_limits(limits)?;
+    let deadline = ScanDeadline::start(elapsed_clock, limits);
+    inspect_provider_metadata_with_deadline(provider_root, limits, &deadline, observer)
+}
+
+fn inspect_provider_metadata_with_deadline(
+    provider_root: &Path,
+    limits: ScanLimits,
+    deadline: &ScanDeadline<'_>,
+    observer: &mut dyn FnMut(&Path),
+) -> Result<ProviderMetadataWalk, MkoError> {
     let root_metadata = std::fs::symlink_metadata(provider_root).map_err(|error| {
         MkoError::new(
             "provider_inspection_failed",
@@ -327,17 +460,17 @@ fn inspect_provider_metadata_with_observer(
             "provider root must be a non-link directory",
         ));
     }
-    let root = open_root_directory_nofollow(provider_root).map_err(|error| {
-        MkoError::new(
-            "provider_inspection_failed",
-            format!("cannot open provider root: {error}"),
-        )
-    })?;
-    let started_ms = elapsed_clock.elapsed_ms();
+    let root = Arc::new(
+        open_root_directory_nofollow(provider_root).map_err(|error| {
+            MkoError::new(
+                "provider_inspection_failed",
+                format!("cannot open provider root: {error}"),
+            )
+        })?,
+    );
     let mut state = MetadataWalkState {
         limits,
-        started_ms,
-        elapsed_clock,
+        deadline,
         entries_seen: 0,
         total_pdf_bytes: 0,
         stopped: false,
@@ -354,8 +487,7 @@ fn inspect_provider_metadata_with_observer(
 
 struct MetadataWalkState<'a> {
     limits: ScanLimits,
-    started_ms: u64,
-    elapsed_clock: &'a dyn ElapsedClock,
+    deadline: &'a ScanDeadline<'a>,
     entries_seen: u64,
     total_pdf_bytes: u64,
     stopped: bool,
@@ -364,7 +496,7 @@ struct MetadataWalkState<'a> {
 }
 
 fn walk_provider_metadata(
-    directory: &Dir,
+    directory: &Arc<Dir>,
     relative_directory: &Path,
     depth: u64,
     state: &mut MetadataWalkState<'_>,
@@ -469,7 +601,7 @@ fn walk_provider_metadata(
             }
             (state.observer)(&relative);
             match open_directory_nofollow(&entry) {
-                Ok(child) => walk_provider_metadata(&child, &relative, depth + 1, state),
+                Ok(child) => walk_provider_metadata(&Arc::new(child), &relative, depth + 1, state),
                 Err(error) => metadata_issue(
                     state,
                     Some(relative),
@@ -516,12 +648,7 @@ fn metadata_limit_reached(state: &mut MetadataWalkState<'_>) -> bool {
     if state.stopped {
         return true;
     }
-    if state
-        .elapsed_clock
-        .elapsed_ms()
-        .saturating_sub(state.started_ms)
-        < state.limits.max_elapsed_ms
-    {
+    if state.deadline.check().is_ok() {
         return false;
     }
     state.stopped = true;
@@ -536,7 +663,7 @@ fn metadata_limit_reached(state: &mut MetadataWalkState<'_>) -> bool {
 #[cfg(windows)]
 fn inspect_enumerated_pdf(
     entry: &DirEntry,
-    directory: &Dir,
+    directory: &Arc<Dir>,
     name: &str,
     relative_path: PathBuf,
 ) -> Result<ProviderMetadataEntry, String> {
@@ -548,27 +675,50 @@ fn inspect_enumerated_pdf(
     let enumerated = entry
         .metadata()
         .map_err(|error| format!("cannot inspect enumerated PDF metadata: {error}"))?;
-    inspect_windows_enumerated_pdf(
+    let mut inspected = inspect_windows_enumerated_pdf(
         relative_path,
         enumerated.file_attributes(),
         enumerated.len(),
         || inspect_nofollow_pdf_metadata(directory, name),
-    )
+    )?;
+    attach_enumerated_capability(&mut inspected, directory, entry.file_name());
+    Ok(inspected)
 }
 
 #[cfg(not(windows))]
 fn inspect_enumerated_pdf(
     _: &DirEntry,
-    directory: &Dir,
+    directory: &Arc<Dir>,
     name: &str,
     relative_path: PathBuf,
 ) -> Result<ProviderMetadataEntry, String> {
     let size_bytes = inspect_nofollow_pdf_metadata(directory, name)?;
+    let hydration = non_windows_hydration_disposition(directory, name)?;
     Ok(ProviderMetadataEntry {
         relative_path,
-        hydration: non_windows_hydration_disposition(directory, name)?,
+        hydration,
         size_bytes,
+        capability: (hydration != ProviderHydrationDisposition::Placeholder).then(|| {
+            EnumeratedPdfCapability {
+                parent: Arc::clone(directory),
+                basename: OsString::from(name),
+            }
+        }),
     })
+}
+
+#[cfg(windows)]
+fn attach_enumerated_capability(
+    entry: &mut ProviderMetadataEntry,
+    directory: &Arc<Dir>,
+    basename: OsString,
+) {
+    if entry.hydration != ProviderHydrationDisposition::Placeholder {
+        entry.capability = Some(EnumeratedPdfCapability {
+            parent: Arc::clone(directory),
+            basename,
+        });
+    }
 }
 
 fn inspect_nofollow_pdf_metadata(directory: &Dir, name: &str) -> Result<u64, String> {
@@ -601,12 +751,14 @@ fn inspect_windows_enumerated_pdf(
             relative_path,
             hydration: ProviderHydrationDisposition::Placeholder,
             size_bytes: enumerated_size,
+            capability: None,
         });
     }
     Ok(ProviderMetadataEntry {
         relative_path,
         hydration: ProviderHydrationDisposition::Supported,
         size_bytes: inspect_metadata_handle()?,
+        capability: None,
     })
 }
 
@@ -1078,10 +1230,12 @@ mod metadata_walk_tests {
     use std::os::unix::fs::symlink;
 
     use super::{
-        DEFAULT_SCAN_LIMITS, ElapsedClock, ProviderMetadataAccess, ScanLimits,
-        inspect_provider_metadata_with_observer, inspect_windows_enumerated_pdf,
-        materialize_metadata_entry,
+        DEFAULT_SCAN_LIMITS, ElapsedClock, ProviderCatalogEntry, ProviderMetadataAccess,
+        ProviderScanRequest, ScanLimits, inspect_provider_metadata_with_observer,
+        inspect_windows_enumerated_pdf, materialize_metadata_entry,
+        scan_provider_catalog_metadata_first_with_after_walk,
     };
+    use crate::fingerprint::fingerprint_file;
 
     struct FixedElapsedClock;
 
@@ -1138,6 +1292,38 @@ mod metadata_walk_tests {
                 .iter()
                 .any(|issue| issue.relative_path.as_deref() == Some(Path::new("child")))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialization_uses_retained_file_after_intermediate_directory_swap() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("child");
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir(&child).unwrap();
+        let inside = child.join("paper.pdf");
+        fs::write(&inside, b"%PDF-1.7\ninside\n%%EOF\n").unwrap();
+        fs::write(
+            outside.path().join("paper.pdf"),
+            b"%PDF-1.7\noutside\n%%EOF\n",
+        )
+        .unwrap();
+        let expected = fingerprint_file(&inside).unwrap();
+
+        let scan = scan_provider_catalog_metadata_first_with_after_walk(
+            ProviderScanRequest::new(root.path()),
+            &FixedElapsedClock,
+            || {
+                fs::rename(&child, root.path().join("child-original")).unwrap();
+                symlink(outside.path(), &child).unwrap();
+            },
+        )
+        .unwrap();
+
+        let ProviderCatalogEntry::Readable(pdf) = &scan.entries[0] else {
+            panic!("local PDF should be readable");
+        };
+        assert_eq!(pdf.fingerprint, expected);
     }
 
     #[test]
@@ -1233,10 +1419,11 @@ mod metadata_walk_tests {
         .unwrap();
         let content_open_calls = Cell::new(0);
 
-        let materialized = materialize_metadata_entry(entry, |_| {
+        let materialized = materialize_metadata_entry(entry, |_, _| {
             content_open_calls.set(content_open_calls.get() + 1);
             unreachable!("placeholder content must never be opened")
-        });
+        })
+        .unwrap();
 
         assert!(matches!(materialized, ProviderMetadataAccess::Placeholder));
         assert_eq!(metadata_calls.get(), 0);

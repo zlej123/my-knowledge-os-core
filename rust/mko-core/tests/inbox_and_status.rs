@@ -292,6 +292,88 @@ fn lock_scan_ignores_noise_but_fails_closed_when_sorted_lock_records_are_truncat
 }
 
 #[test]
+fn incomplete_lock_scan_blocks_readable_unregistered_pdf_with_retry() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.provider.join("unregistered.pdf"),
+        b"%PDF-1.7\nunregistered\n%%EOF\n",
+    )
+    .unwrap();
+    let locks = fixture.repository.join(".knowledge-os/runtime/locks");
+    fs::create_dir_all(&locks).unwrap();
+    fs::write(locks.join("a.lock"), b"{}").unwrap();
+    fs::write(locks.join("b.lock"), b"{}").unwrap();
+    fs::write(locks.join("c.lock"), b"{}").unwrap();
+
+    let result = scan_inbox(
+        InboxScanRequest::new(&fixture.repository, &fixture.provider).with_limits(ScanLimits {
+            max_entries: 2,
+            ..DEFAULT_SCAN_LIMITS
+        }),
+        &FixedElapsedClock::new(0),
+    )
+    .unwrap();
+
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.items[0].user_state, UserState::Blocked);
+    assert_eq!(result.items[0].next_action, NextAction::Retry);
+}
+
+#[test]
+fn shared_deadline_expires_during_provider_fingerprinting() {
+    let fixture = Fixture::new();
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    pdf.extend(std::iter::repeat_n(b'x', 2 * 1024 * 1024));
+    pdf.extend_from_slice(b"\n%%EOF\n");
+    fs::write(fixture.provider.join("slow.pdf"), pdf).unwrap();
+
+    let result = scan_inbox(
+        InboxScanRequest::new(&fixture.repository, &fixture.provider).with_limits(ScanLimits {
+            max_elapsed_ms: 1,
+            ..DEFAULT_SCAN_LIMITS
+        }),
+        &NthCallElapsedClock::new(20, 1),
+    )
+    .unwrap();
+
+    assert!(!result.scan_complete);
+    assert!(result.warnings.iter().any(|warning| {
+        warning.code == "scan_limit_reached"
+            && warning.message == "The inbox scan reached its time limit."
+    }));
+}
+
+#[test]
+fn shared_deadline_expires_during_bounded_lock_enumeration() {
+    let fixture = Fixture::new();
+    let file = fixture.provider.join("paper.pdf");
+    fs::write(&file, b"%PDF-1.7\nlock timeout\n%%EOF\n").unwrap();
+    let asset = valid_asset(&file, "paper.pdf", AssetStatus::Registered);
+    write_asset_record(&fixture.repository, asset);
+    let locks = fixture.repository.join(".knowledge-os/runtime/locks");
+    fs::create_dir_all(&locks).unwrap();
+    for index in 0..64 {
+        fs::write(locks.join(format!("unrelated-{index:02}.lock")), b"{}").unwrap();
+    }
+
+    let result = scan_inbox(
+        InboxScanRequest::new(&fixture.repository, &fixture.provider).with_limits(ScanLimits {
+            max_elapsed_ms: 1,
+            ..DEFAULT_SCAN_LIMITS
+        }),
+        &NthCallElapsedClock::new(40, 1),
+    )
+    .unwrap();
+
+    assert!(!result.scan_complete);
+    assert_eq!(result.items[0].next_action, NextAction::Retry);
+    assert!(result.warnings.iter().any(|warning| {
+        warning.code == "lock_scan_incomplete"
+            && warning.message == "The runtime lock scan reached its time limit."
+    }));
+}
+
+#[test]
 fn invalid_registry_record_is_repair_blocked_without_exposing_unsafe_locator() {
     let fixture = Fixture::new();
     let outside = fixture._root.path().join("outside.pdf");
@@ -778,5 +860,31 @@ struct IncrementingElapsedClock(AtomicU64);
 impl ElapsedClock for IncrementingElapsedClock {
     fn elapsed_ms(&self) -> u64 {
         self.0.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+struct NthCallElapsedClock {
+    calls: AtomicU64,
+    limit_call: u64,
+    expired_value: u64,
+}
+
+impl NthCallElapsedClock {
+    fn new(limit_call: u64, expired_value: u64) -> Self {
+        Self {
+            calls: AtomicU64::new(0),
+            limit_call,
+            expired_value,
+        }
+    }
+}
+
+impl ElapsedClock for NthCallElapsedClock {
+    fn elapsed_ms(&self) -> u64 {
+        if self.calls.fetch_add(1, Ordering::Relaxed) >= self.limit_call {
+            self.expired_value
+        } else {
+            0
+        }
     }
 }
