@@ -7,7 +7,7 @@ use std::{
 
 use cap_std::{
     ambient_authority,
-    fs::{Dir, DirEntry, File, OpenOptions, OpenOptionsExt},
+    fs::{Dir, DirEntry, File, Metadata, OpenOptions, OpenOptionsExt},
 };
 use unicode_normalization::UnicodeNormalization;
 
@@ -161,6 +161,24 @@ enum ProviderHydrationDisposition {
     Unsupported,
 }
 
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct EnumeratedFileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct EnumeratedFileIdentity {
+    volume_serial_number: u32,
+    file_index: u64,
+}
+
+#[cfg(not(any(unix, windows)))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct EnumeratedFileIdentity;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ProviderMetadataAccess<T> {
     Placeholder,
@@ -215,7 +233,7 @@ pub(crate) fn scan_provider_catalog_metadata_first_with_deadline(
     request: ProviderScanRequest,
     deadline: &ScanDeadline<'_>,
 ) -> Result<ProviderCatalogScan, MkoError> {
-    scan_provider_catalog_metadata_first_inner(request, deadline, || {})
+    scan_provider_catalog_metadata_first_inner(request, deadline, || {}, &mut |_| {})
 }
 
 #[cfg(test)]
@@ -225,13 +243,24 @@ fn scan_provider_catalog_metadata_first_with_after_walk(
     after_walk: impl FnOnce(),
 ) -> Result<ProviderCatalogScan, MkoError> {
     let deadline = ScanDeadline::start(elapsed_clock, request.limits);
-    scan_provider_catalog_metadata_first_inner(request, &deadline, after_walk)
+    scan_provider_catalog_metadata_first_inner(request, &deadline, after_walk, &mut |_| {})
+}
+
+#[cfg(test)]
+fn scan_provider_catalog_metadata_first_with_before_file_open(
+    request: ProviderScanRequest,
+    elapsed_clock: &dyn ElapsedClock,
+    before_file_open: &mut dyn FnMut(&Path),
+) -> Result<ProviderCatalogScan, MkoError> {
+    let deadline = ScanDeadline::start(elapsed_clock, request.limits);
+    scan_provider_catalog_metadata_first_inner(request, &deadline, || {}, before_file_open)
 }
 
 fn scan_provider_catalog_metadata_first_inner(
     request: ProviderScanRequest,
     deadline: &ScanDeadline<'_>,
     after_walk: impl FnOnce(),
+    before_file_open: &mut dyn FnMut(&Path),
 ) -> Result<ProviderCatalogScan, MkoError> {
     validate_limits(request.limits)?;
     let provider_root = canonical_directory(&request.provider_root, "provider_root_invalid")?;
@@ -240,6 +269,7 @@ fn scan_provider_catalog_metadata_first_inner(
         request.limits,
         deadline,
         &mut |_| {},
+        before_file_open,
     )?;
     after_walk();
     let mut warnings = walk
@@ -405,7 +435,7 @@ fn inspect_provider_metadata_with_observer(
 ) -> Result<ProviderMetadataWalk, MkoError> {
     validate_limits(limits)?;
     let deadline = ScanDeadline::start(elapsed_clock, limits);
-    inspect_provider_metadata_with_deadline(provider_root, limits, &deadline, observer)
+    inspect_provider_metadata_with_deadline(provider_root, limits, &deadline, observer, &mut |_| {})
 }
 
 fn inspect_provider_metadata_with_deadline(
@@ -413,6 +443,7 @@ fn inspect_provider_metadata_with_deadline(
     limits: ScanLimits,
     deadline: &ScanDeadline<'_>,
     observer: &mut dyn FnMut(&Path),
+    before_file_open: &mut dyn FnMut(&Path),
 ) -> Result<ProviderMetadataWalk, MkoError> {
     let root_metadata = std::fs::symlink_metadata(provider_root).map_err(|error| {
         MkoError::new(
@@ -442,6 +473,7 @@ fn inspect_provider_metadata_with_deadline(
         stopped: false,
         walk: ProviderMetadataWalk::default(),
         observer,
+        before_file_open,
     };
     walk_provider_metadata(&root, Path::new(""), 0, &mut state);
     state
@@ -459,6 +491,7 @@ struct MetadataWalkState<'a> {
     stopped: bool,
     walk: ProviderMetadataWalk,
     observer: &'a mut dyn FnMut(&Path),
+    before_file_open: &'a mut dyn FnMut(&Path),
 }
 
 fn walk_provider_metadata(
@@ -580,14 +613,16 @@ fn walk_provider_metadata(
             continue;
         }
         (state.observer)(&relative);
-        let metadata_entry = match inspect_enumerated_pdf(&entry, directory, name, relative.clone())
-        {
-            Ok(metadata_entry) => metadata_entry,
-            Err(message) => {
-                metadata_issue(state, Some(relative), message);
-                continue;
-            }
-        };
+        let metadata_entry =
+            match inspect_enumerated_pdf(&entry, directory, name, relative.clone(), || {
+                (state.before_file_open)(&relative)
+            }) {
+                Ok(metadata_entry) => metadata_entry,
+                Err(message) => {
+                    metadata_issue(state, Some(relative), message);
+                    continue;
+                }
+            };
         let next_total = match state.total_pdf_bytes.checked_add(metadata_entry.size_bytes) {
             Some(total) => total,
             None => {
@@ -632,6 +667,7 @@ fn inspect_enumerated_pdf(
     directory: &Arc<Dir>,
     name: &str,
     relative_path: PathBuf,
+    before_open: impl FnOnce(),
 ) -> Result<ProviderMetadataEntry, String> {
     use cap_std::fs::MetadataExt;
 
@@ -647,7 +683,13 @@ fn inspect_enumerated_pdf(
         enumerated.len(),
         || inspect_nofollow_pdf_metadata(directory, name),
     )?;
-    attach_enumerated_file(&mut inspected, entry)?;
+    if inspected.hydration != ProviderHydrationDisposition::Placeholder {
+        let identity = enumerated_file_identity(&enumerated)?;
+        before_open();
+        verify_enumerated_file_still_current(directory, name, identity, inspected.size_bytes)?;
+        inspected.retained_file =
+            Some(open_enumerated_file(entry, identity, inspected.size_bytes)?);
+    }
     Ok(inspected)
 }
 
@@ -657,13 +699,18 @@ fn inspect_enumerated_pdf(
     directory: &Arc<Dir>,
     name: &str,
     relative_path: PathBuf,
+    before_open: impl FnOnce(),
 ) -> Result<ProviderMetadataEntry, String> {
-    let size_bytes = inspect_nofollow_pdf_metadata(directory, name)?;
+    let enumerated = inspect_nofollow_pdf_metadata_snapshot(directory, name)?;
+    let size_bytes = enumerated.len();
+    let identity = enumerated_file_identity(&enumerated)?;
     let hydration = non_windows_hydration_disposition(directory, name)?;
     let retained_file = if hydration == ProviderHydrationDisposition::Placeholder {
         None
     } else {
-        Some(open_enumerated_file(entry, size_bytes)?)
+        before_open();
+        verify_enumerated_file_still_current(directory, name, identity, size_bytes)?;
+        Some(open_enumerated_file(entry, identity, size_bytes)?)
     };
     Ok(ProviderMetadataEntry {
         relative_path,
@@ -673,18 +720,11 @@ fn inspect_enumerated_pdf(
     })
 }
 
-#[cfg(windows)]
-fn attach_enumerated_file(
-    entry: &mut ProviderMetadataEntry,
-    directory_entry: &DirEntry,
-) -> Result<(), String> {
-    if entry.hydration != ProviderHydrationDisposition::Placeholder {
-        entry.retained_file = Some(open_enumerated_file(directory_entry, entry.size_bytes)?);
-    }
-    Ok(())
-}
-
-fn open_enumerated_file(entry: &DirEntry, expected_size: u64) -> Result<File, String> {
+fn open_enumerated_file(
+    entry: &DirEntry,
+    expected_identity: EnumeratedFileIdentity,
+    expected_size: u64,
+) -> Result<File, String> {
     let mut options = OpenOptions::new();
     options.read(true);
     configure_nofollow(&mut options, false);
@@ -697,20 +737,101 @@ fn open_enumerated_file(entry: &DirEntry, expected_size: u64) -> Result<File, St
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err("enumerated PDF candidate changed to a non-file or link".into());
     }
+    if enumerated_file_identity(&metadata)? != expected_identity {
+        return Err("enumerated PDF candidate identity changed before content access".into());
+    }
     if metadata.len() != expected_size {
         return Err("enumerated PDF candidate changed size before its handle was retained".into());
     }
     Ok(file)
 }
 
+#[cfg(windows)]
 fn inspect_nofollow_pdf_metadata(directory: &Dir, name: &str) -> Result<u64, String> {
+    inspect_nofollow_pdf_metadata_snapshot(directory, name).map(|metadata| metadata.len())
+}
+
+fn inspect_nofollow_pdf_metadata_snapshot(directory: &Dir, name: &str) -> Result<Metadata, String> {
     let metadata = directory
         .symlink_metadata(name)
         .map_err(|error| format!("cannot inspect PDF metadata: {error}"))?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err("PDF candidate changed to a non-file or link".into());
     }
-    Ok(metadata.len())
+    Ok(metadata)
+}
+
+fn verify_enumerated_file_still_current(
+    directory: &Dir,
+    name: &str,
+    expected_identity: EnumeratedFileIdentity,
+    expected_size: u64,
+) -> Result<(), String> {
+    let current = inspect_nofollow_pdf_metadata_snapshot(directory, name)
+        .map_err(|message| format!("enumerated PDF candidate cannot be revalidated: {message}"))?;
+    if enumerated_file_identity(&current)? != expected_identity {
+        return Err("enumerated PDF candidate identity changed before content open".into());
+    }
+    if current.len() != expected_size {
+        return Err("enumerated PDF candidate changed size before content open".into());
+    }
+    if current_hydration_disposition(directory, name, &current)?
+        == ProviderHydrationDisposition::Placeholder
+    {
+        return Err("enumerated PDF candidate changed to a placeholder before content open".into());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn enumerated_file_identity(metadata: &Metadata) -> Result<EnumeratedFileIdentity, String> {
+    use cap_std::fs::MetadataExt;
+
+    Ok(EnumeratedFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn enumerated_file_identity(metadata: &Metadata) -> Result<EnumeratedFileIdentity, String> {
+    use cap_std::fs::MetadataExt;
+
+    let volume_serial_number = metadata.volume_serial_number().ok_or_else(|| {
+        "enumerated PDF candidate has no stable volume identity; refusing content open".to_owned()
+    })?;
+    let file_index = metadata.file_index().ok_or_else(|| {
+        "enumerated PDF candidate has no stable file identity; refusing content open".to_owned()
+    })?;
+    Ok(EnumeratedFileIdentity {
+        volume_serial_number,
+        file_index,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn enumerated_file_identity(_: &Metadata) -> Result<EnumeratedFileIdentity, String> {
+    Err("enumerated PDF candidate identity is unsupported; refusing content open".into())
+}
+
+#[cfg(windows)]
+fn current_hydration_disposition(
+    _: &Dir,
+    _: &str,
+    metadata: &Metadata,
+) -> Result<ProviderHydrationDisposition, String> {
+    use cap_std::fs::MetadataExt;
+
+    Ok(windows_hydration_disposition(metadata.file_attributes()))
+}
+
+#[cfg(not(windows))]
+fn current_hydration_disposition(
+    directory: &Dir,
+    name: &str,
+    _: &Metadata,
+) -> Result<ProviderHydrationDisposition, String> {
+    non_windows_hydration_disposition(directory, name)
 }
 
 #[cfg(any(windows, test))]
@@ -720,15 +841,7 @@ fn inspect_windows_enumerated_pdf(
     enumerated_size: u64,
     inspect_metadata_handle: impl FnOnce() -> Result<u64, String>,
 ) -> Result<ProviderMetadataEntry, String> {
-    const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
-    const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
-    const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
-    if attributes
-        & (FILE_ATTRIBUTE_OFFLINE
-            | FILE_ATTRIBUTE_RECALL_ON_OPEN
-            | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
-        != 0
-    {
+    if windows_hydration_disposition(attributes) == ProviderHydrationDisposition::Placeholder {
         return Ok(ProviderMetadataEntry {
             relative_path,
             hydration: ProviderHydrationDisposition::Placeholder,
@@ -742,6 +855,23 @@ fn inspect_windows_enumerated_pdf(
         size_bytes: inspect_metadata_handle()?,
         retained_file: None,
     })
+}
+
+#[cfg(any(windows, test))]
+fn windows_hydration_disposition(attributes: u32) -> ProviderHydrationDisposition {
+    const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
+    const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
+    const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+    if attributes
+        & (FILE_ATTRIBUTE_OFFLINE
+            | FILE_ATTRIBUTE_RECALL_ON_OPEN
+            | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+        != 0
+    {
+        ProviderHydrationDisposition::Placeholder
+    } else {
+        ProviderHydrationDisposition::Supported
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1214,8 +1344,9 @@ mod metadata_walk_tests {
     use super::{
         DEFAULT_SCAN_LIMITS, ElapsedClock, ProviderCatalogEntry, ProviderMetadataAccess,
         ProviderScanRequest, ScanLimits, inspect_provider_metadata_with_observer,
-        inspect_windows_enumerated_pdf, materialize_metadata_entry,
+        inspect_windows_enumerated_pdf, materialize_metadata_entry, open_enumerated_file,
         scan_provider_catalog_metadata_first_with_after_walk,
+        scan_provider_catalog_metadata_first_with_before_file_open,
     };
     use crate::fingerprint::fingerprint_file;
 
@@ -1327,6 +1458,92 @@ mod metadata_walk_tests {
         .unwrap();
 
         assert_eq!(only_readable_fingerprint(&scan), expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_size_replacement_between_classification_and_open_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let paper = root.path().join("paper.pdf");
+        let original = b"%PDF-1.7\noriginal-A\n%%EOF\n";
+        let replacement = b"%PDF-1.7\nreplaced-B\n%%EOF\n";
+        assert_eq!(original.len(), replacement.len());
+        fs::write(&paper, original).unwrap();
+        let mut hook_calls = 0;
+
+        let scan = scan_provider_catalog_metadata_first_with_before_file_open(
+            ProviderScanRequest::new(root.path()),
+            &FixedElapsedClock,
+            &mut |relative| {
+                assert_eq!(relative, Path::new("paper.pdf"));
+                hook_calls += 1;
+                fs::rename(&paper, root.path().join("classified-original.pdf")).unwrap();
+                fs::write(&paper, replacement).unwrap();
+            },
+        )
+        .unwrap();
+
+        assert_eq!(hook_calls, 1);
+        assert_identity_race_warning(&scan);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_replacement_between_classification_and_open_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let paper = root.path().join("paper.pdf");
+        fs::write(&paper, b"%PDF-1.7\noriginal\n%%EOF\n").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_paper = outside.path().join("outside.pdf");
+        fs::write(&outside_paper, b"%PDF-1.7\noutside\n%%EOF\n").unwrap();
+        let mut hook_calls = 0;
+
+        let scan = scan_provider_catalog_metadata_first_with_before_file_open(
+            ProviderScanRequest::new(root.path()),
+            &FixedElapsedClock,
+            &mut |relative| {
+                assert_eq!(relative, Path::new("paper.pdf"));
+                hook_calls += 1;
+                fs::rename(&paper, root.path().join("classified-original.pdf")).unwrap();
+                symlink(&outside_paper, &paper).unwrap();
+            },
+        )
+        .unwrap();
+
+        assert_eq!(hook_calls, 1);
+        assert_identity_race_warning(&scan);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opened_handle_identity_is_checked_before_materialization() {
+        let root = tempfile::tempdir().unwrap();
+        let paper = root.path().join("paper.pdf");
+        let original = b"%PDF-1.7\noriginal-A\n%%EOF\n";
+        let replacement = b"%PDF-1.7\nreplaced-B\n%%EOF\n";
+        assert_eq!(original.len(), replacement.len());
+        fs::write(&paper, original).unwrap();
+        let directory =
+            cap_std::fs::Dir::open_ambient_dir(root.path(), cap_std::ambient_authority()).unwrap();
+        let entry = directory.entries().unwrap().next().unwrap().unwrap();
+        let enumerated = entry.metadata().unwrap();
+        let identity = super::enumerated_file_identity(&enumerated).unwrap();
+
+        fs::rename(&paper, root.path().join("classified-original.pdf")).unwrap();
+        fs::write(&paper, replacement).unwrap();
+
+        let error = match open_enumerated_file(&entry, identity, original.len() as u64) {
+            Ok(_) => panic!("replacement handle must be rejected before materialization"),
+            Err(error) => error,
+        };
+        assert!(error.contains("identity changed"), "{error}");
+    }
+
+    fn assert_identity_race_warning(scan: &super::ProviderCatalogScan) {
+        assert!(!scan.scan_complete);
+        assert!(scan.entries.is_empty());
+        assert_eq!(scan.warnings.len(), 1);
+        assert_eq!(scan.warnings[0].code, "scan_file_unreadable");
     }
 
     #[cfg(unix)]
@@ -1500,6 +1717,26 @@ mod metadata_walk_tests {
             panic!("missing handle must stay a per-entry error");
         };
         assert_eq!(error.code(), "scan_file_unreadable");
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    #[test]
+    fn unsupported_file_identity_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("paper.pdf"),
+            b"%PDF-1.7\nunsupported\n%%EOF\n",
+        )
+        .unwrap();
+
+        let scan = scan_provider_catalog_metadata_first_with_before_file_open(
+            ProviderScanRequest::new(root.path()),
+            &FixedElapsedClock,
+            &mut |_| panic!("unsupported identity must fail before content open"),
+        )
+        .unwrap();
+
+        assert_identity_race_warning(&scan);
     }
 
     #[test]
