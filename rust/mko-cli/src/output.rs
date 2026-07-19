@@ -64,9 +64,11 @@ pub fn json_v1_failure(command: JsonV1Command, error: &MkoError) -> JsonV1Failur
 
 pub fn recovery_for_error_code(code: &str) -> Option<RecoveryKind> {
     match code {
-        "profile_missing" | "context_not_found" | "profile_invalid" => {
-            Some(RecoveryKind::Configure)
-        }
+        "profile_missing"
+        | "context_not_found"
+        | "profile_invalid"
+        | "inbox_unavailable"
+        | "repository_not_configured" => Some(RecoveryKind::Configure),
         "provider_hydration_failed" | "provider_not_hydrated" => Some(RecoveryKind::Hydrate),
         "backup_confirmation_required" => Some(RecoveryKind::VerifyBackup),
         "profile_permissions_invalid" | "provider_permissions_invalid" | "permission_denied" => {

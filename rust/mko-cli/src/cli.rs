@@ -16,9 +16,11 @@ use mko_core::{
     doctor::{DoctorRequest, SystemDoctorEnvironment, diagnose},
     error::MkoError,
     hooks::install_hooks,
+    inbox::{InboxScanRequest, InboxScanResult, scan_inbox},
     json_v1::{
         AddData, AddPayload, CheckData, DiagnosticData, DoctorCheckData, DoctorData, DraftOutcome,
-        JsonV1Command, JsonV1Success, PrepareData, Recovery, SuccessResult, WriteDraftData,
+        JsonV1Command, JsonV1Success, NextAction, PrepareData, Recovery, SuccessResult, UserState,
+        WriteDraftData,
     },
     model::AssetStatus,
     pdf::{ExtractionWorkerResponse, extract_pdf_pages_from_reader, worker_executable},
@@ -34,6 +36,7 @@ use mko_core::{
     source::{
         RepairSourceStateRequest, WriteSourceRequest, repair_source_state, write_source_draft,
     },
+    status::{StatusReport, status_from_inbox},
 };
 
 use crate::output::{
@@ -228,6 +231,8 @@ enum Command {
     },
     Check(CheckArgs),
     Doctor(DoctorArgs),
+    Inbox(InboxArgs),
+    Status(StatusArgs),
     Human {
         #[command(subcommand)]
         command: HumanCommand,
@@ -326,6 +331,20 @@ struct CheckArgs {
 }
 #[derive(Args)]
 struct DoctorArgs {
+    #[arg(long)]
+    repo: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
+}
+#[derive(Args)]
+struct InboxArgs {
+    #[arg(long)]
+    repo: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
+}
+#[derive(Args)]
+struct StatusArgs {
     #[arg(long)]
     repo: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -478,6 +497,8 @@ fn run(cli: Cli) -> Result<Exit, MkoError> {
         } => repair_asset_lineage(arguments).map(|_| Exit::Success),
         Command::Check(arguments) => check(arguments),
         Command::Doctor(arguments) => doctor(arguments).map(|_| Exit::Success),
+        Command::Inbox(arguments) => inbox(arguments).map(|_| Exit::Success),
+        Command::Status(arguments) => status(arguments).map(|_| Exit::Success),
         Command::Source {
             command: SourceCommand::Prepare(arguments),
         } => prepare(arguments).map(|_| Exit::Success),
@@ -692,6 +713,155 @@ fn doctor(arguments: DoctorArgs) -> Result<(), MkoError> {
         })
     } else {
         emit_doctor_human(&report)
+    }
+}
+
+fn inbox(arguments: InboxArgs) -> Result<(), MkoError> {
+    let context = resolve_catalog_context(arguments.repo, JsonV1Command::Inbox)?;
+    let report = scan_inbox(
+        InboxScanRequest::new(&context.repository_root, &context.provider_root),
+        &MonotonicElapsedClock::start(),
+    )
+    .map_err(map_inbox_error)?;
+    if arguments.format == OutputFormat::JsonV1 {
+        emit_json_v1(JsonV1Success::Inbox {
+            schema_version: 1,
+            result: SuccessResult::Ok,
+            data: report.into(),
+        })
+    } else {
+        emit_inbox_human(&report)
+    }
+}
+
+fn status(arguments: StatusArgs) -> Result<(), MkoError> {
+    let context = resolve_catalog_context(arguments.repo, JsonV1Command::Status)?;
+    let inbox = scan_inbox(
+        InboxScanRequest::new(&context.repository_root, &context.provider_root),
+        &MonotonicElapsedClock::start(),
+    )
+    .map_err(map_status_error)?;
+    let report = status_from_inbox(&inbox);
+    if arguments.format == OutputFormat::JsonV1 {
+        emit_json_v1(JsonV1Success::Status {
+            schema_version: 1,
+            result: SuccessResult::Ok,
+            data: report.into(),
+        })
+    } else {
+        emit_status_human(&report)
+    }
+}
+
+fn resolve_catalog_context(
+    repository: Option<PathBuf>,
+    command: JsonV1Command,
+) -> Result<ResolvedPersonalContext, MkoError> {
+    resolve_context(repository).map_err(|error| match command {
+        JsonV1Command::Inbox
+            if matches!(
+                error.code(),
+                "context_not_found" | "profile_missing" | "profile_invalid"
+            ) =>
+        {
+            MkoError::new("inbox_unavailable", "The inbox is not configured.")
+        }
+        JsonV1Command::Status
+            if matches!(
+                error.code(),
+                "context_not_found" | "profile_missing" | "profile_invalid"
+            ) =>
+        {
+            MkoError::new(
+                "repository_not_configured",
+                "No default repository is configured.",
+            )
+        }
+        _ => error,
+    })
+}
+
+fn map_inbox_error(error: MkoError) -> MkoError {
+    if matches!(
+        error.code(),
+        "provider_root_invalid" | "provider_scan_failed" | "repository_unreadable"
+    ) {
+        MkoError::new("inbox_unavailable", "The inbox could not be scanned.")
+    } else {
+        error
+    }
+}
+
+fn map_status_error(error: MkoError) -> MkoError {
+    if error.code() == "repository_root_invalid" {
+        MkoError::new("repository_unreadable", "The repository is not readable.")
+    } else {
+        error
+    }
+}
+
+fn emit_inbox_human(report: &InboxScanResult) -> Result<(), MkoError> {
+    if report.items.is_empty() {
+        println!("Inbox에 표시할 PDF가 없습니다.");
+    } else {
+        for item in &report.items {
+            println!(
+                "{}: {} ({})",
+                item.provider_locator,
+                user_state_name(&item.user_state),
+                next_action_name(&item.next_action)
+            );
+        }
+    }
+    if report.remaining > 0 {
+        println!(
+            "나머지 {}개는 다음 실행에서 확인할 수 있습니다.",
+            report.remaining
+        );
+    }
+    Ok(())
+}
+
+fn emit_status_human(report: &StatusReport) -> Result<(), MkoError> {
+    println!(
+        "새 항목 {} · 등록됨 {} · 미완료 {} · 검토 대기 {} · 완료 {} · 막힘 {}",
+        report.counts[&UserState::New],
+        report.counts[&UserState::Registered],
+        report.counts[&UserState::Incomplete],
+        report.counts[&UserState::ReviewPending],
+        report.counts[&UserState::Processed],
+        report.counts[&UserState::Blocked],
+    );
+    if report.next_action == NextAction::None {
+        println!("지금 필요한 작업이 없습니다.");
+    } else {
+        println!("다음 작업: {}", next_action_name(&report.next_action));
+    }
+    Ok(())
+}
+
+fn user_state_name(state: &UserState) -> &'static str {
+    match state {
+        UserState::New => "새 항목",
+        UserState::Registered => "등록됨",
+        UserState::Incomplete => "미완료",
+        UserState::ReviewPending => "검토 대기",
+        UserState::Processed => "완료",
+        UserState::Blocked => "막힘",
+    }
+}
+
+fn next_action_name(action: &NextAction) -> &'static str {
+    match action {
+        NextAction::None => "없음",
+        NextAction::Configure => "설정",
+        NextAction::Hydrate => "파일 다운로드",
+        NextAction::Add => "등록",
+        NextAction::Prepare => "내용 추출",
+        NextAction::WriteDraft => "초안 작성",
+        NextAction::Review => "검토",
+        NextAction::Repair => "복구",
+        NextAction::Retry => "다시 시도",
     }
 }
 
@@ -1022,6 +1192,14 @@ fn json_v1_command(cli: &Cli) -> Option<JsonV1Command> {
             format: OutputFormat::JsonV1,
             ..
         }) => Some(JsonV1Command::Doctor),
+        Command::Inbox(InboxArgs {
+            format: OutputFormat::JsonV1,
+            ..
+        }) => Some(JsonV1Command::Inbox),
+        Command::Status(StatusArgs {
+            format: OutputFormat::JsonV1,
+            ..
+        }) => Some(JsonV1Command::Status),
         Command::Source {
             command:
                 SourceCommand::Prepare(PrepareArgs {
@@ -1056,6 +1234,8 @@ fn json_v1_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option
         ("add", _) => Some(JsonV1Command::Add),
         ("check", _) => Some(JsonV1Command::Check),
         ("doctor", _) => Some(JsonV1Command::Doctor),
+        ("inbox", _) => Some(JsonV1Command::Inbox),
+        ("status", _) => Some(JsonV1Command::Status),
         ("source", Some("prepare")) => Some(JsonV1Command::SourcePrepare),
         ("source", Some("write-draft")) => Some(JsonV1Command::SourceWriteDraft),
         _ => None,
