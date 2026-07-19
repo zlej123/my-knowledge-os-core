@@ -7,7 +7,7 @@ use std::{
 };
 
 use atomic_write_file::AtomicWriteFile;
-use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
+use cap_std::fs::{Dir, OpenOptions as CapOpenOptions, OpenOptionsExt};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, System};
@@ -19,6 +19,7 @@ const LOCK_RETRY: Duration = Duration::from_millis(10);
 const PUBLICATION_STALE_TTL: ChronoDuration = ChronoDuration::minutes(15);
 const PUBLICATION_SCAN_ENTRY_LIMIT: usize = 64;
 const PUBLICATION_SCAN_TIME_LIMIT: Duration = Duration::from_millis(100);
+const PUBLICATION_RECORD_BYTE_LIMIT: u64 = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AtomicWriteResult {
@@ -288,7 +289,13 @@ impl<'a> CapabilityPublicationLock<'a> {
         let lock_filename = format!(".{filename}.publish.lock");
         let deadline = Instant::now() + LOCK_WAIT;
         loop {
-            if let Err(error) = resolve_publication_quarantines(directory, &lock_filename) {
+            if Instant::now() >= deadline {
+                return Err(publication_locked_error());
+            }
+            let scan_deadline = publication_scan_deadline(deadline);
+            if let Err(error) =
+                resolve_publication_quarantines(directory, &lock_filename, scan_deadline)
+            {
                 if error.code() == "registry_locked" && Instant::now() < deadline {
                     thread::sleep(LOCK_RETRY);
                     continue;
@@ -309,7 +316,9 @@ impl<'a> CapabilityPublicationLock<'a> {
                     file.sync_all().map_err(lock_error)?;
                     sync_capability_directory(directory)?;
                     let identity = stable_capability_identity(&file)?;
-                    if let Err(error) = ensure_no_publication_quarantine(directory, &lock_filename)
+                    let scan_deadline = publication_scan_deadline(deadline);
+                    if let Err(error) =
+                        ensure_no_publication_quarantine(directory, &lock_filename, scan_deadline)
                     {
                         drop(file);
                         cleanup_capability_entry(
@@ -407,14 +416,17 @@ fn cleanup_capability_entry_with_observer<A, O>(
     durability_observer(CleanupDurabilityEvent::Quarantined);
     after_quarantine();
 
-    let owned = directory.open(&quarantine).ok().is_some_and(|mut file| {
-        let same_identity = stable_capability_identity(&file).ok() == Some(identity);
-        let same_contents = expected_contents.is_none_or(|expected| {
-            let mut contents = String::new();
-            file.read_to_string(&mut contents).is_ok() && contents == expected
-        });
-        same_identity && same_contents
-    });
+    let deadline = Instant::now() + PUBLICATION_SCAN_TIME_LIMIT;
+    let owned = if let Some(expected) = expected_contents {
+        read_publication_bytes_with_hook(directory, &quarantine, deadline, || {})
+            .ok()
+            .is_some_and(|(contents, current_identity)| {
+                current_identity == identity
+                    && contents.is_some_and(|contents| contents == expected.as_bytes())
+            })
+    } else {
+        publication_entry_identity_nonblocking(directory, &quarantine) == Some(identity)
+    };
     if owned {
         if directory.remove_file(&quarantine).is_ok()
             && sync_capability_directory(directory).is_ok()
@@ -470,7 +482,7 @@ struct PublicationQuarantine {
     filename: String,
     record: Option<PublicationLockRecord>,
     authenticated: bool,
-    identity: StableCapabilityIdentity,
+    identity: Option<StableCapabilityIdentity>,
 }
 
 fn publication_quarantine_target(name: &str) -> Option<(&str, &str)> {
@@ -482,14 +494,119 @@ fn publication_quarantine_target(name: &str) -> Option<(&str, &str)> {
     .then_some((target, token))
 }
 
+fn read_publication_record_with_hook<H>(
+    directory: &Dir,
+    name: &str,
+    deadline: Instant,
+    after_metadata: H,
+) -> Result<(Option<PublicationLockRecord>, StableCapabilityIdentity), MkoError>
+where
+    H: FnOnce(),
+{
+    let (input, identity) =
+        read_publication_bytes_with_hook(directory, name, deadline, after_metadata)?;
+    Ok((
+        input.and_then(|input| serde_json::from_slice::<PublicationLockRecord>(&input).ok()),
+        identity,
+    ))
+}
+
+fn read_publication_bytes_with_hook<H>(
+    directory: &Dir,
+    name: &str,
+    deadline: Instant,
+    after_metadata: H,
+) -> Result<(Option<Vec<u8>>, StableCapabilityIdentity), MkoError>
+where
+    H: FnOnce(),
+{
+    check_publication_deadline(deadline)?;
+    let metadata = directory.symlink_metadata(name).map_err(lock_error)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(registry_quarantine_invalid_error());
+    }
+    after_metadata();
+    check_publication_deadline(deadline)?;
+    let mut options = CapOpenOptions::new();
+    options.read(true);
+    configure_publication_open(&mut options);
+    let mut file = directory.open_with(name, &options).map_err(lock_error)?;
+    let metadata = file.metadata().map_err(lock_error)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(registry_quarantine_invalid_error());
+    }
+    let identity = stable_capability_identity(&file)?;
+    let mut input = Vec::new();
+    Read::by_ref(&mut file)
+        .take(PUBLICATION_RECORD_BYTE_LIMIT + 1)
+        .read_to_end(&mut input)
+        .map_err(lock_error)?;
+    check_publication_deadline(deadline)?;
+    if input.len() as u64 > PUBLICATION_RECORD_BYTE_LIMIT {
+        return Ok((None, identity));
+    }
+    Ok((Some(input), identity))
+}
+
+fn publication_entry_identity_nonblocking(
+    directory: &Dir,
+    name: &str,
+) -> Option<StableCapabilityIdentity> {
+    let mut options = CapOpenOptions::new();
+    options.read(true);
+    configure_publication_open(&mut options);
+    directory
+        .open_with(name, &options)
+        .ok()
+        .and_then(|file| stable_capability_identity(&file).ok())
+}
+
+fn publication_scan_deadline(acquire_deadline: Instant) -> Instant {
+    std::cmp::min(
+        acquire_deadline,
+        Instant::now() + PUBLICATION_SCAN_TIME_LIMIT,
+    )
+}
+
+fn check_publication_deadline(deadline: Instant) -> Result<(), MkoError> {
+    if Instant::now() >= deadline {
+        Err(registry_scan_limit_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn configure_publication_open(options: &mut CapOpenOptions) {
+    const O_NONBLOCK: i32 = 0x800;
+    const O_NOFOLLOW: i32 = 0x20_000;
+    options.custom_flags(O_NOFOLLOW | O_NONBLOCK);
+}
+
+#[cfg(target_os = "macos")]
+fn configure_publication_open(options: &mut CapOpenOptions) {
+    const O_NONBLOCK: i32 = 0x4;
+    const O_NOFOLLOW: i32 = 0x100;
+    options.custom_flags(O_NOFOLLOW | O_NONBLOCK);
+}
+
+#[cfg(windows)]
+fn configure_publication_open(options: &mut CapOpenOptions) {
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn configure_publication_open(_: &mut CapOpenOptions) {}
+
 fn scan_publication_quarantines(
     directory: &Dir,
     filename: &str,
+    deadline: Instant,
 ) -> Result<Vec<PublicationQuarantine>, MkoError> {
     let entries = directory
         .read_dir(".")
         .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
-    let deadline = Instant::now() + PUBLICATION_SCAN_TIME_LIMIT;
     let mut quarantines = Vec::new();
     for (index, entry) in entries.enumerate() {
         if index >= PUBLICATION_SCAN_ENTRY_LIMIT || Instant::now() >= deadline {
@@ -504,18 +621,17 @@ fn scan_publication_quarantines(
         if target != filename {
             continue;
         }
-        let mut file = match directory.open(&name) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(lock_error(error)),
-        };
-        let identity = stable_capability_identity(&file)?;
-        let mut input = Vec::new();
-        let record = Read::by_ref(&mut file)
-            .take(4096)
-            .read_to_end(&mut input)
-            .ok()
-            .and_then(|_| serde_json::from_slice::<PublicationLockRecord>(&input).ok());
+        let (record, identity) =
+            match read_publication_record_with_hook(directory, &name, deadline, || {}) {
+                Ok((record, identity)) => (record, Some(identity)),
+                Err(error) if error.code() == "registry_scan_limit" => return Err(error),
+                Err(_) => {
+                    check_publication_deadline(deadline)?;
+                    let identity = publication_entry_identity_nonblocking(directory, &name);
+                    check_publication_deadline(deadline)?;
+                    (None, identity)
+                }
+            };
         let authenticated = record
             .as_ref()
             .is_some_and(|record| record.owner_token == name_token);
@@ -529,22 +645,31 @@ fn scan_publication_quarantines(
     Ok(quarantines)
 }
 
-fn ensure_no_publication_quarantine(directory: &Dir, filename: &str) -> Result<(), MkoError> {
-    if scan_publication_quarantines(directory, filename)?.is_empty() {
+fn ensure_no_publication_quarantine(
+    directory: &Dir,
+    filename: &str,
+    deadline: Instant,
+) -> Result<(), MkoError> {
+    if scan_publication_quarantines(directory, filename, deadline)?.is_empty() {
         Ok(())
     } else {
         Err(publication_locked_error())
     }
 }
 
-fn resolve_publication_quarantines(directory: &Dir, filename: &str) -> Result<(), MkoError> {
-    let quarantines = scan_publication_quarantines(directory, filename)?;
+fn resolve_publication_quarantines(
+    directory: &Dir,
+    filename: &str,
+    deadline: Instant,
+) -> Result<(), MkoError> {
+    let quarantines = scan_publication_quarantines(directory, filename, deadline)?;
     for quarantine in quarantines {
+        check_publication_deadline(deadline)?;
         let valid = quarantine.authenticated && quarantine.record.is_some();
-        if valid && !publication_record_is_stale(quarantine.record.as_ref().unwrap())? {
+        if valid && !publication_record_is_stale(quarantine.record.as_ref().unwrap(), deadline)? {
             return Err(publication_locked_error());
         }
-        reap_publication_quarantine(directory, &quarantine)?;
+        reap_publication_quarantine(directory, &quarantine, deadline)?;
         if !valid {
             return Err(registry_quarantine_invalid_error());
         }
@@ -555,27 +680,34 @@ fn resolve_publication_quarantines(directory: &Dir, filename: &str) -> Result<()
 fn reap_publication_quarantine(
     directory: &Dir,
     quarantine: &PublicationQuarantine,
+    deadline: Instant,
 ) -> Result<(), MkoError> {
+    check_publication_deadline(deadline)?;
     let private = format!("{}.reap-{}", quarantine.filename, secure_cleanup_token()?);
     directory
         .rename(&quarantine.filename, directory, &private)
         .map_err(lock_error)?;
     sync_capability_directory(directory)?;
-    let mut file = directory.open(&private).map_err(lock_error)?;
-    if stable_capability_identity(&file)? != quarantine.identity {
+    check_publication_deadline(deadline)?;
+    let Some(expected_identity) = quarantine.identity else {
+        return Err(registry_quarantine_invalid_error());
+    };
+    let current_identity = publication_entry_identity_nonblocking(directory, &private)
+        .ok_or_else(registry_quarantine_invalid_error)?;
+    check_publication_deadline(deadline)?;
+    if current_identity != expected_identity {
         return Err(MkoError::new(
             "registry_quarantine_invalid",
             "publication quarantine changed during recovery",
         ));
     }
     if let Some(expected) = &quarantine.record {
-        let mut input = Vec::new();
-        Read::by_ref(&mut file)
-            .take(4096)
-            .read_to_end(&mut input)
-            .map_err(lock_error)?;
-        let current = serde_json::from_slice::<PublicationLockRecord>(&input)
-            .map_err(|_| registry_quarantine_invalid_error())?;
+        let (current, identity) =
+            read_publication_record_with_hook(directory, &private, deadline, || {})?;
+        if identity != expected_identity {
+            return Err(registry_quarantine_invalid_error());
+        }
+        let current = current.ok_or_else(registry_quarantine_invalid_error)?;
         if &current != expected {
             return Err(MkoError::new(
                 "registry_quarantine_invalid",
@@ -583,11 +715,16 @@ fn reap_publication_quarantine(
             ));
         }
     }
+    check_publication_deadline(deadline)?;
     directory.remove_file(&private).map_err(lock_error)?;
     sync_capability_directory(directory)
 }
 
-fn publication_record_is_stale(record: &PublicationLockRecord) -> Result<bool, MkoError> {
+fn publication_record_is_stale(
+    record: &PublicationLockRecord,
+    deadline: Instant,
+) -> Result<bool, MkoError> {
+    check_publication_deadline(deadline)?;
     let hostname = hostname::get()
         .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?
         .to_string_lossy()
@@ -596,10 +733,13 @@ fn publication_record_is_stale(record: &PublicationLockRecord) -> Result<bool, M
         return Ok(false);
     }
     let age = Utc::now().signed_duration_since(record.started_at);
-    Ok(age > PUBLICATION_STALE_TTL
-        && System::new_all()
-            .process(Pid::from_u32(record.pid))
-            .is_none())
+    if age <= PUBLICATION_STALE_TTL {
+        return Ok(false);
+    }
+    check_publication_deadline(deadline)?;
+    let system = System::new_all();
+    check_publication_deadline(deadline)?;
+    Ok(system.process(Pid::from_u32(record.pid)).is_none())
 }
 
 fn registry_scan_limit_error() -> MkoError {
@@ -717,7 +857,13 @@ impl PublicationLock {
         let lock_filename = format!(".{filename}.publish.lock");
         let deadline = Instant::now() + LOCK_WAIT;
         loop {
-            if let Err(error) = resolve_publication_quarantines(&directory, &lock_filename) {
+            if Instant::now() >= deadline {
+                return Err(publication_locked_error());
+            }
+            let scan_deadline = publication_scan_deadline(deadline);
+            if let Err(error) =
+                resolve_publication_quarantines(&directory, &lock_filename, scan_deadline)
+            {
                 if error.code() == "registry_locked" && Instant::now() < deadline {
                     thread::sleep(LOCK_RETRY);
                     continue;
@@ -738,7 +884,9 @@ impl PublicationLock {
                     file.sync_all().map_err(lock_error)?;
                     sync_capability_directory(&directory)?;
                     let identity = stable_capability_identity(&file)?;
-                    if let Err(error) = ensure_no_publication_quarantine(&directory, &lock_filename)
+                    let scan_deadline = publication_scan_deadline(deadline);
+                    if let Err(error) =
+                        ensure_no_publication_quarantine(&directory, &lock_filename, scan_deadline)
                     {
                         drop(file);
                         cleanup_capability_entry(
@@ -819,8 +967,8 @@ mod tests {
 
     use super::{
         AtomicWriteResult, CapabilityPublicationLock, CleanupDurabilityEvent,
-        PublicationLockRecord, cleanup_capability_entry_with_observer, stable_capability_identity,
-        write_new,
+        PublicationLockRecord, cleanup_capability_entry_with_observer,
+        read_publication_record_with_hook, stable_capability_identity, write_new,
     };
 
     static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
@@ -1040,6 +1188,99 @@ mod tests {
         assert_eq!(error.code(), "registry_quarantine_invalid");
         let recovered = CapabilityPublicationLock::acquire(&directory, "record.md").unwrap();
         drop(recovered);
+        let _ = fs::remove_dir_all(directory_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_publication_quarantine_fifo_is_rejected_without_blocking() {
+        use std::process::Command;
+
+        let directory_path = test_directory();
+        let directory = Dir::open_ambient_dir(&directory_path, ambient_authority()).unwrap();
+        let quarantine = format!("..record.md.publish.lock.cleanup-{}", "1".repeat(32));
+        assert!(
+            Command::new("mkfifo")
+                .arg(directory_path.join(&quarantine))
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let started = Instant::now();
+        let error = match CapabilityPublicationLock::acquire(&directory, "record.md") {
+            Ok(_) => panic!("FIFO quarantine must fail closed"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "registry_quarantine_invalid");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let _ = fs::remove_dir_all(directory_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_publication_quarantine_symlink_does_not_read_its_target() {
+        let directory_path = test_directory();
+        let directory = Dir::open_ambient_dir(&directory_path, ambient_authority()).unwrap();
+        let outside = directory_path.with_extension("outside");
+        fs::write(&outside, b"outside-secret").unwrap();
+        let quarantine = format!("..record.md.publish.lock.cleanup-{}", "2".repeat(32));
+        std::os::unix::fs::symlink(&outside, directory_path.join(&quarantine)).unwrap();
+
+        let error = match CapabilityPublicationLock::acquire(&directory, "record.md") {
+            Ok(_) => panic!("symlink quarantine must fail closed"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "registry_quarantine_invalid");
+        assert_eq!(fs::read(&outside).unwrap(), b"outside-secret");
+        let _ = fs::remove_file(outside);
+        let _ = fs::remove_dir_all(directory_path);
+    }
+
+    #[test]
+    fn huge_publication_quarantine_record_is_bounded() {
+        let directory_path = test_directory();
+        let directory = Dir::open_ambient_dir(&directory_path, ambient_authority()).unwrap();
+        let quarantine = format!("..record.md.publish.lock.cleanup-{}", "3".repeat(32));
+        directory.write(&quarantine, vec![b'x'; 1_000_000]).unwrap();
+
+        let error = match CapabilityPublicationLock::acquire(&directory, "record.md") {
+            Ok(_) => panic!("huge quarantine must fail closed"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "registry_quarantine_invalid");
+        let _ = fs::remove_dir_all(directory_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_metadata_to_fifo_swap_is_rejected_without_blocking() {
+        use std::process::Command;
+
+        let directory_path = test_directory();
+        let directory = Dir::open_ambient_dir(&directory_path, ambient_authority()).unwrap();
+        let name = "quarantine";
+        directory.write(name, b"{}").unwrap();
+        let deadline = Instant::now() + Duration::from_millis(100);
+
+        let started = Instant::now();
+        let error = read_publication_record_with_hook(&directory, name, deadline, || {
+            directory.remove_file(name).unwrap();
+            assert!(
+                Command::new("mkfifo")
+                    .arg(directory_path.join(name))
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code(), "registry_quarantine_invalid");
+        assert!(started.elapsed() < Duration::from_secs(1));
         let _ = fs::remove_dir_all(directory_path);
     }
 

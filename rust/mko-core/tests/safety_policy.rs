@@ -12,6 +12,7 @@ fn windows_acl_ffi_is_isolated_behind_a_safe_private_crate() {
         "mko-core must retain its crate-wide unsafe-code prohibition"
     );
     assert_source_tree_has_no_unsafe_code(&core_root.join("src"));
+    assert_source_tree_has_no_nightly_windows_identity(&core_root.join("src"));
     assert!(
         !core_manifest.contains("windows-sys"),
         "mko-core must not depend directly on raw Windows bindings"
@@ -63,6 +64,18 @@ fn windows_acl_ffi_is_isolated_behind_a_safe_private_crate() {
             "the Windows parent-directory crash-durability limitation must remain explicit"
         );
     }
+    for source_path in [
+        "src/add.rs",
+        "src/atomic.rs",
+        "src/lock.rs",
+        "src/provider_scan.rs",
+    ] {
+        let source = fs::read_to_string(core_root.join(source_path)).unwrap();
+        assert!(
+            source.contains("mko_windows_acl::file_identity"),
+            "Windows identity in {source_path} must route through the safe helper"
+        );
+    }
 }
 
 fn assert_source_tree_has_no_unsafe_code(directory: &Path) {
@@ -78,6 +91,22 @@ fn assert_source_tree_has_no_unsafe_code(directory: &Path) {
                     && !source.contains("unsafe impl")
                     && !source.contains("unsafe trait"),
                 "unsafe Rust found in {}",
+                path.display()
+            );
+        }
+    }
+}
+
+fn assert_source_tree_has_no_nightly_windows_identity(directory: &Path) {
+    for entry in fs::read_dir(directory).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            assert_source_tree_has_no_nightly_windows_identity(&path);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            let source = fs::read_to_string(&path).unwrap();
+            assert!(
+                !source.contains("volume_serial_number()") && !source.contains("file_index()"),
+                "nightly-only Windows identity API found in {}",
                 path.display()
             );
         }

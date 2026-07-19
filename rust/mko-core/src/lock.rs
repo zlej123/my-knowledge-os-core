@@ -6,7 +6,10 @@ use std::{
     time::{Duration as StdDuration, Instant},
 };
 
-use cap_std::{ambient_authority, fs::Dir};
+use cap_std::{
+    ambient_authority,
+    fs::{Dir, OpenOptions, OpenOptionsExt},
+};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, System};
@@ -19,6 +22,7 @@ use crate::{
 const STALE_LOCK_TTL: Duration = Duration::minutes(15);
 const LOCK_SCAN_ENTRY_LIMIT: usize = 64;
 const LOCK_SCAN_TIME_LIMIT: StdDuration = StdDuration::from_millis(100);
+const LOCK_RECORD_BYTE_LIMIT: u64 = 4096;
 static NEXT_OWNER_TOKEN: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -49,12 +53,13 @@ pub fn inspect_locks(
     repository_root: &Path,
     clock: &dyn Clock,
 ) -> Result<Vec<LockInspection>, MkoError> {
-    let directory = repository_root.join(".knowledge-os/runtime/locks");
-    let entries = match fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(MkoError::new("lock_read_failed", error.to_string())),
+    let display_directory = repository_root.join(".knowledge-os/runtime/locks");
+    let Some(directory) = open_existing_lock_directory(repository_root)? else {
+        return Ok(Vec::new());
     };
+    let entries = directory
+        .read_dir(".")
+        .map_err(|error| MkoError::new("lock_read_failed", error.to_string()))?;
     let mut inspections = Vec::new();
     let deadline = Instant::now() + LOCK_SCAN_TIME_LIMIT;
     for (index, entry) in entries.enumerate() {
@@ -62,27 +67,84 @@ pub fn inspect_locks(
             return Err(lock_scan_limit_error());
         }
         let entry = entry.map_err(|error| MkoError::new("lock_read_failed", error.to_string()))?;
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if entry.file_name().to_str().is_none() {
             continue;
-        };
+        }
         let is_canonical = name.ends_with(".lock") || name.ends_with(".lock.takeover");
-        let is_quarantine = authoritative_quarantine_target(name).is_some();
+        let quarantine_target = authoritative_quarantine_target(&name);
+        let is_quarantine = quarantine_target.is_some();
         if !is_canonical && !is_quarantine {
             continue;
         }
-        let state = match fs::read(&path)
-            .ok()
-            .and_then(|input| serde_json::from_slice::<LockRecord>(&input).ok())
-        {
-            Some(record) if record_is_stale(&record, clock)? => LockState::Stale,
-            Some(_) => LockState::Active,
-            None => LockState::Unreadable,
+        let state = match read_quarantine_record_with_hook(&directory, &name, deadline, || {}) {
+            Ok((Some(record), _)) => {
+                if let Some((_, name_token)) = quarantine_target
+                    && owner_token_secret(&record.owner_token) != Some(name_token)
+                {
+                    LockState::Unreadable
+                } else if record_is_stale(&record, clock)? {
+                    LockState::Stale
+                } else {
+                    LockState::Active
+                }
+            }
+            Ok((None, _)) => LockState::Unreadable,
+            Err(error) if error.code() == "lock_scan_limit" => return Err(error),
+            Err(_) => LockState::Unreadable,
         };
-        inspections.push(LockInspection { path, state });
+        inspections.push(LockInspection {
+            path: display_directory.join(name),
+            state,
+        });
     }
     inspections.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(inspections)
+}
+
+fn open_existing_lock_directory(repository_root: &Path) -> Result<Option<Dir>, MkoError> {
+    let repository = match Dir::open_ambient_dir(repository_root, ambient_authority()) {
+        Ok(repository) => repository,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(MkoError::new("lock_read_failed", error.to_string())),
+    };
+    let Some(knowledge) = open_existing_real_child_directory(&repository, ".knowledge-os")? else {
+        return Ok(None);
+    };
+    let Some(runtime) = open_existing_real_child_directory(&knowledge, "runtime")? else {
+        return Ok(None);
+    };
+    open_existing_real_child_directory(&runtime, "locks")
+}
+
+fn open_existing_real_child_directory(parent: &Dir, name: &str) -> Result<Option<Dir>, MkoError> {
+    let metadata = match parent.symlink_metadata(name) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(MkoError::new("lock_read_failed", error.to_string())),
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(MkoError::new(
+            "lock_read_failed",
+            "lock inspection path contains a link or non-directory",
+        ));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_lock_open(&mut options, true);
+    let file = parent
+        .open_with(name, &options)
+        .map_err(|error| MkoError::new("lock_read_failed", error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| MkoError::new("lock_read_failed", error.to_string()))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(MkoError::new(
+            "lock_read_failed",
+            "lock inspection path changed to a link or non-directory",
+        ));
+    }
+    Ok(Some(Dir::from_std_file(file.into_std())))
 }
 
 pub struct AssetLock {
@@ -142,13 +204,6 @@ impl AssetLock {
         let filename = format!("{asset_id}.lock");
         resolve_authoritative_quarantines(
             &directory,
-            &filename,
-            asset_id,
-            clock,
-            clear_stale_lock,
-        )?;
-        resolve_authoritative_quarantines(
-            &directory,
             &format!("{filename}.takeover"),
             asset_id,
             clock,
@@ -162,6 +217,39 @@ impl AssetLock {
             clear_stale_lock,
         )?;
 
+        if clear_stale_lock {
+            let _takeover =
+                TakeoverGuard::acquire(&directory, &filename, asset_id, command, clock, false)?;
+            resolve_authoritative_quarantines(&directory, &filename, asset_id, clock, true)?;
+            match create_lock(
+                &directory,
+                &filename,
+                &repository_root,
+                asset_id,
+                command,
+                clock,
+            ) {
+                Ok(lock) => return Ok(lock),
+                Err(error) if error.code() != "lock_exists" => return Err(error),
+                Err(_) => {}
+            }
+            remove_stale_entry(&directory, &filename, asset_id, clock)?;
+            return match create_lock(
+                &directory,
+                &filename,
+                &repository_root,
+                asset_id,
+                command,
+                clock,
+            ) {
+                Ok(lock) => Ok(lock),
+                Err(error) if error.code() == "lock_exists" => Err(lock_held_error()),
+                Err(error) => Err(error),
+            };
+        }
+
+        resolve_authoritative_quarantines(&directory, &filename, asset_id, clock, false)?;
+
         match create_lock(
             &directory,
             &filename,
@@ -172,24 +260,7 @@ impl AssetLock {
         ) {
             Ok(lock) => Ok(lock),
             Err(error) if error.code() != "lock_exists" => Err(error),
-            Err(_) if !clear_stale_lock => Err(lock_held_error()),
-            Err(_) => {
-                let _takeover =
-                    TakeoverGuard::acquire(&directory, &filename, asset_id, command, clock, false)?;
-                remove_stale_entry(&directory, &filename, asset_id, clock)?;
-                match create_lock(
-                    &directory,
-                    &filename,
-                    &repository_root,
-                    asset_id,
-                    command,
-                    clock,
-                ) {
-                    Ok(lock) => Ok(lock),
-                    Err(error) if error.code() == "lock_exists" => Err(lock_held_error()),
-                    Err(error) => Err(error),
-                }
-            }
+            Err(_) => Err(lock_held_error()),
         }
     }
 
@@ -607,7 +678,7 @@ struct AssetQuarantine {
     filename: String,
     record: Option<LockRecord>,
     authenticated: bool,
-    identity: StableFileIdentity,
+    identity: Option<StableFileIdentity>,
 }
 
 fn scan_authoritative_quarantines(
@@ -631,18 +702,17 @@ fn scan_authoritative_quarantines(
         if target != filename {
             continue;
         }
-        let mut file = match directory.open(&name) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(MkoError::new("lock_read_failed", error.to_string())),
-        };
-        let identity = stable_file_identity(&file)?;
-        let mut input = Vec::new();
-        let record = Read::by_ref(&mut file)
-            .take(64 * 1024)
-            .read_to_end(&mut input)
-            .ok()
-            .and_then(|_| serde_json::from_slice::<LockRecord>(&input).ok());
+        let (record, identity) =
+            match read_quarantine_record_with_hook(directory, &name, deadline, || {}) {
+                Ok((record, identity)) => (record, Some(identity)),
+                Err(error) if error.code() == "lock_scan_limit" => return Err(error),
+                Err(_) => {
+                    check_lock_deadline(deadline)?;
+                    let identity = stable_identity_of_nonblocking_entry(directory, &name)?;
+                    check_lock_deadline(deadline)?;
+                    (None, identity)
+                }
+            };
         let authenticated = record
             .as_ref()
             .is_some_and(|record| owner_token_secret(&record.owner_token) == Some(name_token));
@@ -655,6 +725,103 @@ fn scan_authoritative_quarantines(
     }
     Ok(quarantines)
 }
+
+fn read_quarantine_record_with_hook<H>(
+    directory: &Dir,
+    name: &str,
+    deadline: Instant,
+    after_metadata: H,
+) -> Result<(Option<LockRecord>, StableFileIdentity), MkoError>
+where
+    H: FnOnce(),
+{
+    check_lock_deadline(deadline)?;
+    let metadata = directory
+        .symlink_metadata(name)
+        .map_err(|error| MkoError::new("lock_quarantine_invalid", error.to_string()))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(lock_quarantine_invalid_error());
+    }
+    after_metadata();
+    check_lock_deadline(deadline)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_lock_open(&mut options, false);
+    let mut file = directory
+        .open_with(name, &options)
+        .map_err(|error| MkoError::new("lock_quarantine_invalid", error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| MkoError::new("lock_quarantine_invalid", error.to_string()))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(lock_quarantine_invalid_error());
+    }
+    let identity = stable_file_identity(&file)?;
+    let mut input = Vec::new();
+    Read::by_ref(&mut file)
+        .take(LOCK_RECORD_BYTE_LIMIT + 1)
+        .read_to_end(&mut input)
+        .map_err(|error| MkoError::new("lock_quarantine_invalid", error.to_string()))?;
+    check_lock_deadline(deadline)?;
+    if input.len() as u64 > LOCK_RECORD_BYTE_LIMIT {
+        return Ok((None, identity));
+    }
+    Ok((serde_json::from_slice::<LockRecord>(&input).ok(), identity))
+}
+
+fn stable_identity_of_nonblocking_entry(
+    directory: &Dir,
+    name: &str,
+) -> Result<Option<StableFileIdentity>, MkoError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_lock_open(&mut options, false);
+    match directory.open_with(name, &options) {
+        Ok(file) => stable_file_identity(&file).map(Some),
+        Err(_) => Ok(None),
+    }
+}
+
+fn check_lock_deadline(deadline: Instant) -> Result<(), MkoError> {
+    if Instant::now() >= deadline {
+        Err(lock_scan_limit_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn configure_lock_open(options: &mut OpenOptions, directory: bool) {
+    const O_NONBLOCK: i32 = 0x800;
+    const O_NOFOLLOW: i32 = 0x20_000;
+    const O_DIRECTORY: i32 = 0x10_000;
+    options.custom_flags(O_NOFOLLOW | O_NONBLOCK | if directory { O_DIRECTORY } else { 0 });
+}
+
+#[cfg(target_os = "macos")]
+fn configure_lock_open(options: &mut OpenOptions, directory: bool) {
+    const O_NONBLOCK: i32 = 0x4;
+    const O_NOFOLLOW: i32 = 0x100;
+    const O_DIRECTORY: i32 = 0x10_0000;
+    options.custom_flags(O_NOFOLLOW | O_NONBLOCK | if directory { O_DIRECTORY } else { 0 });
+}
+
+#[cfg(windows)]
+fn configure_lock_open(options: &mut OpenOptions, directory: bool) {
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    options.custom_flags(
+        FILE_FLAG_OPEN_REPARSE_POINT
+            | if directory {
+                FILE_FLAG_BACKUP_SEMANTICS
+            } else {
+                0
+            },
+    );
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn configure_lock_open(_options: &mut OpenOptions, _directory: bool) {}
 
 fn ensure_no_authoritative_quarantine(
     directory: &Dir,
@@ -731,10 +898,13 @@ where
         .map_err(|error| MkoError::new("lock_clear_failed", error.to_string()))?;
     sync_lock_directory(directory)?;
     after_private_rename(&private);
+    let Some(expected_identity) = quarantine.identity else {
+        return Ok(());
+    };
     let mut file = directory
         .open(&private)
         .map_err(|error| MkoError::new("lock_clear_failed", error.to_string()))?;
-    if stable_file_identity(&file)? != quarantine.identity {
+    if stable_file_identity(&file)? != expected_identity {
         return Err(MkoError::new(
             "lock_clear_failed",
             "quarantined lock changed during recovery",
@@ -816,6 +986,9 @@ where
     O: FnOnce(),
 {
     let (captured_record, captured_identity) = read_lock_record(directory, filename)?;
+    if captured_record.asset_id != asset_id || !record_is_stale(&captured_record, clock)? {
+        return Err(lock_held_error());
+    }
     let quarantine_token = owner_token_secret(&captured_record.owner_token)
         .map(str::to_owned)
         .unwrap_or(secure_token()?);
@@ -925,16 +1098,14 @@ fn read_lock_record(
     directory: &Dir,
     filename: &str,
 ) -> Result<(LockRecord, StableFileIdentity), MkoError> {
-    let mut file = directory
-        .open(filename)
-        .map_err(|error| MkoError::new("lock_read_failed", error.to_string()))?;
-    let identity = stable_file_identity(&file)?;
-    let mut input = Vec::new();
-    Read::by_ref(&mut file)
-        .take(64 * 1024)
-        .read_to_end(&mut input)
-        .map_err(|error| MkoError::new("lock_read_failed", error.to_string()))?;
-    let record = serde_json::from_slice(&input).map_err(|_| {
+    let (record, identity) = read_quarantine_record_with_hook(
+        directory,
+        filename,
+        Instant::now() + LOCK_SCAN_TIME_LIMIT,
+        || {},
+    )
+    .map_err(|error| MkoError::new("lock_read_failed", error.to_string()))?;
+    let record = record.ok_or_else(|| {
         MkoError::new(
             "lock_held",
             "asset operation lock is unreadable; inspect it manually",
@@ -1020,7 +1191,7 @@ mod tests {
 
     use super::{
         AssetLock, CleanupDurabilityEvent, LockRecord, LockState, TakeoverGuard,
-        create_lock_with_writer, inspect_locks, read_lock_record,
+        create_lock_with_writer, inspect_locks, read_lock_record, read_quarantine_record_with_hook,
         reap_authoritative_quarantine_with_observer, remove_if_owned_with_observer,
         remove_stale_entry_with_observer, scan_authoritative_quarantines,
     };
@@ -1499,6 +1670,30 @@ mod tests {
     }
 
     #[test]
+    fn quarantine_filename_token_mismatch_is_unreadable() {
+        let repository = test_directory();
+        let asset_id = asset_id();
+        let locks = repository.join(".knowledge-os/runtime/locks");
+        fs::create_dir_all(&locks).unwrap();
+        let quarantine = locks.join(format!(".{asset_id}.lock.cleanup-{}", "a".repeat(32)));
+        let record = LockRecord {
+            pid: std::process::id(),
+            hostname: hostname::get().unwrap().to_string_lossy().into_owned(),
+            started_at: time("2026-07-18T00:00:00Z").now_utc(),
+            command: "test".into(),
+            asset_id,
+            owner_token: format!("1-1-{}", "b".repeat(32)),
+        };
+        fs::write(&quarantine, serde_json::to_vec(&record).unwrap()).unwrap();
+
+        let inspections = inspect_locks(&repository, &time("2026-07-18T00:00:00Z")).unwrap();
+
+        assert_eq!(inspections.len(), 1);
+        assert_eq!(inspections[0].state, LockState::Unreadable);
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[test]
     fn explicit_clear_recovers_a_stale_authoritative_quarantine() {
         let repository = test_directory();
         let asset_id = asset_id();
@@ -1656,6 +1851,96 @@ mod tests {
                 .to_string_lossy()
                 .contains(".reap-")
         }));
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_quarantine_fifo_is_unreadable_without_blocking() {
+        use nix::{sys::stat::Mode, unistd::mkfifo};
+
+        let repository = test_directory();
+        let asset_id = asset_id();
+        let locks = repository.join(".knowledge-os/runtime/locks");
+        fs::create_dir_all(&locks).unwrap();
+        let quarantine = locks.join(format!(".{asset_id}.lock.cleanup-{}", "e".repeat(32)));
+        mkfifo(&quarantine, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+
+        let started = std::time::Instant::now();
+        let inspections = inspect_locks(&repository, &time("2026-07-18T00:00:00Z")).unwrap();
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(inspections.len(), 1);
+        assert_eq!(inspections[0].state, LockState::Unreadable);
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_quarantine_symlink_is_unreadable_without_reading_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let repository = test_directory();
+        let asset_id = asset_id();
+        let locks = repository.join(".knowledge-os/runtime/locks");
+        fs::create_dir_all(&locks).unwrap();
+        let outside = repository.join("outside-secret");
+        fs::write(&outside, b"do-not-read-or-change").unwrap();
+        let quarantine = locks.join(format!(".{asset_id}.lock.cleanup-{}", "2".repeat(32)));
+        symlink(&outside, &quarantine).unwrap();
+
+        let inspections = inspect_locks(&repository, &time("2026-07-18T00:00:00Z")).unwrap();
+
+        assert_eq!(inspections.len(), 1);
+        assert_eq!(inspections[0].state, LockState::Unreadable);
+        assert_eq!(fs::read(&outside).unwrap(), b"do-not-read-or-change");
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_to_fifo_swap_is_rejected_without_blocking() {
+        use nix::{sys::stat::Mode, unistd::mkfifo};
+
+        let repository = test_directory();
+        let directory = Dir::open_ambient_dir(&repository, ambient_authority()).unwrap();
+        let name = format!(".asset.lock.cleanup-{}", "f".repeat(32));
+        directory.write(&name, b"{}").unwrap();
+        let path = repository.join(&name);
+
+        let started = std::time::Instant::now();
+        let error = read_quarantine_record_with_hook(
+            &directory,
+            &name,
+            std::time::Instant::now() + std::time::Duration::from_millis(100),
+            || {
+                fs::remove_file(&path).unwrap();
+                mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "lock_quarantine_invalid");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[test]
+    fn huge_quarantine_record_is_bounded_and_unreadable() {
+        let repository = test_directory();
+        let asset_id = asset_id();
+        let locks = repository.join(".knowledge-os/runtime/locks");
+        fs::create_dir_all(&locks).unwrap();
+        fs::write(
+            locks.join(format!(".{asset_id}.lock.cleanup-{}", "1".repeat(32))),
+            vec![b'x'; 256 * 1024],
+        )
+        .unwrap();
+
+        let inspections = inspect_locks(&repository, &time("2026-07-18T00:00:00Z")).unwrap();
+
+        assert_eq!(inspections.len(), 1);
+        assert_eq!(inspections[0].state, LockState::Unreadable);
         let _ = fs::remove_dir_all(repository);
     }
 }

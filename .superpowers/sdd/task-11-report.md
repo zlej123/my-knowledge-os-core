@@ -122,6 +122,55 @@ Full verification run from the repository-defined locations:
   the complete workspace test suite all passed.
 - Fourth independent post-commit code/spec review: pending after the third
   follow-up commit.
+- The fourth independent review was not approved. It found that Asset and
+  publication quarantine inspection could block on special files, allocate or
+  parse work beyond the intended record bound, and race from metadata to a
+  substituted FIFO. It also found one remaining Windows provider-scan use of
+  nightly-only metadata identity methods, a quarantine-token classification
+  gap, and publication recovery phases that created fresh rather than shared
+  deadlines.
+- Asset inspection now retains each directory component as a no-follow
+  capability and performs exact-name reads only after both pre-open metadata
+  and post-open handle metadata prove a regular non-link file. Unix opens are
+  nonblocking, reads are capped at 4,097 bytes for a 4,096-byte record, and the
+  same deadline spans enumeration, open, read, and parsing. Filename/record
+  token mismatches are reported as unreadable.
+- Publication quarantine scanning, cleanup, liveness checks, and reaping now
+  share the acquisition-bounded deadline. They use the same pre-open,
+  no-follow/nonblocking, post-open, stable-handle-identity, and bounded-read
+  sequence. Entries that cannot yield a retained identity are moved out of the
+  authoritative namespace but deliberately preserved as private orphans rather
+  than being deleted without proof of ownership.
+- Windows provider scanning now classifies placeholder attributes before any
+  content open, then treats the retained no-follow file handle as authoritative
+  for size and stable identity. Revalidation reopens the current capability name
+  and compares the safe `GetFileInformationByHandle` identity. A recursive
+  safety-policy test rejects `volume_serial_number()` and `file_index()`
+  anywhere in Core sources.
+- Fifth-follow-up focused verification covered 84 Core unit tests, including
+  exact-name FIFO, symlink, oversized regular file, metadata-to-FIFO swap,
+  retained lock-directory, token-mismatch, publication deadline, and provider
+  identity-race cases. The safe Windows API policy test also passed. Native
+  Windows compilation remains a release gate because this machine only has the
+  Apple Rust target installed.
+- Repository formatting, workspace Clippy with warnings denied, and the full
+  workspace test suite all passed after the fifth follow-up.
+- A final full-suite run exposed an intermittent pre-existing convergence test
+  failure: both concurrent explicit stale-clear contenders returned
+  `lock_held`, although exactly one must retain the live lock. Parallel replay
+  showed that a loser could rename a newly active takeover claim into quarantine
+  merely to determine whether it was stale; the winner then observed that
+  authoritative quarantine during its post-create validation and also failed.
+- Explicit stale recovery is now serialized under the takeover guard. In
+  addition, an entry is read and classified as stale before its public name is
+  moved; active takeover owners are never transiently quarantined by a losing
+  contender. The original handle identity and record are still revalidated
+  after the rename before any stale entry is deleted.
+- The complete parallel `state_and_lock` test binary passed 100 consecutive
+  runs after the convergence fix. The complete workspace test suite then passed
+  two consecutive runs; formatting and warnings-denied Clippy remained green.
+- Fifth independent post-commit code/spec review: pending after this follow-up
+  commit.
 
 ## Commit
 

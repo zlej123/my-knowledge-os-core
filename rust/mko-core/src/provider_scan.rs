@@ -169,11 +169,7 @@ struct EnumeratedFileIdentity {
 }
 
 #[cfg(windows)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct EnumeratedFileIdentity {
-    volume_serial_number: u32,
-    file_index: u64,
-}
+type EnumeratedFileIdentity = mko_windows_acl::FileIdentity;
 
 #[cfg(not(any(unix, windows)))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -689,11 +685,15 @@ fn inspect_enumerated_pdf(
         || inspect_nofollow_pdf_metadata(directory, name),
     )?;
     if inspected.hydration != ProviderHydrationDisposition::Placeholder {
-        let identity = enumerated_file_identity(&enumerated)?;
+        let retained_file = open_windows_enumerated_file(entry)?;
+        let retained_metadata = retained_file
+            .metadata()
+            .map_err(|error| format!("cannot inspect retained PDF candidate: {error}"))?;
+        let identity = windows_file_identity(&retained_file)?;
+        inspected.size_bytes = retained_metadata.len();
         before_open();
-        verify_enumerated_file_still_current(directory, name, identity, inspected.size_bytes)?;
-        inspected.retained_file =
-            Some(open_enumerated_file(entry, identity, inspected.size_bytes)?);
+        verify_windows_file_still_current(directory, name, identity, inspected.size_bytes)?;
+        inspected.retained_file = Some(retained_file);
     }
     Ok(inspected)
 }
@@ -725,6 +725,7 @@ fn inspect_enumerated_pdf(
     })
 }
 
+#[cfg(not(windows))]
 fn open_enumerated_file(
     entry: &DirEntry,
     expected_identity: EnumeratedFileIdentity,
@@ -766,6 +767,7 @@ fn inspect_nofollow_pdf_metadata_snapshot(directory: &Dir, name: &str) -> Result
     Ok(metadata)
 }
 
+#[cfg(not(windows))]
 fn verify_enumerated_file_still_current(
     directory: &Dir,
     name: &str,
@@ -798,25 +800,79 @@ fn enumerated_file_identity(metadata: &Metadata) -> Result<EnumeratedFileIdentit
     })
 }
 
-#[cfg(windows)]
-fn enumerated_file_identity(metadata: &Metadata) -> Result<EnumeratedFileIdentity, String> {
-    use cap_std::fs::MetadataExt;
-
-    let volume_serial_number = metadata.volume_serial_number().ok_or_else(|| {
-        "enumerated PDF candidate has no stable volume identity; refusing content open".to_owned()
-    })?;
-    let file_index = metadata.file_index().ok_or_else(|| {
-        "enumerated PDF candidate has no stable file identity; refusing content open".to_owned()
-    })?;
-    Ok(EnumeratedFileIdentity {
-        volume_serial_number,
-        file_index,
-    })
-}
-
 #[cfg(not(any(unix, windows)))]
 fn enumerated_file_identity(_: &Metadata) -> Result<EnumeratedFileIdentity, String> {
     Err("enumerated PDF candidate identity is unsupported; refusing content open".into())
+}
+
+#[cfg(windows)]
+fn windows_file_identity(file: &File) -> Result<EnumeratedFileIdentity, String> {
+    let file = file
+        .try_clone()
+        .map(File::into_std)
+        .map_err(|error| format!("cannot retain PDF identity handle: {error}"))?;
+    mko_windows_acl::file_identity(&file)
+        .map_err(|error| format!("cannot inspect stable PDF identity: {error}"))
+}
+
+#[cfg(windows)]
+fn open_windows_enumerated_file(entry: &DirEntry) -> Result<File, String> {
+    use cap_std::fs::MetadataExt;
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_nofollow(&mut options, false);
+    let file = entry
+        .open_with(&options)
+        .map_err(|error| format!("cannot open enumerated PDF candidate: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("cannot inspect retained PDF candidate: {error}"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("enumerated PDF candidate changed to a non-file or link".into());
+    }
+    if windows_hydration_disposition(metadata.file_attributes())
+        == ProviderHydrationDisposition::Placeholder
+    {
+        return Err("enumerated PDF candidate changed to a placeholder before content open".into());
+    }
+    windows_file_identity(&file)?;
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn verify_windows_file_still_current(
+    directory: &Dir,
+    name: &str,
+    expected_identity: EnumeratedFileIdentity,
+    expected_size: u64,
+) -> Result<(), String> {
+    use cap_std::fs::MetadataExt;
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_nofollow(&mut options, false);
+    let current = directory
+        .open_with(name, &options)
+        .map_err(|error| format!("enumerated PDF candidate cannot be revalidated: {error}"))?;
+    let metadata = current
+        .metadata()
+        .map_err(|error| format!("cannot inspect revalidated PDF candidate: {error}"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("enumerated PDF candidate changed to a non-file or link".into());
+    }
+    if windows_file_identity(&current)? != expected_identity {
+        return Err("enumerated PDF candidate identity changed before content open".into());
+    }
+    if metadata.len() != expected_size {
+        return Err("enumerated PDF candidate changed size before content open".into());
+    }
+    if windows_hydration_disposition(metadata.file_attributes())
+        == ProviderHydrationDisposition::Placeholder
+    {
+        return Err("enumerated PDF candidate changed to a placeholder before content open".into());
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -1346,10 +1402,12 @@ mod metadata_walk_tests {
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
+    #[cfg(not(windows))]
+    use super::open_enumerated_file;
     use super::{
         DEFAULT_SCAN_LIMITS, ElapsedClock, ProviderCatalogEntry, ProviderMetadataAccess,
         ProviderScanRequest, ScanLimits, inspect_provider_metadata_with_observer,
-        inspect_windows_enumerated_pdf, materialize_metadata_entry, open_enumerated_file,
+        inspect_windows_enumerated_pdf, materialize_metadata_entry,
         scan_provider_catalog_metadata_first_with_after_walk,
         scan_provider_catalog_metadata_first_with_before_file_open,
     };
