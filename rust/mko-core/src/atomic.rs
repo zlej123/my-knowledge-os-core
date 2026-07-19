@@ -67,11 +67,7 @@ where
             CapOpenOptions::new().write(true).create_new(true),
         )
         .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
-    let temporary_identity = stable_capability_identity(
-        &file
-            .metadata()
-            .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?,
-    )?;
+    let temporary_identity = stable_capability_identity(&file)?;
     let write_result: Result<AtomicWriteResult, MkoError> = (|| {
         file.write_all(bytes)
             .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
@@ -229,11 +225,7 @@ where
             CapOpenOptions::new().write(true).create_new(true),
         )
         .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
-    let temporary_identity = stable_capability_identity(
-        &file
-            .metadata()
-            .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?,
-    )?;
+    let temporary_identity = stable_capability_identity(&file)?;
     let result = (|| {
         file.write_all(bytes)
             .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
@@ -290,6 +282,9 @@ impl<'a> CapabilityPublicationLock<'a> {
         let lock_filename = format!(".{filename}.publish.lock");
         let deadline = Instant::now() + LOCK_WAIT;
         loop {
+            if authoritative_quarantine_exists(directory, &lock_filename)? {
+                return Err(publication_locked_error());
+            }
             match directory.open_with(
                 &lock_filename,
                 CapOpenOptions::new().write(true).create_new(true),
@@ -298,8 +293,18 @@ impl<'a> CapabilityPublicationLock<'a> {
                     let owner_token = secure_cleanup_token()?;
                     writeln!(file, "owner={owner_token}").map_err(lock_error)?;
                     file.sync_all().map_err(lock_error)?;
-                    let identity =
-                        stable_capability_identity(&file.metadata().map_err(lock_error)?)?;
+                    sync_capability_directory(directory)?;
+                    let identity = stable_capability_identity(&file)?;
+                    if authoritative_quarantine_exists(directory, &lock_filename)? {
+                        drop(file);
+                        cleanup_capability_entry(
+                            directory,
+                            &lock_filename,
+                            identity,
+                            Some(&format!("owner={owner_token}\n")),
+                        );
+                        return Err(publication_locked_error());
+                    }
                     return Ok(Self {
                         directory,
                         filename: lock_filename,
@@ -309,10 +314,7 @@ impl<'a> CapabilityPublicationLock<'a> {
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     if Instant::now() >= deadline {
-                        return Err(MkoError::new(
-                            "registry_locked",
-                            "registry publication lock is held or stale; inspect and remove it manually after validating the destination",
-                        ));
+                        return Err(publication_locked_error());
                     }
                     thread::sleep(LOCK_RETRY);
                 }
@@ -339,6 +341,34 @@ fn cleanup_capability_entry(
     identity: StableCapabilityIdentity,
     expected_contents: Option<&str>,
 ) {
+    cleanup_capability_entry_with_observer(
+        directory,
+        filename,
+        identity,
+        expected_contents,
+        || {},
+        |_| {},
+    );
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CleanupDurabilityEvent {
+    Quarantined,
+    Restored,
+    Removed,
+}
+
+fn cleanup_capability_entry_with_observer<A, O>(
+    directory: &Dir,
+    filename: &str,
+    identity: StableCapabilityIdentity,
+    expected_contents: Option<&str>,
+    after_quarantine: A,
+    mut durability_observer: O,
+) where
+    A: FnOnce(),
+    O: FnMut(CleanupDurabilityEvent),
+{
     let Ok(token) = secure_cleanup_token() else {
         return;
     };
@@ -348,13 +378,14 @@ fn cleanup_capability_entry(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
         Err(_) => return,
     }
+    if sync_capability_directory(directory).is_err() {
+        return;
+    }
+    durability_observer(CleanupDurabilityEvent::Quarantined);
+    after_quarantine();
 
     let owned = directory.open(&quarantine).ok().is_some_and(|mut file| {
-        let same_identity = file
-            .metadata()
-            .ok()
-            .and_then(|metadata| stable_capability_identity(&metadata).ok())
-            == Some(identity);
+        let same_identity = stable_capability_identity(&file).ok() == Some(identity);
         let same_contents = expected_contents.is_none_or(|expected| {
             let mut contents = String::new();
             file.read_to_string(&mut contents).is_ok() && contents == expected
@@ -362,7 +393,11 @@ fn cleanup_capability_entry(
         same_identity && same_contents
     });
     if owned {
-        let _ = directory.remove_file(&quarantine);
+        if directory.remove_file(&quarantine).is_ok()
+            && sync_capability_directory(directory).is_ok()
+        {
+            durability_observer(CleanupDurabilityEvent::Removed);
+        }
         return;
     }
 
@@ -372,8 +407,38 @@ fn cleanup_capability_entry(
         .hard_link(&quarantine, directory, filename)
         .is_ok()
     {
-        let _ = directory.remove_file(&quarantine);
+        if sync_capability_directory(directory).is_err() {
+            return;
+        }
+        durability_observer(CleanupDurabilityEvent::Restored);
+        if directory.remove_file(&quarantine).is_ok()
+            && sync_capability_directory(directory).is_ok()
+        {
+            durability_observer(CleanupDurabilityEvent::Removed);
+        }
     }
+}
+
+fn authoritative_quarantine_exists(directory: &Dir, filename: &str) -> Result<bool, MkoError> {
+    let prefix = format!(".{filename}.cleanup-");
+    let entries = directory
+        .read_dir(".")
+        .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn publication_locked_error() -> MkoError {
+    MkoError::new(
+        "registry_locked",
+        "registry publication lock is held or stale; inspect and remove it manually after validating the destination",
+    )
 }
 
 fn secure_cleanup_token() -> Result<String, MkoError> {
@@ -407,9 +472,13 @@ struct StableCapabilityIdentity;
 
 #[cfg(unix)]
 fn stable_capability_identity(
-    metadata: &cap_std::fs::Metadata,
+    file: &cap_std::fs::File,
 ) -> Result<StableCapabilityIdentity, MkoError> {
-    use cap_std::fs::MetadataExt;
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file
+        .try_clone()
+        .and_then(|file| file.into_std().metadata())
+        .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
     Ok(StableCapabilityIdentity {
         device: metadata.dev(),
         inode: metadata.ino(),
@@ -418,16 +487,20 @@ fn stable_capability_identity(
 
 #[cfg(windows)]
 fn stable_capability_identity(
-    metadata: &cap_std::fs::Metadata,
+    file: &cap_std::fs::File,
 ) -> Result<StableCapabilityIdentity, MkoError> {
-    use cap_std::fs::MetadataExt;
+    use std::os::windows::fs::MetadataExt;
+    let metadata = file
+        .try_clone()
+        .and_then(|file| file.into_std().metadata())
+        .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
     Ok(StableCapabilityIdentity {
-        volume_serial_number: metadata.volume_serial_number().ok_or_else(|| {
+        volume_serial_number: u64::from(metadata.volume_serial_number().ok_or_else(|| {
             MkoError::new(
                 "registry_write_failed",
                 "file has no stable volume identity",
             )
-        })?,
+        })?),
         file_index: metadata.file_index().ok_or_else(|| {
             MkoError::new("registry_write_failed", "file has no stable file identity")
         })?,
@@ -435,9 +508,7 @@ fn stable_capability_identity(
 }
 
 #[cfg(not(any(unix, windows)))]
-fn stable_capability_identity(
-    _: &cap_std::fs::Metadata,
-) -> Result<StableCapabilityIdentity, MkoError> {
+fn stable_capability_identity(_: &cap_std::fs::File) -> Result<StableCapabilityIdentity, MkoError> {
     Err(MkoError::new(
         "registry_write_failed",
         "stable file identity is unsupported on this platform",
@@ -472,6 +543,9 @@ impl PublicationLock {
         let owner_token = secure_cleanup_token()?;
         let deadline = Instant::now() + LOCK_WAIT;
         loop {
+            if authoritative_quarantine_exists(&directory, &lock_filename)? {
+                return Err(publication_locked_error());
+            }
             match directory.open_with(
                 &lock_filename,
                 CapOpenOptions::new().write(true).create_new(true),
@@ -479,8 +553,18 @@ impl PublicationLock {
                 Ok(mut file) => {
                     writeln!(file, "owner={owner_token}").map_err(lock_error)?;
                     file.sync_all().map_err(lock_error)?;
-                    let identity =
-                        stable_capability_identity(&file.metadata().map_err(lock_error)?)?;
+                    sync_capability_directory(&directory)?;
+                    let identity = stable_capability_identity(&file)?;
+                    if authoritative_quarantine_exists(&directory, &lock_filename)? {
+                        drop(file);
+                        cleanup_capability_entry(
+                            &directory,
+                            &lock_filename,
+                            identity,
+                            Some(&format!("owner={owner_token}\n")),
+                        );
+                        return Err(publication_locked_error());
+                    }
                     return Ok(Self {
                         directory,
                         filename: lock_filename,
@@ -490,10 +574,7 @@ impl PublicationLock {
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     if Instant::now() >= deadline {
-                        return Err(MkoError::new(
-                            "registry_locked",
-                            "registry publication lock is held or stale; inspect and remove it manually after validating the destination",
-                        ));
+                        return Err(publication_locked_error());
                     }
                     thread::sleep(LOCK_RETRY);
                 }
@@ -534,10 +615,16 @@ fn sync_directory(_path: &Path) -> Result<(), MkoError> {
 mod tests {
     use std::{
         fs,
+        io::Write,
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use super::{AtomicWriteResult, write_new};
+    use cap_std::{ambient_authority, fs::Dir};
+
+    use super::{
+        AtomicWriteResult, CapabilityPublicationLock, CleanupDurabilityEvent,
+        cleanup_capability_entry_with_observer, stable_capability_identity, write_new,
+    };
 
     static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
 
@@ -592,6 +679,86 @@ mod tests {
         assert_eq!(error.code(), "registry_destination_invalid");
         assert!(destination.is_dir());
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn quarantined_publication_lock_blocks_third_acquirer_and_survives_restore_failure() {
+        let directory_path = test_directory();
+        let directory = Dir::open_ambient_dir(&directory_path, ambient_authority()).unwrap();
+        let filename = ".record.md.publish.lock";
+        let mut original = directory.create(filename).unwrap();
+        original.write_all(b"owner=original\n").unwrap();
+        original.sync_all().unwrap();
+        let original_identity = stable_capability_identity(&original).unwrap();
+        drop(original);
+        directory.remove_file(filename).unwrap();
+        directory.write(filename, b"owner=original\n").unwrap();
+
+        let mut durability = Vec::new();
+        cleanup_capability_entry_with_observer(
+            &directory,
+            filename,
+            original_identity,
+            Some("owner=original\n"),
+            || {
+                let error = match CapabilityPublicationLock::acquire(&directory, "record.md") {
+                    Ok(_) => panic!("quarantine must be authoritative"),
+                    Err(error) => error,
+                };
+                assert_eq!(error.code(), "registry_locked");
+                directory.write(filename, b"owner=third\n").unwrap();
+            },
+            |event| durability.push(event),
+        );
+
+        assert_eq!(directory.read_to_string(filename).unwrap(), "owner=third\n");
+        assert!(directory.read_dir(".").unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("..record.md.publish.lock.cleanup-")
+        }));
+        assert_eq!(durability, vec![CleanupDurabilityEvent::Quarantined]);
+        let _ = fs::remove_dir_all(directory_path);
+    }
+
+    #[test]
+    fn publication_replacement_restore_reports_each_durable_directory_transition() {
+        let directory_path = test_directory();
+        let directory = Dir::open_ambient_dir(&directory_path, ambient_authority()).unwrap();
+        let filename = ".record.md.publish.lock";
+        let mut original = directory.create(filename).unwrap();
+        original.write_all(b"owner=original\n").unwrap();
+        original.sync_all().unwrap();
+        let original_identity = stable_capability_identity(&original).unwrap();
+        drop(original);
+        directory.remove_file(filename).unwrap();
+        directory.write(filename, b"owner=replacement\n").unwrap();
+
+        let mut durability = Vec::new();
+        cleanup_capability_entry_with_observer(
+            &directory,
+            filename,
+            original_identity,
+            Some("owner=original\n"),
+            || {},
+            |event| durability.push(event),
+        );
+
+        assert_eq!(
+            directory.read_to_string(filename).unwrap(),
+            "owner=replacement\n"
+        );
+        assert_eq!(
+            durability,
+            vec![
+                CleanupDurabilityEvent::Quarantined,
+                CleanupDurabilityEvent::Restored,
+                CleanupDurabilityEvent::Removed,
+            ]
+        );
+        let _ = fs::remove_dir_all(directory_path);
     }
 
     fn test_directory() -> std::path::PathBuf {

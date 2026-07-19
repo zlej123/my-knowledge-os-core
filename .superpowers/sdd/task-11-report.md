@@ -59,6 +59,34 @@ Full verification run from the repository-defined locations:
 - The same owner-bound cleanup primitive now also covers the existing ambient-entry `write_new` temporary and publication-lock surfaces; they retain a parent directory capability instead of using name-only cleanup.
 - Follow-up focused verification: atomic publication 5 passed, retained lock-directory race 1 passed, state/lock 19 passed, review transaction 17 passed, legacy approval 31 passed.
 - Second independent post-commit code/spec review: pending after the follow-up commit.
+- The second independent review was not approved. It identified an exclusivity
+  gap while a canonical lock name was quarantined, remaining identity-blind
+  write/stale-clear cleanup paths, missing directory durability evidence, and
+  implausible Windows-only identity calls.
+- Cleanup quarantine entries are now authoritative lock claims. Main Asset,
+  takeover, capability publication, and ambient publication acquisition scan
+  before create and again after a durable create; a post-create conflict
+  releases only the new identity-bound claim and fails closed. Synchronized
+  tests prove a third acquirer is rejected and an orphan quarantine remains
+  authoritative when create-new restoration is deliberately made to fail.
+- Main-lock and takeover write failures now quarantine and compare the stable
+  identity captured from the created handle. Stale/takeover clear first moves
+  the candidate to a private quarantine and validates that retained entry;
+  replacement races cannot delete a new canonical claimant.
+- Every successful quarantine rename, canonical restoration, and quarantine
+  removal is followed by a directory sync on Unix. Observer seams emit only
+  after the corresponding sync succeeds; tests cover both the complete
+  quarantine/restore/remove sequence and the restore-failure sequence.
+- Stable identity on Unix and Windows now comes from metadata on a cloned
+  standard file handle. Windows volume serial values are widened from `u32` to
+  `u64`; file indices remain `u64`. Native Windows CI is still the release gate
+  because this development machine has no Windows Rust target installed.
+- Second-follow-up focused verification: lock unit tests 10 passed, atomic unit
+  tests 5 passed, atomic publication 5 passed, state/lock 19 passed, review
+  transaction 17 passed, and legacy approval 31 passed. Full formatting,
+  workspace Clippy with warnings denied, and workspace tests all passed.
+- Third independent post-commit code/spec review: pending after the second
+  follow-up commit.
 
 ## Commit
 
