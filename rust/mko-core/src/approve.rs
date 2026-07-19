@@ -6,16 +6,17 @@ use std::{
 };
 
 use crate::{
-    atomic::write_replace_capability_checked,
+    atomic::write_replace_capability_validated_at_commit,
     canonical_source::validate_canonical_source,
     clock::{Clock, SystemClock},
     error::MkoError,
     front_matter::{parse_markdown, render_markdown},
     lock::AssetLock,
     model::{AssetStatus, ReviewStatus, SourceRecord, SourceStatus},
-    registry::{mark_asset_processed_with_clock, read_asset},
+    state::transition_asset,
 };
 use cap_std::{ambient_authority, fs::Dir, time::SystemTime};
+use sha2::{Digest, Sha256};
 
 const MAX_SOURCE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_SOURCE_ENTRIES: usize = 1024;
@@ -55,6 +56,59 @@ pub trait ApprovalObserver {
     fn before_publication(&mut self) -> io::Result<()>;
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GitSnapshot {
+    pub working: Vec<u8>,
+    pub staged: Vec<u8>,
+}
+
+pub trait GitSnapshotProvider {
+    fn snapshot(
+        &self,
+        repository_root: &Path,
+        source_path: &Path,
+        asset_path: &Path,
+    ) -> Result<GitSnapshot, MkoError>;
+}
+
+pub(crate) struct LockedPublicationRequest {
+    pub(crate) repository_root: PathBuf,
+    pub(crate) repository: Dir,
+    pub(crate) sources: Dir,
+    pub(crate) registry: Dir,
+    pub(crate) source_filename: String,
+    pub(crate) source_path: String,
+    pub(crate) asset_path: String,
+    pub(crate) asset_filename: String,
+    pub(crate) source: SourceRecord,
+    pub(crate) source_body: String,
+    pub(crate) source_snapshot: SourceSnapshot,
+    pub(crate) asset: crate::model::AssetRecord,
+    pub(crate) asset_bytes: Vec<u8>,
+    pub(crate) asset_body: String,
+    pub(crate) revision: String,
+    pub(crate) git_snapshot: GitSnapshot,
+    pub(crate) working_digest: String,
+    pub(crate) staged_digest: String,
+}
+
+struct EmptyGitSnapshotProvider;
+
+impl GitSnapshotProvider for EmptyGitSnapshotProvider {
+    fn snapshot(
+        &self,
+        _repository_root: &Path,
+        _source_path: &Path,
+        _asset_path: &Path,
+    ) -> Result<GitSnapshot, MkoError> {
+        // The frozen v0.1 `human approve-source` contract allowed approval
+        // outside a Git repository and displayed only a best-effort summary.
+        // Its explicit compatibility provider therefore binds an empty Git
+        // snapshot, while the v0.2 `review` command requires real bounded diffs.
+        Ok(GitSnapshot::default())
+    }
+}
+
 pub fn approve_source(request: ApproveSourceRequest) -> Result<ApproveSourceResult, MkoError> {
     let mut terminal = SystemApprovalTerminal;
     approve_source_with_terminal_and_clock(request, &mut terminal, &SystemClock)
@@ -77,39 +131,85 @@ pub fn approve_source_with_terminal_clock_and_observer(
     if !terminal.stdin_is_terminal() || !terminal.stdout_is_terminal() {
         return Err(confirmation_error());
     }
-    validate_source_id(&request.source_id)?;
-    let repository_root = fs::canonicalize(&request.repository_root).map_err(|error| {
+    let (held_lock, locked) = prepare_locked_publication(
+        &request.repository_root,
+        &request.source_id,
+        "mko human approve-source",
+        &EmptyGitSnapshotProvider,
+        clock,
+    )?;
+    let input = std::str::from_utf8(&locked.source_snapshot.bytes)
+        .map_err(|_| MkoError::new("source_unreadable", "Source must be UTF-8"))?;
+    let line_count = input.lines().count();
+    let git_summary = git_diff_summary(
+        &locked.repository_root,
+        &locked.source_path,
+        input.len(),
+        line_count,
+    );
+    terminal
+        .write_all(&format!(
+            "Source ID: {}\nCurrent revision: {}\nStatus: review_pending -> approved\nSource bytes: {}\nSource lines: {}\nGit diff: {}\nType exactly: APPROVE {}\n> ",
+            locked.source.id,
+            locked.revision,
+            input.len(),
+            line_count,
+            git_summary,
+            locked.source.id
+        ))
+        .map_err(terminal_error)?;
+    let mut confirmation = String::new();
+    terminal
+        .read_line(&mut confirmation)
+        .map_err(terminal_error)?;
+    let confirmation = confirmation.trim_end_matches(['\r', '\n']);
+    if confirmation != format!("APPROVE {}", locked.source.id) {
+        return Err(confirmation_error());
+    }
+    publish_approved_source_under_lock(
+        locked,
+        &held_lock,
+        &EmptyGitSnapshotProvider,
+        clock,
+        observer,
+    )
+}
+
+pub(crate) fn prepare_locked_publication(
+    repository_root: &Path,
+    source_id: &str,
+    command: &str,
+    git: &dyn GitSnapshotProvider,
+    clock: &dyn Clock,
+) -> Result<(AssetLock, LockedPublicationRequest), MkoError> {
+    validate_source_id(source_id)?;
+    let repository_root = fs::canonicalize(repository_root).map_err(|error| {
         MkoError::new(
             "repository_root_invalid",
             format!("cannot resolve repository: {error}"),
         )
     })?;
     let repository = open_repository(&repository_root)?;
+    let initial_sources = open_sources_directory(&repository)?;
+    let initial = discover_source(&initial_sources, source_id)?;
+    let asset_id = single_asset_id(&initial.record)?;
+    let held_lock = AssetLock::acquire(&repository_root, &asset_id, command, clock, false)?;
     let sources = open_sources_directory(&repository)?;
-    let initial = discover_source(&sources, &request.source_id)?;
-    let asset_id = initial
-        .record
-        .relations
-        .asset_ids
-        .first()
-        .filter(|_| initial.record.relations.asset_ids.len() == 1)
-        .cloned()
-        .ok_or_else(|| MkoError::new("relation_missing", "Source must relate to one Asset"))?;
-    let _lock = AssetLock::acquire(
-        &repository_root,
-        &asset_id,
-        "mko human approve-source",
-        clock,
-        false,
-    )?;
-    let discovered = discover_source(&sources, &request.source_id)?;
+    let discovered = discover_source(&sources, source_id)?;
+    let asset_id_after_lock = single_asset_id(&discovered.record)?;
+    if asset_id_after_lock != asset_id {
+        return Err(MkoError::new(
+            "relation_mismatch",
+            "Source relation changed while acquiring its Asset lock",
+        ));
+    }
     let source_filename = discovered.filename;
-    let expected = discovered.snapshot;
-    let input = std::str::from_utf8(&expected.bytes)
-        .map_err(|_| MkoError::new("source_unreadable", "Source must be UTF-8"))?
-        .to_owned();
-    let parsed = parse_markdown::<SourceRecord>(&input)?;
-    let mut source = parsed.metadata;
+    let source_path = format!("sources/{source_filename}");
+    let asset_path = format!("assets/registry/{asset_id}.md");
+    let input = std::str::from_utf8(&discovered.snapshot.bytes)
+        .map_err(|_| MkoError::new("source_unreadable", "Source must be UTF-8"))?;
+    let parsed = parse_markdown::<SourceRecord>(input)?;
+    let source = parsed.metadata;
     if source.status != SourceStatus::ReviewPending || source.review.status != ReviewStatus::Pending
     {
         return Err(MkoError::new(
@@ -117,14 +217,24 @@ pub fn approve_source_with_terminal_clock_and_observer(
             "only a pending Source can be approved",
         ));
     }
-    if source.relations.asset_ids.as_slice() != [asset_id.as_str()] {
+    let registry = open_registry_directory(&repository)?;
+    let asset_filename = format!("{asset_id}.md");
+    let asset_bytes = read_regular_capability_file(
+        &registry,
+        Path::new(&asset_filename),
+        MAX_SOURCE_BYTES,
+        "registry_unreadable",
+    )?;
+    let asset_text = std::str::from_utf8(&asset_bytes)
+        .map_err(|_| MkoError::new("registry_unreadable", "Asset must be UTF-8"))?;
+    let asset_document = parse_markdown::<crate::model::AssetRecord>(asset_text)?;
+    let asset = asset_document.metadata;
+    if asset.id != asset_id {
         return Err(MkoError::new(
-            "relation_mismatch",
-            "Source relation changed during approval",
+            "registry_conflict",
+            "registry filename and Asset ID disagree",
         ));
     }
-    let asset = read_asset(&repository_root, &asset_id)?;
-    let source_path = format!("sources/{source_filename}");
     let revision = validate_canonical_source(&source_path, &source, &parsed.body, &asset)?;
     if asset.asset_status != AssetStatus::ReviewPending {
         return Err(MkoError::new(
@@ -135,71 +245,69 @@ pub fn approve_source_with_terminal_clock_and_observer(
             ),
         ));
     }
-    let line_count = input.lines().count();
-    let git_summary = git_diff_summary(&repository_root, &source_path, input.len(), line_count);
-    terminal
-        .write_all(&format!(
-            "Source ID: {}\nCurrent revision: {}\nStatus: review_pending -> approved\nSource bytes: {}\nSource lines: {}\nGit diff: {}\nType exactly: APPROVE {}\n> ",
-            source.id,
-            revision,
-            input.len(),
-            line_count,
-            git_summary,
-            source.id
-        ))
-        .map_err(terminal_error)?;
-    let mut confirmation = String::new();
-    terminal
-        .read_line(&mut confirmation)
-        .map_err(terminal_error)?;
-    let confirmation = confirmation.trim_end_matches(['\r', '\n']);
-    if confirmation != format!("APPROVE {}", source.id) {
-        return Err(confirmation_error());
-    }
-    revalidate_expected_snapshot(
-        &sources,
-        Path::new(&source_filename),
-        &expected,
-        &source_path,
-        &asset,
-        &source.id,
-        &revision,
+    let git_snapshot = stable_git_snapshot(
+        git,
+        &repository_root,
+        Path::new(&source_path),
+        Path::new(&asset_path),
     )?;
-
-    source.status = SourceStatus::Approved;
-    source.content_revision = revision.clone();
-    source.review.status = ReviewStatus::Approved;
-    source.review.approved_revision = Some(revision.clone());
-    source.review.reviewed_at = Some(clock.now_utc());
-    source.updated_at = clock.now_utc();
-    let document = render_markdown(&source, &parsed.body)?;
-    observer.before_publication().map_err(terminal_error)?;
-    write_replace_capability_checked(
-        &sources,
-        Path::new(&source_filename),
-        document.as_bytes(),
-        || {
-            revalidate_expected_snapshot(
-                &sources,
-                Path::new(&source_filename),
-                &expected,
-                &source_path,
-                &asset,
-                &source.id,
-                &revision,
-            )
+    let working_digest = bytes_digest(&git_snapshot.working);
+    let staged_digest = bytes_digest(&git_snapshot.staged);
+    Ok((
+        held_lock,
+        LockedPublicationRequest {
+            repository_root,
+            repository,
+            sources,
+            registry,
+            source_filename,
+            source_path,
+            asset_path,
+            asset_filename,
+            source,
+            source_body: parsed.body,
+            source_snapshot: discovered.snapshot,
+            asset,
+            asset_bytes,
+            asset_body: asset_document.body,
+            revision,
+            git_snapshot,
+            working_digest,
+            staged_digest,
         },
-    )
-    .map_err(|error| {
-        if error.code() == "registry_destination_invalid" {
-            source_changed_error()
-        } else {
-            error
-        }
-    })?;
+    ))
+}
 
-    let public_sources = open_sources_directory(&repository).map_err(|_| source_changed_error())?;
-    let published = read_source_snapshot(&public_sources, Path::new(&source_filename))
+pub(crate) fn publish_approved_source_under_lock(
+    mut request: LockedPublicationRequest,
+    held_lock: &AssetLock,
+    git: &dyn GitSnapshotProvider,
+    clock: &dyn Clock,
+    observer: &mut dyn ApprovalObserver,
+) -> Result<ApproveSourceResult, MkoError> {
+    held_lock.assert_owned_for(&request.repository_root, &request.asset.id)?;
+    let source_id = request.source.id.clone();
+    let revision = request.revision.clone();
+    request.source.status = SourceStatus::Approved;
+    request.source.content_revision = revision.clone();
+    request.source.review.status = ReviewStatus::Approved;
+    request.source.review.approved_revision = Some(revision.clone());
+    request.source.review.reviewed_at = Some(clock.now_utc());
+    request.source.updated_at = clock.now_utc();
+    let document = render_markdown(&request.source, &request.source_body)?;
+
+    write_replace_capability_validated_at_commit(
+        &request.sources,
+        Path::new(&request.source_filename),
+        document.as_bytes(),
+        || observer.before_publication().map_err(terminal_error),
+        || validate_locked_snapshot(&request, git),
+    )
+    .map_err(map_publication_error)?;
+
+    let public_sources =
+        open_sources_directory(&request.repository).map_err(|_| source_changed_error())?;
+    let published = read_source_snapshot(&public_sources, Path::new(&request.source_filename))
         .map_err(|_| source_changed_error())?;
     if published.bytes != document.as_bytes() {
         return Err(source_changed_error());
@@ -208,10 +316,14 @@ pub fn approve_source_with_terminal_clock_and_observer(
         std::str::from_utf8(&published.bytes).map_err(|_| source_changed_error())?;
     let published =
         parse_markdown::<SourceRecord>(published_text).map_err(|_| source_changed_error())?;
-    let public_revision =
-        validate_canonical_source(&source_path, &published.metadata, &published.body, &asset)
-            .map_err(|_| source_changed_error())?;
-    if published.metadata.id != source.id
+    let public_revision = validate_canonical_source(
+        &request.source_path,
+        &published.metadata,
+        &published.body,
+        &request.asset,
+    )
+    .map_err(|_| source_changed_error())?;
+    if published.metadata.id != source_id
         || published.metadata.status != SourceStatus::Approved
         || published.metadata.review.status != ReviewStatus::Approved
         || public_revision != revision
@@ -219,14 +331,133 @@ pub fn approve_source_with_terminal_clock_and_observer(
         return Err(source_changed_error());
     }
 
-    // Source publication is the first authoritative write. If the Asset transition fails,
-    // `mko check` reports a repairable source_state_mismatch without losing the approval.
-    mark_asset_processed_with_clock(&repository_root, &asset_id, clock)?;
+    // Source publication is authoritative first. The Asset transition is a
+    // capability-relative expected-byte CAS. Failure leaves the approved Source
+    // and pending Asset in the existing, explicitly repairable mismatch state.
+    let mut processed_asset = request.asset.clone();
+    transition_asset(
+        &mut processed_asset,
+        AssetStatus::Processed,
+        clock.now_utc(),
+    )?;
+    let processed_document = render_markdown(&processed_asset, &request.asset_body)?;
+    write_replace_capability_validated_at_commit(
+        &request.registry,
+        Path::new(&request.asset_filename),
+        processed_document.as_bytes(),
+        || Ok(()),
+        || {
+            let current = read_regular_capability_file(
+                &request.registry,
+                Path::new(&request.asset_filename),
+                MAX_SOURCE_BYTES,
+                "registry_unreadable",
+            )
+            .map_err(|_| asset_changed_error())?;
+            if current == request.asset_bytes {
+                Ok(())
+            } else {
+                Err(asset_changed_error())
+            }
+        },
+    )?;
     Ok(ApproveSourceResult {
-        source_id: source.id,
+        source_id,
         revision,
-        source_path,
+        source_path: request.source_path,
     })
+}
+
+fn validate_locked_snapshot(
+    request: &LockedPublicationRequest,
+    git: &dyn GitSnapshotProvider,
+) -> Result<(), MkoError> {
+    revalidate_expected_snapshot(
+        &request.sources,
+        Path::new(&request.source_filename),
+        &request.source_snapshot,
+        &request.source_path,
+        &request.asset,
+        &request.source.id,
+        &request.revision,
+    )?;
+    let asset_bytes = read_regular_capability_file(
+        &request.registry,
+        Path::new(&request.asset_filename),
+        MAX_SOURCE_BYTES,
+        "registry_unreadable",
+    )
+    .map_err(|_| asset_changed_error())?;
+    if asset_bytes != request.asset_bytes {
+        return Err(asset_changed_error());
+    }
+    let current = stable_git_snapshot(
+        git,
+        &request.repository_root,
+        Path::new(&request.source_path),
+        Path::new(&request.asset_path),
+    )?;
+    if current != request.git_snapshot
+        || bytes_digest(&current.working) != request.working_digest
+        || bytes_digest(&current.staged) != request.staged_digest
+    {
+        return Err(git_changed_error());
+    }
+    Ok(())
+}
+
+fn stable_git_snapshot(
+    git: &dyn GitSnapshotProvider,
+    repository_root: &Path,
+    source_path: &Path,
+    asset_path: &Path,
+) -> Result<GitSnapshot, MkoError> {
+    let first = git.snapshot(repository_root, source_path, asset_path)?;
+    let second = git.snapshot(repository_root, source_path, asset_path)?;
+    if first == second {
+        Ok(first)
+    } else {
+        Err(MkoError::new(
+            "git_snapshot_unstable",
+            "Git changed while the review snapshot was being collected",
+        ))
+    }
+}
+
+fn single_asset_id(source: &SourceRecord) -> Result<String, MkoError> {
+    source
+        .relations
+        .asset_ids
+        .first()
+        .filter(|_| source.relations.asset_ids.len() == 1)
+        .cloned()
+        .ok_or_else(|| MkoError::new("relation_missing", "Source must relate to one Asset"))
+}
+
+fn bytes_digest(bytes: &[u8]) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+}
+
+fn map_publication_error(error: MkoError) -> MkoError {
+    if error.code() == "registry_destination_invalid" {
+        source_changed_error()
+    } else {
+        error
+    }
+}
+
+fn asset_changed_error() -> MkoError {
+    MkoError::new(
+        "asset_changed_during_approval",
+        "Asset changed after it was presented for approval; nothing was published",
+    )
+}
+
+fn git_changed_error() -> MkoError {
+    MkoError::new(
+        "git_snapshot_changed_during_approval",
+        "Git diff changed after it was presented for approval; nothing was published",
+    )
 }
 
 struct NoopObserver;
@@ -339,8 +570,8 @@ fn source_scan_error() -> MkoError {
 }
 
 #[derive(Clone)]
-struct SourceSnapshot {
-    bytes: Vec<u8>,
+pub(crate) struct SourceSnapshot {
+    pub(crate) bytes: Vec<u8>,
     len: u64,
     modified: Option<SystemTime>,
 }
@@ -363,6 +594,68 @@ fn open_sources_directory(repository: &Dir) -> Result<Dir, MkoError> {
     repository
         .open_dir("sources")
         .map_err(|error| MkoError::new("source_path_invalid", error.to_string()))
+}
+
+fn open_registry_directory(repository: &Dir) -> Result<Dir, MkoError> {
+    let assets = repository
+        .symlink_metadata("assets")
+        .map_err(|error| MkoError::new("registry_unreadable", error.to_string()))?;
+    if assets.file_type().is_symlink() || !assets.is_dir() {
+        return Err(MkoError::new(
+            "registry_unreadable",
+            "assets must be a retained real directory",
+        ));
+    }
+    let assets = repository
+        .open_dir("assets")
+        .map_err(|error| MkoError::new("registry_unreadable", error.to_string()))?;
+    let registry = assets
+        .symlink_metadata("registry")
+        .map_err(|error| MkoError::new("registry_unreadable", error.to_string()))?;
+    if registry.file_type().is_symlink() || !registry.is_dir() {
+        return Err(MkoError::new(
+            "registry_unreadable",
+            "registry must be a retained real directory",
+        ));
+    }
+    assets
+        .open_dir("registry")
+        .map_err(|error| MkoError::new("registry_unreadable", error.to_string()))
+}
+
+fn read_regular_capability_file(
+    directory: &Dir,
+    filename: &Path,
+    max_bytes: u64,
+    error_code: &str,
+) -> Result<Vec<u8>, MkoError> {
+    let path_metadata = directory
+        .symlink_metadata(filename)
+        .map_err(|error| MkoError::new(error_code, error.to_string()))?;
+    if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
+        return Err(MkoError::new(
+            error_code,
+            "record must remain a regular file",
+        ));
+    }
+    let mut file = directory
+        .open(filename)
+        .map_err(|error| MkoError::new(error_code, error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| MkoError::new(error_code, error.to_string()))?;
+    if !metadata.is_file() || metadata.len() > max_bytes {
+        return Err(MkoError::new(error_code, "record exceeds its byte limit"));
+    }
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| MkoError::new(error_code, error.to_string()))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(MkoError::new(error_code, "record exceeds its byte limit"));
+    }
+    Ok(bytes)
 }
 
 fn read_source_snapshot(directory: &Dir, filename: &Path) -> Result<SourceSnapshot, MkoError> {

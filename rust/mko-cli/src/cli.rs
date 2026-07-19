@@ -30,6 +30,7 @@ use mko_core::{
         AssetOperationRequest, CaptureRequest, accept_changed_asset, capture_asset, inspect_asset,
         repair_lineage,
     },
+    review::{ReviewOutcome, review as review_pending},
     setup::{
         SetupRequest, SystemSetupWriter, apply_setup, detect_google_drive_roots, preflight_setup,
     },
@@ -237,6 +238,7 @@ enum Command {
     Doctor(DoctorArgs),
     Inbox(InboxArgs),
     Status(StatusArgs),
+    Review(ReviewArgs),
     Human {
         #[command(subcommand)]
         command: HumanCommand,
@@ -356,6 +358,11 @@ struct StatusArgs {
     repo: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
+}
+#[derive(Args)]
+struct ReviewArgs {
+    #[arg(long)]
+    repo: Option<PathBuf>,
 }
 #[derive(Args)]
 struct ApproveSourceArgs {
@@ -506,6 +513,7 @@ fn run(cli: Cli) -> Result<Exit, MkoError> {
         Command::Doctor(arguments) => doctor(arguments).map(|_| Exit::Success),
         Command::Inbox(arguments) => inbox(arguments).map(|_| Exit::Success),
         Command::Status(arguments) => status(arguments).map(|_| Exit::Success),
+        Command::Review(arguments) => review(arguments).map(|_| Exit::Success),
         Command::Source {
             command: SourceCommand::Prepare(arguments),
         } => prepare(arguments).map(|_| Exit::Success),
@@ -805,6 +813,20 @@ fn status(arguments: StatusArgs) -> Result<(), MkoError> {
     } else {
         emit_status_human(&report)
     }
+}
+
+fn review(arguments: ReviewArgs) -> Result<(), MkoError> {
+    let repository = match arguments.repo {
+        Some(repository) => repository,
+        None => resolve_context(None)?.repository_root,
+    };
+    match review_pending(&repository)? {
+        ReviewOutcome::Deferred => println!("deferred"),
+        ReviewOutcome::Approved(result) => {
+            println!("approved {} {}", result.source_id, result.revision)
+        }
+    }
+    Ok(())
 }
 
 fn resolve_catalog_context(

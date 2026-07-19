@@ -25,6 +25,7 @@ pub mod prepare;
 pub mod profile;
 pub mod provider_scan;
 pub mod registry;
+pub mod review;
 pub mod revision;
 pub mod safe_yaml;
 pub mod secret;

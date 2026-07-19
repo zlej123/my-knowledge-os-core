@@ -5,6 +5,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use cap_std::{ambient_authority, fs::Dir};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, System};
@@ -91,9 +92,7 @@ impl AssetLock {
         clear_stale_lock: bool,
     ) -> Result<Self, MkoError> {
         validate_asset_id(asset_id)?;
-        let directory = repository_root.join(".knowledge-os/runtime/locks");
-        fs::create_dir_all(&directory)
-            .map_err(|error| MkoError::new("lock_write_failed", error.to_string()))?;
+        let directory = secure_lock_directory(repository_root)?;
         let path = directory.join(format!("{asset_id}.lock"));
         clear_stale_takeover_if_requested(&path, asset_id, clock, clear_stale_lock)?;
 
@@ -116,6 +115,73 @@ impl AssetLock {
             }
         }
     }
+
+    pub(crate) fn assert_owned_for(
+        &self,
+        repository_root: &Path,
+        asset_id: &str,
+    ) -> Result<(), MkoError> {
+        let expected = repository_root
+            .join(".knowledge-os/runtime/locks")
+            .join(format!("{asset_id}.lock"));
+        let owned = self.asset_id == asset_id
+            && self.path == expected
+            && fs::read(&self.path)
+                .ok()
+                .and_then(|input| serde_json::from_slice::<LockRecord>(&input).ok())
+                .is_some_and(|record| {
+                    record.asset_id == asset_id && record.owner_token == self.owner_token
+                });
+        if owned {
+            Ok(())
+        } else {
+            Err(MkoError::new(
+                "asset_lock_mismatch",
+                "the held Asset lock does not authorize this publication",
+            ))
+        }
+    }
+}
+
+fn secure_lock_directory(repository_root: &Path) -> Result<PathBuf, MkoError> {
+    let repository = Dir::open_ambient_dir(repository_root, ambient_authority())
+        .map_err(|error| MkoError::new("lock_write_failed", error.to_string()))?;
+    let knowledge = ensure_real_child_directory(&repository, ".knowledge-os")?;
+    let runtime = ensure_real_child_directory(&knowledge, "runtime")?;
+    let _locks = ensure_real_child_directory(&runtime, "locks")?;
+    Ok(repository_root.join(".knowledge-os/runtime/locks"))
+}
+
+fn ensure_real_child_directory(parent: &Dir, name: &str) -> Result<Dir, MkoError> {
+    match parent.symlink_metadata(name) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(MkoError::new(
+                "lock_write_failed",
+                "lock directory is not a real directory",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match parent.create_dir(name) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(MkoError::new("lock_write_failed", error.to_string())),
+            }
+            let metadata = parent
+                .symlink_metadata(name)
+                .map_err(|error| MkoError::new("lock_write_failed", error.to_string()))?;
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err(MkoError::new(
+                    "lock_write_failed",
+                    "lock directory is not a real directory",
+                ));
+            }
+        }
+        Err(error) => return Err(MkoError::new("lock_write_failed", error.to_string())),
+    }
+    parent
+        .open_dir(name)
+        .map_err(|error| MkoError::new("lock_write_failed", error.to_string()))
 }
 
 impl Drop for AssetLock {

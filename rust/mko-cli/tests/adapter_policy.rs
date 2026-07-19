@@ -114,6 +114,9 @@ fn validate_command_policy(markdown: &str, allowed: &[&str]) -> Result<(), Strin
             .trim()
             .strip_prefix("$ ")
             .unwrap_or_else(|| surface.trim());
+        if command == "DEFER" || command.starts_with("APPROVE ") {
+            return Err("exposes a human-only review token".into());
+        }
         let Some(command_key) = command_key(surface) else {
             continue;
         };
@@ -242,7 +245,9 @@ fn executable_surfaces_include_inline_code_commands() {
 fn command_policy_rejects_inline_approval_publication_and_arbitrary_commands() {
     let allowed = ["mko asset capture"];
     for malicious in [
+        "Run `mko review --repo kb`.",
         "Run `mko human approve-source --repo kb --source-id x`.",
+        "Type `APPROVE personal-source-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`.",
         "Run `mko hooks install --repo kb`.",
         "Run `mko source repair-state --repo kb --asset-id x`.",
         "Run `git commit -am publish`.",

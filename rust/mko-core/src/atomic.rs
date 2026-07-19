@@ -154,6 +154,39 @@ where
 {
     let filename = capability_filename(filename)?;
     let _lock = CapabilityPublicationLock::acquire(directory, filename)?;
+    validate_capability_destination(directory, filename)?;
+    validate_current()?;
+    write_capability_temp_and_rename(directory, filename, bytes, || Ok(()), || Ok(()))
+}
+
+/// Atomically replaces a capability-relative regular file after validating the
+/// destination at the last possible point before rename.
+///
+/// Lock order is caller-owned Asset lock first, then this publication lock.
+pub fn write_replace_capability_validated_at_commit<B, V>(
+    directory: &Dir,
+    filename: &Path,
+    bytes: &[u8],
+    before_final_validation: B,
+    validate_current: V,
+) -> Result<(), MkoError>
+where
+    B: FnOnce() -> Result<(), MkoError>,
+    V: FnOnce() -> Result<(), MkoError>,
+{
+    let filename = capability_filename(filename)?;
+    let _lock = CapabilityPublicationLock::acquire(directory, filename)?;
+    validate_capability_destination(directory, filename)?;
+    write_capability_temp_and_rename(
+        directory,
+        filename,
+        bytes,
+        before_final_validation,
+        validate_current,
+    )
+}
+
+fn validate_capability_destination(directory: &Dir, filename: &str) -> Result<(), MkoError> {
     match directory.symlink_metadata(filename) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
         Ok(_) => {
@@ -170,8 +203,20 @@ where
         }
         Err(error) => return Err(MkoError::new("registry_write_failed", error.to_string())),
     }
-    validate_current()?;
+    Ok(())
+}
 
+fn write_capability_temp_and_rename<B, V>(
+    directory: &Dir,
+    filename: &str,
+    bytes: &[u8],
+    before_final_validation: B,
+    validate_current: V,
+) -> Result<(), MkoError>
+where
+    B: FnOnce() -> Result<(), MkoError>,
+    V: FnOnce() -> Result<(), MkoError>,
+{
     let temporary = format!(
         ".{filename}.{}.{}.tmp",
         std::process::id(),
@@ -189,6 +234,8 @@ where
         file.sync_all()
             .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
         drop(file);
+        before_final_validation()?;
+        validate_current()?;
         directory
             .rename(&temporary, directory, filename)
             .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
@@ -223,6 +270,7 @@ fn capability_filename(path: &Path) -> Result<&str, MkoError> {
 struct CapabilityPublicationLock<'a> {
     directory: &'a Dir,
     filename: String,
+    owner_token: String,
 }
 
 impl<'a> CapabilityPublicationLock<'a> {
@@ -235,11 +283,17 @@ impl<'a> CapabilityPublicationLock<'a> {
                 CapOpenOptions::new().write(true).create_new(true),
             ) {
                 Ok(mut file) => {
-                    writeln!(file, "pid={}", std::process::id()).map_err(lock_error)?;
+                    let owner_token = format!(
+                        "{}-{}",
+                        std::process::id(),
+                        NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed)
+                    );
+                    writeln!(file, "owner={owner_token}").map_err(lock_error)?;
                     file.sync_all().map_err(lock_error)?;
                     return Ok(Self {
                         directory,
                         filename: lock_filename,
+                        owner_token,
                     });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -259,7 +313,14 @@ impl<'a> CapabilityPublicationLock<'a> {
 
 impl Drop for CapabilityPublicationLock<'_> {
     fn drop(&mut self) {
-        let _ = self.directory.remove_file(&self.filename);
+        let owned = self
+            .directory
+            .read_to_string(&self.filename)
+            .ok()
+            .is_some_and(|contents| contents == format!("owner={}\n", self.owner_token));
+        if owned {
+            let _ = self.directory.remove_file(&self.filename);
+        }
     }
 }
 
