@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "command": "source.write_draft",
+  "result": "error",
+  "error": {
+    "code": "draft_conflict",
+    "message": "A pending draft already exists.",
+    "recovery": {
+      "kind": "retry"
+    }
+  }
+}

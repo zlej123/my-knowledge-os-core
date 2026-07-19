@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "command": "check",
+  "result": "error",
+  "error": {
+    "code": "repository_unreadable",
+    "message": "The repository could not be checked.",
+    "recovery": {
+      "kind": "fix_permissions"
+    }
+  }
+}

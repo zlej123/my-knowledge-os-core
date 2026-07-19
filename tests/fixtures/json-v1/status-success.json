@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "command": "status",
+  "result": "ok",
+  "data": {
+    "healthy": true,
+    "counts": {
+      "new": 1,
+      "registered": 2,
+      "incomplete": 0,
+      "review_pending": 3,
+      "processed": 8,
+      "blocked": 0
+    },
+    "primary_blocker": null,
+    "next_action": "review"
+  }
+}

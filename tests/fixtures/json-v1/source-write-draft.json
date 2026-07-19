@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "command": "source.write_draft",
+  "result": "ok",
+  "data": {
+    "draft_outcome": "created",
+    "source_id": "source-001",
+    "source_path": "/knowledge/sources/source-001.md",
+    "content_revision": "sha256:0123456789abcdef"
+  }
+}

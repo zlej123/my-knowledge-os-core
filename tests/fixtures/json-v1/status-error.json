@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "command": "status",
+  "result": "error",
+  "error": {
+    "code": "repository_not_configured",
+    "message": "No default repository is configured.",
+    "recovery": {
+      "kind": "configure"
+    }
+  }
+}

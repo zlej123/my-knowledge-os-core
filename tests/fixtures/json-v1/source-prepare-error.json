@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "command": "source.prepare",
+  "result": "error",
+  "error": {
+    "code": "asset_incomplete",
+    "message": "The asset is not ready for preparation.",
+    "recovery": {
+      "kind": "retry"
+    }
+  }
+}

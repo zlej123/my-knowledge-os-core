@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "command": "add",
+  "result": "error",
+  "error": {
+    "code": "provider_not_found",
+    "message": "The provider item was not found.",
+    "recovery": null
+  }
+}

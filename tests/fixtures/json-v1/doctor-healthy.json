@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "command": "doctor",
+  "result": "ok",
+  "data": {
+    "healthy": true,
+    "checks": [
+      {
+        "code": "repository_access",
+        "status": "healthy",
+        "message": "The repository is accessible.",
+        "path": "/knowledge",
+        "recovery": null
+      }
+    ],
+    "next_action": "none"
+  }
+}

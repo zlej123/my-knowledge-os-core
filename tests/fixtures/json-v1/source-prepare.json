@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "command": "source.prepare",
+  "result": "ok",
+  "data": {
+    "asset_id": "asset-001",
+    "source_id": "source-001",
+    "bundle_path": "/knowledge/.mko/runtime/source-001/prepared.json"
+  }
+}

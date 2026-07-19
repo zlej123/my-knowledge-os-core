@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "command": "add",
+  "result": "ok",
+  "data": {
+    "add_outcome": "created",
+    "import_outcome": "copied",
+    "repository": "/knowledge",
+    "asset_id": "asset-001",
+    "registry_path": "/knowledge/.mko/assets/asset-001.json",
+    "provider_locator": "inbox/paper.pdf"
+  }
+}

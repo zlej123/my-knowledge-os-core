@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-knowledge-os.local/schemas/status-data-v1.schema.json",
+  "title": "My Knowledge OS status data v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["healthy", "counts", "primary_blocker", "next_action"],
+  "properties": {
+    "healthy": { "type": "boolean" },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["new", "registered", "incomplete", "review_pending", "processed", "blocked"],
+      "properties": {
+        "new": { "type": "integer", "minimum": 0 },
+        "registered": { "type": "integer", "minimum": 0 },
+        "incomplete": { "type": "integer", "minimum": 0 },
+        "review_pending": { "type": "integer", "minimum": 0 },
+        "processed": { "type": "integer", "minimum": 0 },
+        "blocked": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "primary_blocker": {
+      "oneOf": [{ "$ref": "#/$defs/diagnostic" }, { "type": "null" }]
+    },
+    "next_action": { "enum": ["none", "configure", "hydrate", "add", "prepare", "write_draft", "review", "repair", "retry"] }
+  },
+  "$defs": {
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "path"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "path": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

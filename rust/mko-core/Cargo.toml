@@ -27,5 +27,6 @@ regex.workspace = true
 unicode-normalization.workspace = true
 
 [dev-dependencies]
+jsonschema.workspace = true
 lopdf = "=0.42.0"
 tempfile.workspace = true

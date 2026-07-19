@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-knowledge-os.local/schemas/inbox-data-v1.schema.json",
+  "title": "My Knowledge OS inbox data v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scan_complete", "scan_limits", "items", "errors", "warnings"],
+  "properties": {
+    "scan_complete": { "type": "boolean" },
+    "scan_limits": { "$ref": "#/$defs/scanLimits" },
+    "items": { "type": "array", "items": { "$ref": "#/$defs/item" } },
+    "errors": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } },
+    "warnings": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } }
+  },
+  "$defs": {
+    "scanLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_entries", "max_total_bytes", "max_elapsed_ms", "max_depth", "max_batch_items"],
+      "properties": {
+        "max_entries": { "type": "integer", "minimum": 0 },
+        "max_total_bytes": { "type": "integer", "minimum": 0 },
+        "max_elapsed_ms": { "type": "integer", "minimum": 0 },
+        "max_depth": { "type": "integer", "minimum": 0 },
+        "max_batch_items": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_locator", "user_state", "asset_id", "next_action"],
+      "properties": {
+        "provider_locator": { "type": "string" },
+        "user_state": { "enum": ["new", "registered", "incomplete", "review_pending", "processed", "blocked"] },
+        "asset_id": { "type": ["string", "null"] },
+        "next_action": { "enum": ["none", "configure", "hydrate", "add", "prepare", "write_draft", "review", "repair", "retry"] }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "path"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "path": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

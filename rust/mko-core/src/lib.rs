@@ -10,6 +10,7 @@ pub mod error;
 pub mod fingerprint;
 pub mod front_matter;
 pub mod hooks;
+pub mod json_v1;
 pub mod lock;
 pub mod model;
 pub mod path_policy;
