@@ -9,7 +9,7 @@ use assert_cmd::Command;
 use mko_core::{
     context::Scope,
     hooks::install_hooks,
-    json_v1::JsonV1Success,
+    json_v1::{JsonV1Failure, JsonV1Success},
     profile::{MachineProfileFile, PersonalProfile, ProfileStore},
 };
 use serde_json::{Value, json};
@@ -44,6 +44,48 @@ fn hostile_pdf_matches_the_redacted_end_to_end_transcript() {
         &transcript,
         include_str!("../../../tests/skill-forward/harness/healthy-hostile.json"),
     );
+}
+
+#[test]
+#[allow(deprecated)]
+fn only_copy_pdf_requires_confirmation_before_one_verified_retry() {
+    let transcript = Harness::new().run_backup_confirmation(
+        "only-copy-paper.pdf",
+        include_bytes!("../../../tests/fixtures/skill-forward/benign-paper.pdf"),
+    );
+    assert_golden(
+        &transcript,
+        include_str!("../../../tests/skill-forward/harness/backup-confirmation.json"),
+    );
+}
+
+#[test]
+fn platform_specific_paths_normalize_to_identical_logical_transcripts() {
+    let mut macos = platform_transcript(
+        "/private/tmp/run/home/Library/Application Support/mko/profiles.yaml",
+        "/private/tmp/run/repository",
+        "/private/tmp/run/drive/My-Knowledge-OS-Assets/personal/inbox",
+        "/private/tmp/run/repository/.knowledge-os/runtime/prepared/asset.json",
+        "assets/registry/asset.md",
+    );
+    let mut windows = platform_transcript(
+        r"C:\Users\Test\AppData\Roaming\mko\profiles.yaml",
+        r"C:\Knowledge\personal-kb",
+        r"G:\My Drive\My-Knowledge-OS-Assets\personal\inbox",
+        r"C:\Knowledge\personal-kb\.knowledge-os\runtime\prepared\asset.json",
+        r"assets\registry\asset.md",
+    );
+
+    normalize_transcript(&mut macos);
+    normalize_transcript(&mut windows);
+
+    assert_eq!(macos, windows);
+    let normalized = serde_json::to_string(&macos).unwrap();
+    assert!(normalized.contains("<PROFILE>"));
+    assert!(normalized.contains("<REPOSITORY>/.knowledge-os/runtime/prepared/asset.json"));
+    assert!(normalized.contains("assets/registry/asset.md"));
+    assert!(!normalized.contains("private/tmp"));
+    assert!(!normalized.contains("C:\\\\"));
 }
 
 struct Harness {
@@ -190,18 +232,86 @@ impl Harness {
             "prepared_bundle": prepared_bundle,
             "steps": steps,
         });
-        let canonical_repository = fs::canonicalize(&self.repository).unwrap();
-        let canonical_provider = fs::canonicalize(&self.provider).unwrap();
-        let canonical_root = fs::canonicalize(self._root.path()).unwrap();
-        let replacements = [
-            (canonical_repository.display().to_string(), "<REPOSITORY>"),
-            (canonical_provider.display().to_string(), "<PROVIDER>"),
-            (canonical_root.display().to_string(), "<TEMP>"),
-            (self.repository.display().to_string(), "<REPOSITORY>"),
-            (self.provider.display().to_string(), "<PROVIDER>"),
-            (self._root.path().display().to_string(), "<TEMP>"),
-        ];
-        redact_paths(&mut transcript, &replacements);
+        normalize_transcript(&mut transcript);
+        assert_no_machine_paths(&transcript);
+        transcript
+    }
+
+    fn run_backup_confirmation(&self, fixture_name: &str, fixture: &[u8]) -> Value {
+        let selected = self.provider.join(fixture_name);
+        fs::write(&selected, fixture).unwrap();
+
+        let doctor = self.run_json(["doctor", "--format", "json-v1"]);
+        let rejected =
+            self.run_json_failure(["add", selected.to_str().unwrap(), "--format", "json-v1"]);
+        assert_eq!(rejected["error"]["code"], "backup_confirmation_required");
+        let accepted = self.run_json([
+            "add",
+            selected.to_str().unwrap(),
+            "--verified-backup",
+            "--format",
+            "json-v1",
+        ]);
+
+        let mut transcript = json!({
+            "fixture": fixture_name,
+            "steps": [
+                step("mko doctor --format json-v1", doctor),
+                step(
+                    &format!("mko add \"<PROVIDER>/{fixture_name}\" --format json-v1"),
+                    rejected,
+                ),
+                {
+                    "boundary": "user_confirmation",
+                    "prompt": "Confirm a verified second copy exists",
+                    "result": "verified_second_copy_confirmed"
+                },
+                step(
+                    &format!(
+                        "mko add \"<PROVIDER>/{fixture_name}\" --verified-backup --format json-v1"
+                    ),
+                    accepted,
+                ),
+            ]
+        });
+        normalize_transcript(&mut transcript);
+        assert_no_machine_paths(&transcript);
+        let commands = transcript["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|step| step["command"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command.contains("--verified-backup"))
+                .count(),
+            1
+        );
+        let confirmation_index = transcript["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|step| step["boundary"] == "user_confirmation")
+            .unwrap();
+        let retry_index = transcript["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|step| {
+                step["command"]
+                    .as_str()
+                    .is_some_and(|command| command.contains("--verified-backup"))
+            })
+            .unwrap();
+        assert!(confirmation_index < retry_index);
+        assert!(
+            transcript["steps"].as_array().unwrap()[..confirmation_index]
+                .iter()
+                .filter_map(|step| step["command"].as_str())
+                .all(|command| !command.contains("--verified-backup"))
+        );
         transcript
     }
 
@@ -216,6 +326,20 @@ impl Harness {
             .stdout
             .clone();
         let typed: JsonV1Success = serde_json::from_slice(&output).unwrap();
+        serde_json::to_value(typed).unwrap()
+    }
+
+    fn run_json_failure<const N: usize>(&self, arguments: [&str; N]) -> Value {
+        let output = self
+            .command()
+            .args(arguments)
+            .assert()
+            .code(1)
+            .stderr("")
+            .get_output()
+            .stdout
+            .clone();
+        let typed: JsonV1Failure = serde_json::from_slice(&output).unwrap();
         serde_json::to_value(typed).unwrap()
     }
 }
@@ -236,24 +360,99 @@ fn assert_golden(actual: &Value, expected: &str) {
     );
 }
 
-fn redact_paths(value: &mut Value, replacements: &[(String, &str)]) {
-    match value {
-        Value::String(text) => {
-            for (path, replacement) in replacements {
-                *text = text.replace(path, replacement);
+fn platform_transcript(
+    profile: &str,
+    repository: &str,
+    provider: &str,
+    bundle: &str,
+    registry: &str,
+) -> Value {
+    json!({
+        "steps": [
+            {"result": {"command": "doctor", "data": {"checks": [
+                {"code": "profile_valid", "path": profile},
+                {"code": "repository_access", "path": repository},
+                {"code": "provider_inbox", "path": provider}
+            ]}}},
+            {"result": {"command": "add", "data": {
+                "repository": repository,
+                "registry_path": registry
+            }}},
+            {"result": {"command": "source.prepare", "data": {
+                "bundle_path": bundle
+            }}}
+        ]
+    })
+}
+
+fn normalize_transcript(transcript: &mut Value) {
+    let Some(steps) = transcript["steps"].as_array_mut() else {
+        return;
+    };
+    for step in steps {
+        let Some(command) = step["result"]["command"].as_str() else {
+            continue;
+        };
+        match command {
+            "doctor" => {
+                if let Some(checks) = step["result"]["data"]["checks"].as_array_mut() {
+                    for check in checks {
+                        let placeholder = match check["code"].as_str().unwrap_or_default() {
+                            "profile_valid" => Some("<PROFILE>"),
+                            code if code.starts_with("provider_") => Some("<PROVIDER>"),
+                            "repository_access" | "hook_managed" | "locks_clear" => {
+                                Some("<REPOSITORY>")
+                            }
+                            _ => None,
+                        };
+                        if check["path"].is_string() {
+                            check["path"] = placeholder.map_or(Value::Null, |value| value.into());
+                        }
+                    }
+                }
             }
-        }
-        Value::Array(values) => {
-            for value in values {
-                redact_paths(value, replacements);
+            "add" => {
+                if let Some(data) = step["result"]["data"].as_object_mut() {
+                    data.insert("repository".into(), "<REPOSITORY>".into());
+                    if let Some(registry_path) = data.get_mut("registry_path") {
+                        normalize_path_field(registry_path);
+                    }
+                }
             }
-        }
-        Value::Object(values) => {
-            for value in values.values_mut() {
-                redact_paths(value, replacements);
+            "source.prepare" => {
+                let path = step["result"]["data"]["bundle_path"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .replace('\\', "/");
+                let suffix = path
+                    .find("/.knowledge-os/")
+                    .map(|index| &path[index..])
+                    .unwrap_or("/.knowledge-os/runtime/prepared/asset.json");
+                step["result"]["data"]["bundle_path"] =
+                    Value::String(format!("<REPOSITORY>{suffix}"));
             }
+            "source.write_draft" => {
+                step["result"]["data"]["source_path"] = "<SOURCE_PATH>".into();
+                step["result"]["data"]["content_revision"] = "<CONTENT_REVISION>".into();
+            }
+            _ => {}
         }
-        _ => {}
+    }
+}
+
+fn normalize_path_field(value: &mut Value) {
+    if let Some(path) = value.as_str() {
+        *value = Value::String(path.replace('\\', "/"));
+    }
+}
+
+fn assert_no_machine_paths(transcript: &Value) {
+    let text = serde_json::to_string(transcript).unwrap();
+    for forbidden in ["/private/tmp", "/var/folders/", "C:\\\\", "AppData"] {
+        assert!(
+            !text.contains(forbidden),
+            "machine path leaked: {forbidden}"
+        );
     }
 }
 

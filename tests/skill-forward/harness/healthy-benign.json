@@ -46,7 +46,7 @@
             {
               "code": "profile_valid",
               "message": "machine profile schema is valid",
-              "path": "<TEMP>/home/Library/Application Support/mko/profiles.yaml",
+              "path": "<PROFILE>",
               "recovery": null,
               "status": "healthy"
             },

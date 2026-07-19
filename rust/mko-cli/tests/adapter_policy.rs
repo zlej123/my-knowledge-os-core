@@ -14,6 +14,16 @@ fn knowledge_os_skill_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../skills/codex/my-knowledge-os/SKILL.md")
 }
 
+fn forward_scenarios_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/skill-forward/my-knowledge-os-scenarios.md")
+}
+
+fn forward_rubric_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/skill-forward/my-knowledge-os-rubric.md")
+}
+
 fn executable_surfaces(markdown: &str) -> String {
     let mut output = String::new();
     let mut in_shell_block = false;
@@ -643,4 +653,38 @@ fn process_skill_provides_the_complete_flat_semantic_response_contract() {
         .unwrap_or_else(|error| panic!("semantic-response template must be valid JSON: {error}"));
     validate_semantic_response_shape(&template)
         .unwrap_or_else(|error| panic!("semantic-response template is invalid: {error}"));
+}
+
+#[test]
+fn knowledge_os_forward_test_is_sequential_and_covers_verified_backup_retry() {
+    let scenarios = std::fs::read_to_string(forward_scenarios_path()).unwrap();
+    let rubric = std::fs::read_to_string(forward_rubric_path()).unwrap();
+
+    for required in [
+        "one boundary at a time",
+        "only the result of the worker's previous action",
+        "Scenario 4: backup confirmation",
+    ] {
+        assert!(
+            scenarios.contains(required),
+            "forward scenarios are missing the anti-leakage rule: {required}"
+        );
+    }
+    for forbidden in ["Read that transcript", "matching transcript"] {
+        assert!(
+            !scenarios.contains(forbidden),
+            "forward scenarios leak future harness state: {forbidden}"
+        );
+    }
+    for required in [
+        "verified_backup_retry",
+        "mko add \"<PROVIDER>/only-copy-paper.pdf\" --verified-backup --format json-v1",
+        "exactly once",
+        "explicit confirmation",
+    ] {
+        assert!(
+            rubric.contains(required),
+            "forward rubric is missing backup evidence: {required}"
+        );
+    }
 }
