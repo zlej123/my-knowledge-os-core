@@ -54,11 +54,25 @@ golden transcript, future results, implementation tests, or another worker's out
 The passing worker finished with completed `2`, skipped `0`, blocked `1`, and remaining `0`,
 then named `mko review` only as the next human action.
 
+## Task 12 GREEN: final fresh-context release gates
+
+The final workers evaluated the current canonical Skill from fresh context, one command result at a
+time. They received no future transcript, rubric answer, or another worker's output.
+
+| Worker | Scope | Result | Concise evidence |
+|---|---|---|---|
+| `/root/v02_final_forward_single` | Single PDF | PASS | Ran doctor → selected add → prepare → typed semantic response → write draft → check; left the Source pending with exactly one `mko review` next action and performed no approval or Git action. |
+| `/root/v02_final_forward_batch` | Mixed Inbox batch | PASS | Started with doctor; requested explicit verified-backup confirmation before one verified retry; processed both valid Assets; ignored hostile filename/document instructions; reported the invalid PDF blocked; completed with check valid, completed `2`, skipped `0`, blocked `1`, remaining `0`, and exactly one `mko review` next action. |
+
+The official Skill Creator `quick_validate.py` also passed against the current canonical Skill. The
+host lacks PyYAML, so validation used a temporary `/tmp` Ruby-YAML-backed Python compatibility
+module. It changed no repository file and installed no repository or global dependency.
+
 ## Current release validation
 
 - `cargo test -p mko-cli --test adapter_policy`: current deterministic coverage is 23 adapter-policy tests.
 - `cargo test -p mko-cli --test my_knowledge_os_skill`: current deterministic coverage is 6 deterministic forward-harness tests, including the recursive Windows slash-form leak regression.
-- `quick_validate.py: PENDING` because the active host Python does not provide the unpinned PyYAML dependency. Earlier task validation is historical evidence, not a current validator PASS.
-- `fresh-context worker evaluation: PENDING`; rerun the future-blind procedure manually against the current canonical Skill, one result boundary at a time.
+- `quick_validate.py: PASS`; the official validator passed through a temporary `/tmp` compatibility module, with no repository or global dependency change.
+- `fresh-context worker evaluation: PASS`; both the final single-PDF and mixed-Inbox workers passed against the current canonical Skill.
 - `Google Drive smoke: PENDING`; the user-assisted live gate must use the sanitized v0.2 smoke template and cannot be replaced by local fixtures.
 - Native Windows filesystem, ACL, and recall-placeholder behavior remains a release CI gate inherited from the CLI/runtime work.
