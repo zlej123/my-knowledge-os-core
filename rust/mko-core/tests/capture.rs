@@ -10,6 +10,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use mko_core::{
+    context::{ContextSource, ResolvedPersonalContext, Scope},
     fingerprint::{asset_id, fingerprint_file},
     front_matter::parse_markdown,
     model::{AssetRecord, Fingerprint},
@@ -23,6 +24,30 @@ struct TestEnv {
     repository: PathBuf,
     provider: PathBuf,
     local_config: PathBuf,
+}
+
+#[test]
+fn resolved_profile_context_captures_without_local_config() {
+    let env = TestEnv::new();
+    let pdf = env.write_provider_file("profile/paper.pdf", b"%PDF-profile-context");
+    let context = ResolvedPersonalContext {
+        repository_root: env.repository.clone(),
+        provider_root: env.provider.clone(),
+        provider_type: "google-drive-stream".into(),
+        profile_name: "personal".into(),
+        scope: Scope::Personal,
+        source: ContextSource::Profile,
+    };
+
+    let result = capture_asset(
+        CaptureRequest::new(env.root.join("ignored-repository"), &pdf)
+            .with_resolved_context(context)
+            .with_captured_at(fixed_time()),
+    )
+    .unwrap();
+
+    assert_eq!(result.result, "created");
+    assert!(env.repository.join(result.registry_path).is_file());
 }
 
 impl TestEnv {

@@ -10,7 +10,8 @@ use unicode_normalization::UnicodeNormalization;
 use crate::{
     atomic::{AtomicWriteResult, write_new, write_replace},
     clock::{Clock, SystemClock},
-    config::load_capture_config,
+    config::{CaptureConfig, load_capture_config},
+    context::ResolvedPersonalContext,
     error::MkoError,
     fingerprint::{asset_id, fingerprint_open_file, validate_pdf_content},
     front_matter::{parse_markdown, render_markdown},
@@ -24,6 +25,7 @@ use crate::{
 pub struct CaptureRequest {
     repository_root: PathBuf,
     local_config_path: Option<PathBuf>,
+    resolved_context: Option<ResolvedPersonalContext>,
     file: PathBuf,
     title: Option<String>,
     domains: Vec<String>,
@@ -36,6 +38,7 @@ impl CaptureRequest {
         Self {
             repository_root: repository_root.as_ref().to_path_buf(),
             local_config_path: None,
+            resolved_context: None,
             file: file.as_ref().to_path_buf(),
             title: None,
             domains: Vec::new(),
@@ -46,6 +49,11 @@ impl CaptureRequest {
 
     pub fn with_local_config(mut self, path: impl AsRef<Path>) -> Self {
         self.local_config_path = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn with_resolved_context(mut self, context: ResolvedPersonalContext) -> Self {
+        self.resolved_context = Some(context);
         self
     }
 
@@ -367,10 +375,13 @@ where
         ));
     }
 
-    let config = load_capture_config(
-        &request.repository_root,
-        request.local_config_path.as_deref(),
-    )?;
+    let config = match request.resolved_context.as_ref() {
+        Some(context) => CaptureConfig::from_resolved_context(context)?,
+        None => load_capture_config(
+            &request.repository_root,
+            request.local_config_path.as_deref(),
+        )?,
+    };
     let provider_path = provider_path(&config.provider_root, &request.file)?;
     let extension_is_pdf = Path::new(&provider_path.logical_path)
         .extension()

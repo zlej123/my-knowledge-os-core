@@ -11,7 +11,8 @@ use cap_std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::load_capture_config,
+    config::{CaptureConfig, load_capture_config},
+    context::ResolvedPersonalContext,
     error::MkoError,
     fingerprint::{FileSnapshot, fingerprint_open_file, validate_pdf_content},
     lock::AssetLock,
@@ -34,6 +35,7 @@ static NEXT_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
 pub struct PrepareRequest {
     repository_root: PathBuf,
     local_config_path: Option<PathBuf>,
+    resolved_context: Option<ResolvedPersonalContext>,
     asset_id: String,
     output: PathBuf,
     clear_stale_lock: bool,
@@ -48,6 +50,7 @@ impl PrepareRequest {
         Self {
             repository_root: repository_root.as_ref().to_path_buf(),
             local_config_path: None,
+            resolved_context: None,
             asset_id: asset_id.into(),
             output: output.as_ref().to_path_buf(),
             clear_stale_lock: false,
@@ -56,6 +59,11 @@ impl PrepareRequest {
 
     pub fn with_local_config(mut self, path: impl AsRef<Path>) -> Self {
         self.local_config_path = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn with_resolved_context(mut self, context: ResolvedPersonalContext) -> Self {
+        self.resolved_context = Some(context);
         self
     }
 
@@ -177,14 +185,22 @@ pub fn prepare_source_with_extractor<F>(
 where
     F: FnOnce(File, &FileSnapshot) -> Result<Vec<String>, MkoError>,
 {
-    let config = load_capture_config(
-        &request.repository_root,
-        request.local_config_path.as_deref(),
-    )?;
+    let config = match request.resolved_context.as_ref() {
+        Some(context) => CaptureConfig::from_resolved_context(context)?,
+        None => load_capture_config(
+            &request.repository_root,
+            request.local_config_path.as_deref(),
+        )?,
+    };
+    let requested_repository_root = request
+        .resolved_context
+        .as_ref()
+        .map(|context| context.repository_root.as_path())
+        .unwrap_or(&request.repository_root);
     let source_id = source_id(&request.asset_id)?;
     let runtime = runtime_paths(
         &config.repository_root,
-        &request.repository_root,
+        requested_repository_root,
         &request.asset_id,
         &request.output,
     )?;

@@ -6,7 +6,10 @@ use std::{
 use serde::Deserialize;
 
 use crate::{
-    error::MkoError, path_policy::canonical_directory, safe_yaml::validate_yaml_input,
+    context::{ResolvedPersonalContext, Scope},
+    error::MkoError,
+    path_policy::canonical_directory,
+    safe_yaml::validate_yaml_input,
     version::KNOWLEDGE_CONTRACT_VERSION,
 };
 
@@ -39,6 +42,34 @@ pub struct CaptureConfig {
     pub repository_root: PathBuf,
     pub provider_root: PathBuf,
     pub provider_type: String,
+}
+
+impl CaptureConfig {
+    pub fn from_resolved_context(context: &ResolvedPersonalContext) -> Result<Self, MkoError> {
+        if context.scope != Scope::Personal || context.profile_name.trim().is_empty() {
+            return Err(MkoError::new(
+                "context_invalid",
+                "resolved context must name a Personal profile",
+            ));
+        }
+        let repository_root =
+            canonical_directory(&context.repository_root, "repository_root_invalid")?;
+        let provider_root = canonical_directory(&context.provider_root, "provider_root_invalid")?;
+        let knowledge = KnowledgeConfig::read(&repository_root)?;
+        if knowledge.scope != context.scope.as_str()
+            || knowledge.provider.r#type != context.provider_type
+        {
+            return Err(MkoError::new(
+                "context_invalid",
+                "resolved context does not match knowledge-os.yaml",
+            ));
+        }
+        Ok(Self {
+            repository_root,
+            provider_root,
+            provider_type: knowledge.provider.r#type,
+        })
+    }
 }
 
 impl KnowledgeConfig {

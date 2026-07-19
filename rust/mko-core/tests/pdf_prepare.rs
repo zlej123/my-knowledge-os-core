@@ -5,6 +5,7 @@ mod support;
 use std::{fs, path::PathBuf};
 
 use mko_core::{
+    context::{ContextSource, ResolvedPersonalContext, Scope},
     fingerprint::FileSnapshot,
     model::AssetStatus,
     pdf::extract_pdf_pages_from_reader,
@@ -20,6 +21,31 @@ fn extract_snapshot(
     _: &FileSnapshot,
 ) -> Result<Vec<String>, mko_core::error::MkoError> {
     extract_pdf_pages_from_reader(snapshot)
+}
+
+#[test]
+fn resolved_profile_context_prepares_without_local_config() {
+    let env = TestEnv::with_pdf(&["Profile context page"]);
+    let context = ResolvedPersonalContext {
+        repository_root: env.repository.clone(),
+        provider_root: env.provider.clone(),
+        provider_type: "google-drive-stream".into(),
+        profile_name: "personal".into(),
+        scope: Scope::Personal,
+        source: ContextSource::Profile,
+    };
+    let request = PrepareRequest::new(
+        env._root.path().join("ignored-repository"),
+        &env.asset_id,
+        env.output(),
+    )
+    .with_resolved_context(context);
+
+    let bundle = prepare_source_with_extractor(request, extract_snapshot).unwrap();
+
+    assert_eq!(bundle.asset_id, env.asset_id);
+    assert_eq!(bundle.pages.len(), 1);
+    assert!(bundle.pages[0].contains("Profile context page"));
 }
 
 struct TestEnv {
