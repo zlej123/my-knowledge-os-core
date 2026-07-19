@@ -8,6 +8,7 @@ pub mod check;
 pub mod clock;
 pub mod config;
 pub mod context;
+pub mod doctor;
 pub mod error;
 pub mod fingerprint;
 pub mod front_matter;

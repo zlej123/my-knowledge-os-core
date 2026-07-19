@@ -6,8 +6,10 @@ use std::{
 };
 
 use crate::{
+    clock::SystemClock,
     config::KnowledgeConfig,
     context::{ContextSource, PlatformEnvironment, ResolvedPersonalContext, Scope},
+    doctor::setup_checks_are_healthy,
     error::MkoError,
     hooks::{HookState, configured_hook_path, inspect_hook, install_hooks},
     path_policy::canonical_directory,
@@ -382,6 +384,21 @@ pub fn apply_setup(
 
     completed_steps.sort();
     changed_steps.sort();
+    if let Err(error) = setup_checks_are_healthy(
+        &preflight.context.repository_root,
+        &preflight.context.provider_root,
+        &SystemClock,
+    ) {
+        let step = match error.code() {
+            "provider_missing"
+            | "provider_unreadable"
+            | "provider_unwritable"
+            | "provider_hydration_failed" => SetupStep::Inbox,
+            "hook_missing" | "hook_conflict" | "hook_unreadable" => SetupStep::Hook,
+            _ => SetupStep::Profile,
+        };
+        return Ok(failed_outcome(step, error, completed_steps, changed_steps));
+    }
     Ok(SetupOutcome {
         completed_steps,
         changed_steps,

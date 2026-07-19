@@ -28,6 +28,50 @@ pub struct LockRecord {
     pub owner_token: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LockState {
+    Active,
+    Stale,
+    Unreadable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LockInspection {
+    pub path: PathBuf,
+    pub state: LockState,
+}
+
+pub fn inspect_locks(
+    repository_root: &Path,
+    clock: &dyn Clock,
+) -> Result<Vec<LockInspection>, MkoError> {
+    let directory = repository_root.join(".knowledge-os/runtime/locks");
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(MkoError::new("lock_read_failed", error.to_string())),
+    };
+    let mut inspections = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| MkoError::new("lock_read_failed", error.to_string()))?;
+        let path = entry.path();
+        if path.extension() != Some(std::ffi::OsStr::new("lock")) {
+            continue;
+        }
+        let state = match fs::read(&path)
+            .ok()
+            .and_then(|input| serde_json::from_slice::<LockRecord>(&input).ok())
+        {
+            Some(record) if record_is_stale(&record, clock)? => LockState::Stale,
+            Some(_) => LockState::Active,
+            None => LockState::Unreadable,
+        };
+        inspections.push(LockInspection { path, state });
+    }
+    inspections.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(inspections)
+}
+
 #[derive(Debug)]
 pub struct AssetLock {
     path: PathBuf,
@@ -285,7 +329,14 @@ fn stale_lock(path: &Path, expected_asset_id: &str, clock: &dyn Clock) -> Result
             "asset operation lock is unreadable; inspect it manually",
         )
     })?;
-    if record.asset_id != expected_asset_id || record.hostname != current_hostname()? {
+    if record.asset_id != expected_asset_id {
+        return Ok(false);
+    }
+    record_is_stale(&record, clock)
+}
+
+fn record_is_stale(record: &LockRecord, clock: &dyn Clock) -> Result<bool, MkoError> {
+    if record.hostname != current_hostname()? {
         return Ok(false);
     }
     let age = clock.now_utc().signed_duration_since(record.started_at);

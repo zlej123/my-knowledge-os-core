@@ -13,11 +13,12 @@ use mko_core::{
         ResolveContextRequest, ResolvedPersonalContext, SystemPlatformEnvironment,
         resolve_personal_context,
     },
+    doctor::{DoctorRequest, SystemDoctorEnvironment, diagnose},
     error::MkoError,
     hooks::install_hooks,
     json_v1::{
-        AddData, AddPayload, CheckData, DiagnosticData, DraftOutcome, JsonV1Command, JsonV1Success,
-        PrepareData, SuccessResult, WriteDraftData,
+        AddData, AddPayload, CheckData, DiagnosticData, DoctorCheckData, DoctorData, DraftOutcome,
+        JsonV1Command, JsonV1Success, PrepareData, Recovery, SuccessResult, WriteDraftData,
     },
     model::AssetStatus,
     pdf::{ExtractionWorkerResponse, extract_pdf_pages_from_reader, worker_executable},
@@ -226,6 +227,7 @@ enum Command {
         command: SourceCommand,
     },
     Check(CheckArgs),
+    Doctor(DoctorArgs),
     Human {
         #[command(subcommand)]
         command: HumanCommand,
@@ -321,6 +323,13 @@ struct CheckArgs {
     staged: bool,
     #[arg(long, value_enum)]
     format: Option<OutputFormat>,
+}
+#[derive(Args)]
+struct DoctorArgs {
+    #[arg(long)]
+    repo: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
 }
 #[derive(Args)]
 struct ApproveSourceArgs {
@@ -468,6 +477,7 @@ fn run(cli: Cli) -> Result<Exit, MkoError> {
             command: AssetCommand::RepairLineage(arguments),
         } => repair_asset_lineage(arguments).map(|_| Exit::Success),
         Command::Check(arguments) => check(arguments),
+        Command::Doctor(arguments) => doctor(arguments).map(|_| Exit::Success),
         Command::Source {
             command: SourceCommand::Prepare(arguments),
         } => prepare(arguments).map(|_| Exit::Success),
@@ -651,6 +661,59 @@ fn check(arguments: CheckArgs) -> Result<Exit, MkoError> {
     } else {
         Exit::ValidationFailed
     })
+}
+
+fn doctor(arguments: DoctorArgs) -> Result<(), MkoError> {
+    let request = match arguments.repo {
+        Some(repository) => DoctorRequest::new().with_repository(repository),
+        None => DoctorRequest::new(),
+    };
+    let environment = SystemDoctorEnvironment::default();
+    let report = diagnose(request, &environment);
+    if arguments.format == OutputFormat::JsonV1 {
+        emit_json_v1(JsonV1Success::Doctor {
+            schema_version: 1,
+            result: SuccessResult::Ok,
+            data: DoctorData {
+                healthy: report.healthy,
+                checks: report
+                    .checks
+                    .into_iter()
+                    .map(|check| DoctorCheckData {
+                        code: check.code,
+                        status: check.status,
+                        message: check.message,
+                        path: check.path.map(|path| path.display().to_string()),
+                        recovery: check.recovery.map(|kind| Recovery { kind }),
+                    })
+                    .collect(),
+                next_action: report.next_action,
+            },
+        })
+    } else {
+        emit_doctor_human(&report)
+    }
+}
+
+fn emit_doctor_human(report: &mko_core::doctor::DoctorReport) -> Result<(), MkoError> {
+    if report.healthy {
+        println!("설정과 연결 상태가 정상입니다.");
+        return Ok(());
+    }
+    let message = match report.next_action {
+        mko_core::json_v1::NextAction::Configure => {
+            "설정이 필요합니다. 프로필과 저장소 설정을 확인한 뒤 다시 시도하세요."
+        }
+        mko_core::json_v1::NextAction::Hydrate => {
+            "PDF를 아직 읽을 수 없습니다. 동기화가 끝난 뒤 파일을 한 번 열고 다시 시도하세요."
+        }
+        mko_core::json_v1::NextAction::Retry => {
+            "다른 작업이 진행 중입니다. 잠시 후 다시 시도하세요."
+        }
+        _ => "설정을 복구해야 합니다. 진단 결과를 확인한 뒤 다시 시도하세요.",
+    };
+    println!("{message}");
+    Ok(())
 }
 
 fn check_data(report: &CheckReport) -> CheckData {
@@ -955,6 +1018,10 @@ fn json_v1_command(cli: &Cli) -> Option<JsonV1Command> {
             format: Some(OutputFormat::JsonV1),
             ..
         }) => Some(JsonV1Command::Check),
+        Command::Doctor(DoctorArgs {
+            format: OutputFormat::JsonV1,
+            ..
+        }) => Some(JsonV1Command::Doctor),
         Command::Source {
             command:
                 SourceCommand::Prepare(PrepareArgs {
@@ -988,6 +1055,7 @@ fn json_v1_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option
     ) {
         ("add", _) => Some(JsonV1Command::Add),
         ("check", _) => Some(JsonV1Command::Check),
+        ("doctor", _) => Some(JsonV1Command::Doctor),
         ("source", Some("prepare")) => Some(JsonV1Command::SourcePrepare),
         ("source", Some("write-draft")) => Some(JsonV1Command::SourceWriteDraft),
         _ => None,
