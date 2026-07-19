@@ -21,5 +21,4 @@ pub mod safe_yaml;
 pub mod secret;
 pub mod source;
 pub mod state;
-
-pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub mod version;

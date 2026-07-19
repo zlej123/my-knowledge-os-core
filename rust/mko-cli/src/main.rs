@@ -18,7 +18,11 @@ use mko_core::{
 };
 
 #[derive(Parser)]
-#[command(name = "mko", version, about = "My Knowledge OS deterministic core")]
+#[command(
+    name = "mko",
+    version = mko_core::version::PRODUCT_VERSION,
+    about = "My Knowledge OS deterministic core"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

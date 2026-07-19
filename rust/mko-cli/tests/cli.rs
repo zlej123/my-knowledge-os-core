@@ -17,6 +17,17 @@ static NEXT_TEST_ENV: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 #[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
+fn version_reports_the_product_release() {
+    Command::cargo_bin("mko")
+        .unwrap()
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mko 0.2.0"));
+}
+
+#[test]
+#[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
 fn help_exposes_v01_command_groups() {
     Command::cargo_bin("mko")
         .unwrap()

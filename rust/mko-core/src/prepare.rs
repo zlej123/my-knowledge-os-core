@@ -11,7 +11,6 @@ use cap_std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CORE_VERSION,
     config::load_capture_config,
     error::MkoError,
     fingerprint::{FileSnapshot, fingerprint_open_file, validate_pdf_content},
@@ -22,6 +21,7 @@ use crate::{
         EXTRACTOR_NAME, EXTRACTOR_VERSION, extract_pdf_pages_in_child, validate_extracted_pages,
     },
     registry::{mark_asset_extracted, read_asset},
+    version::KNOWLEDGE_CONTRACT_VERSION,
 };
 
 pub const PROCESSOR_VERSION: &str = "source-v1";
@@ -148,7 +148,7 @@ fn validate_prepared_bundle_contract(
         || bundle.trust != TRUST
         || bundle.extractor.name != EXTRACTOR_NAME
         || bundle.extractor.version != EXTRACTOR_VERSION
-        || bundle.core_version != CORE_VERSION
+        || bundle.core_version != KNOWLEDGE_CONTRACT_VERSION
         || bundle.processor_version != PROCESSOR_VERSION
         || bundle.prompt_version != PROMPT_VERSION
     {
@@ -253,7 +253,7 @@ where
             name: EXTRACTOR_NAME.into(),
             version: EXTRACTOR_VERSION.into(),
         },
-        core_version: CORE_VERSION.into(),
+        core_version: KNOWLEDGE_CONTRACT_VERSION.into(),
         processor_version: PROCESSOR_VERSION.into(),
         prompt_version: PROMPT_VERSION.into(),
     };

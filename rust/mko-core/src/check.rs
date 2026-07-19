@@ -19,7 +19,6 @@ use serde::Serialize;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
-    CORE_VERSION,
     canonical_source::validate_canonical_source,
     error::MkoError,
     front_matter::parse_markdown,
@@ -31,6 +30,7 @@ use crate::{
     revision::calculate_source_revision,
     secret,
     state::validate_asset_state,
+    version::KNOWLEDGE_CONTRACT_VERSION,
 };
 
 const MAX_CHECK_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -349,7 +349,7 @@ fn validate_source(
         || !canonical_source_path(path, source)
         || source.generation.extractor_name != EXTRACTOR_NAME
         || source.generation.extractor_version != EXTRACTOR_VERSION
-        || source.generation.core_version != CORE_VERSION
+        || source.generation.core_version != KNOWLEDGE_CONTRACT_VERSION
         || source.generation.processor_version != PROCESSOR_VERSION
         || source.generation.prompt_version != PROMPT_VERSION
     {

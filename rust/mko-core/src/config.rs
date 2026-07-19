@@ -6,7 +6,8 @@ use std::{
 use serde::Deserialize;
 
 use crate::{
-    CORE_VERSION, error::MkoError, path_policy::canonical_directory, safe_yaml::validate_yaml_input,
+    error::MkoError, path_policy::canonical_directory, safe_yaml::validate_yaml_input,
+    version::KNOWLEDGE_CONTRACT_VERSION,
 };
 
 #[derive(Clone, Debug, Deserialize)]
@@ -52,7 +53,7 @@ impl KnowledgeConfig {
     fn validate(&self) -> Result<(), MkoError> {
         if self.system != "my-knowledge-os"
             || self.scope != "personal"
-            || self.core_version != CORE_VERSION
+            || self.core_version != KNOWLEDGE_CONTRACT_VERSION
             || self.schema_version != 1
             || self.provider.name.trim().is_empty()
             || self.provider.r#type != "google-drive-stream"
