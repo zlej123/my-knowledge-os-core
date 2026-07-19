@@ -258,6 +258,42 @@ fn batch_mutates_only_the_first_twenty_nfc_ordered_actionable_items() {
     assert_eq!(batch.items[0].provider_locator, "paper-00.pdf");
     assert_eq!(batch.items[19].provider_locator, "paper-19.pdf");
     assert_eq!(fixture.registry_count(), 20);
+
+    let AddRunResult::Batch(second) = add(
+        AddRequest::new(fixture.context(), AddInput::InboxScan)
+            .with_backup_attestation(BackupAttestation::UserVerified),
+        &FixedClock,
+        &FixedElapsed,
+    )
+    .unwrap() else {
+        panic!("expected batch")
+    };
+    assert_eq!(fixture.registry_count(), 21, "{second:#?}");
+    assert!(
+        second
+            .items
+            .iter()
+            .any(|item| item.provider_locator == "paper-20.pdf"),
+        "{second:#?}"
+    );
+
+    let AddRunResult::Batch(third) = add(
+        AddRequest::new(fixture.context(), AddInput::InboxScan)
+            .with_backup_attestation(BackupAttestation::UserVerified),
+        &FixedClock,
+        &FixedElapsed,
+    )
+    .unwrap() else {
+        panic!("expected batch")
+    };
+    assert_eq!(fixture.registry_count(), 21, "{third:#?}");
+    assert!(
+        third
+            .items
+            .iter()
+            .all(|item| item.next_action != NextAction::Add),
+        "{third:#?}"
+    );
 }
 
 #[test]
@@ -313,6 +349,63 @@ fn duplicate_pdf_bytes_converge_to_one_canonical_asset() {
 }
 
 #[test]
+fn decomposed_unicode_physical_path_keeps_a_normalized_logical_locator() {
+    use unicode_normalization::UnicodeNormalization;
+
+    let fixture = Fixture::new();
+    let physical_name = "cafe\u{301}.pdf";
+    let logical_name = physical_name.nfc().collect::<String>();
+    assert_ne!(physical_name.as_bytes(), logical_name.as_bytes());
+    fixture.pdf(physical_name, b"%PDF-1.7\nunicode path");
+
+    let AddRunResult::Batch(first) = add(
+        AddRequest::new(fixture.context(), AddInput::InboxScan)
+            .with_backup_attestation(BackupAttestation::UserVerified),
+        &FixedClock,
+        &FixedElapsed,
+    )
+    .unwrap() else {
+        panic!("expected batch")
+    };
+
+    assert_eq!(first.items[0].provider_locator, logical_name);
+    assert_eq!(
+        first.items[0].next_action,
+        NextAction::Prepare,
+        "{first:#?}"
+    );
+    assert!(fixture.provider.join(physical_name).is_file());
+    assert_eq!(fixture.registry_count(), 1);
+
+    let registry = fs::read_to_string(
+        fs::read_dir(fixture.repository.join("assets/registry"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path(),
+    )
+    .unwrap();
+    assert!(registry.contains(&logical_name), "{registry}");
+
+    let AddRunResult::Batch(second) = add(
+        AddRequest::new(fixture.context(), AddInput::InboxScan)
+            .with_backup_attestation(BackupAttestation::UserVerified),
+        &FixedClock,
+        &FixedElapsed,
+    )
+    .unwrap() else {
+        panic!("expected batch")
+    };
+    assert_eq!(
+        second.items[0].next_action,
+        NextAction::Prepare,
+        "{second:#?}"
+    );
+    assert_eq!(second.items[0].add_outcome, Some(AddOutcome::Existing));
+}
+
+#[test]
 fn same_size_replacement_after_discovery_is_rejected_without_registration() {
     let fixture = Fixture::new();
     let path = fixture.provider.join("paper.pdf");
@@ -335,7 +428,16 @@ fn same_size_replacement_after_discovery_is_rejected_without_registration() {
         batch.items[0].error.as_ref().unwrap().code,
         "fingerprint_changed"
     );
-    assert_eq!(batch.items[0].error.as_ref().unwrap().recovery, None);
+    assert_eq!(
+        batch.items[0].error.as_ref().unwrap().message,
+        "The inbox PDF changed during processing; retry the scan."
+    );
+    assert_eq!(
+        batch.items[0].error.as_ref().unwrap().recovery,
+        Some(mko_core::json_v1::Recovery {
+            kind: mko_core::json_v1::RecoveryKind::Retry,
+        })
+    );
     assert_eq!(fixture.registry_count(), 0);
 }
 
@@ -355,7 +457,23 @@ fn deletion_after_discovery_is_rejected_without_registration() {
         panic!("expected batch")
     };
 
-    assert!(batch.items[0].error.is_some(), "{batch:#?}");
+    let error = batch.items[0].error.as_ref().expect("stable item error");
+    assert_eq!(error.code, "file_unreadable");
+    assert_eq!(
+        error.message,
+        "The inbox PDF could not be reopened safely; retry after it is available."
+    );
+    assert_eq!(
+        error.recovery,
+        Some(mko_core::json_v1::Recovery {
+            kind: mko_core::json_v1::RecoveryKind::Retry,
+        })
+    );
+    assert!(
+        !error
+            .message
+            .contains(fixture.root.path().to_str().unwrap())
+    );
     assert_eq!(fixture.registry_count(), 0);
 }
 
@@ -381,7 +499,7 @@ fn partial_provider_scan_never_registers_new_items() {
 }
 
 #[test]
-fn bounded_selection_uses_nfc_locator_bytes_before_mutation() {
+fn bounded_selection_reserves_work_queue_capacity_before_nfc_fill() {
     let fixture = Fixture::new();
     fixture.pdf("z-existing.pdf", b"%PDF-1.7\nexisting");
     add(
@@ -413,14 +531,23 @@ fn bounded_selection_uses_nfc_locator_bytes_before_mutation() {
 
     assert_eq!(batch.items.len(), 20);
     assert_eq!(batch.remaining, 1);
+    assert_eq!(
+        batch
+            .items
+            .iter()
+            .filter(|item| item.provider_locator.starts_with("a-new-"))
+            .count(),
+        19,
+        "{batch:#?}"
+    );
     assert!(
         batch
             .items
             .iter()
-            .all(|item| item.provider_locator.starts_with("a-new-")),
+            .any(|item| item.provider_locator == "z-existing.pdf"),
         "{batch:#?}"
     );
-    assert_eq!(fixture.registry_count(), 21);
+    assert_eq!(fixture.registry_count(), 20);
 }
 
 #[test]

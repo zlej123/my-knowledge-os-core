@@ -124,7 +124,7 @@
               "asset_id": null,
               "error": {
                 "code": "invalid_pdf",
-                "message": "file does not have a PDF signature",
+                "message": "The PDF could not be validated.",
                 "recovery": {
                   "kind": "repair"
                 }
@@ -173,7 +173,7 @@
               "asset_id": null,
               "error": {
                 "code": "invalid_pdf",
-                "message": "file does not have a PDF signature",
+                "message": "The PDF could not be validated.",
                 "recovery": {
                   "kind": "repair"
                 }

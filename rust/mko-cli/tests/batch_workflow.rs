@@ -115,6 +115,26 @@ fn add_inbox_emits_the_strict_batch_shape_and_persists_successes() {
         .unwrap()
         .validate(&value)
         .unwrap();
+
+    let broken = value["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["provider_locator"] == "broken.pdf")
+        .expect("live invalid PDF item");
+    assert_eq!(
+        broken["error"],
+        serde_json::json!({
+            "code": "invalid_pdf",
+            "message": "The PDF could not be validated.",
+            "recovery": { "kind": "repair" }
+        })
+    );
+    assert!(
+        !output
+            .windows(env.root.as_os_str().len())
+            .any(|window| { window == env.root.as_os_str().as_encoded_bytes() })
+    );
 }
 
 #[test]
@@ -144,6 +164,43 @@ fn add_inbox_configuration_failure_matches_the_frozen_error() {
     .unwrap();
     assert_eq!(actual, expected);
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[allow(deprecated)]
+fn add_inbox_provider_scan_failure_is_stable_and_redacted() {
+    let env = Env::new();
+    fs::remove_dir(&env.provider).unwrap();
+
+    let output = env
+        .command()
+        .args(["add", "--inbox", "--format", "json-v1"])
+        .assert()
+        .code(1)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let actual: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(
+        actual,
+        serde_json::json!({
+            "schema_version": 1,
+            "command": "add",
+            "result": "error",
+            "error": {
+                "code": "inbox_unavailable",
+                "message": "The inbox could not be scanned.",
+                "recovery": { "kind": "configure" }
+            }
+        })
+    );
+    assert!(
+        !String::from_utf8(output)
+            .unwrap()
+            .contains(env.root.to_str().unwrap())
+    );
 }
 
 struct Env {

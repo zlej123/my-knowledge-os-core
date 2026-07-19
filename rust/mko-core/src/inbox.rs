@@ -71,12 +71,14 @@ pub struct InboxScanResult {
 pub(crate) struct DiscoveredPdfSnapshot {
     pub fingerprint: Fingerprint,
     pub size_bytes: u64,
+    pub physical_relative_path: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct InboxAddScan {
     pub report: InboxScanResult,
     pub snapshots: HashMap<String, DiscoveredPdfSnapshot>,
+    pub mutation_safe: bool,
 }
 
 type SourceScanResult = (
@@ -142,6 +144,7 @@ fn scan_inbox_internal(
                 DiscoveredPdfSnapshot {
                     fingerprint: pdf.fingerprint.clone(),
                     size_bytes: pdf.size_bytes,
+                    physical_relative_path: pdf.relative_path.clone(),
                 },
             )),
             ProviderCatalogEntry::Placeholder { .. } => None,
@@ -149,12 +152,15 @@ fn scan_inbox_internal(
         .collect();
     let mut warnings = scan.warnings.iter().map(scan_warning).collect::<Vec<_>>();
     let mut scan_complete = scan.scan_complete;
+    let mut mutation_safe = scan.mutation_safe;
     let (assets, mut errors, repository_complete) = read_assets(&repository_root, request.limits)?;
     scan_complete &= repository_complete;
+    mutation_safe &= repository_complete;
     let (sources, source_errors, sources_complete) =
         read_sources(&repository_root, &assets, request.limits)?;
     errors.extend(source_errors);
     scan_complete &= sources_complete;
+    mutation_safe &= sources_complete;
     if !repository_complete || !sources_complete {
         warnings.push(DiagnosticData {
             code: "repository_scan_limit_reached".into(),
@@ -165,6 +171,7 @@ fn scan_inbox_internal(
 
     let lock_scan = read_lock_asset_ids(&repository_root, request.limits.max_entries, &deadline);
     scan_complete &= lock_scan.complete;
+    mutation_safe &= lock_scan.complete;
     if let Some(warning) = lock_scan.warning.clone() {
         warnings.push(warning);
     }
@@ -296,6 +303,7 @@ fn scan_inbox_internal(
     errors.dedup();
     let (primary_blocker, recommended_action) =
         select_status_decision(scan_complete, &catalog, &errors, &warnings);
+    mutation_safe &= errors.is_empty();
     Ok(InboxAddScan {
         report: InboxScanResult {
             scan_complete,
@@ -309,6 +317,7 @@ fn scan_inbox_internal(
             recommended_action,
         },
         snapshots,
+        mutation_safe,
     })
 }
 

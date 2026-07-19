@@ -225,6 +225,7 @@ pub(crate) enum ProviderCatalogEntry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProviderCatalogScan {
     pub scan_complete: bool,
+    pub mutation_safe: bool,
     pub entries: Vec<ProviderCatalogEntry>,
     pub warnings: Vec<ProviderScanWarning>,
 }
@@ -320,8 +321,12 @@ fn scan_provider_catalog_metadata_first_inner(
             .cmp(&right.code)
             .then(left.provider_locator.cmp(&right.provider_locator))
     });
+    let mutation_safe = warnings
+        .iter()
+        .all(|warning| matches!(warning.code.as_str(), "invalid_pdf" | "pdf_too_large"));
     Ok(ProviderCatalogScan {
         scan_complete: warnings.is_empty(),
+        mutation_safe,
         entries,
         warnings,
     })
@@ -1541,9 +1546,45 @@ mod metadata_walk_tests {
 
     fn assert_identity_race_warning(scan: &super::ProviderCatalogScan) {
         assert!(!scan.scan_complete);
+        assert!(!scan.mutation_safe);
         assert!(scan.entries.is_empty());
         assert_eq!(scan.warnings.len(), 1);
         assert_eq!(scan.warnings[0].code, "scan_file_unreadable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_identity_race_marks_an_otherwise_readable_catalog_mutation_unsafe() {
+        let root = tempfile::tempdir().unwrap();
+        let safe = root.path().join("a-safe.pdf");
+        let raced = root.path().join("z-raced.pdf");
+        fs::write(&safe, b"%PDF-1.7\nsafe\n%%EOF\n").unwrap();
+        fs::write(&raced, b"%PDF-1.7\noriginal\n%%EOF\n").unwrap();
+        let mut replaced = false;
+
+        let scan = scan_provider_catalog_metadata_first_with_before_file_open(
+            ProviderScanRequest::new(root.path()),
+            &FixedElapsedClock,
+            &mut |relative| {
+                if relative == Path::new("z-raced.pdf") && !replaced {
+                    replaced = true;
+                    fs::rename(&raced, root.path().join("z-raced-original.pdf")).unwrap();
+                    fs::write(&raced, b"%PDF-1.7\nchanged!\n%%EOF\n").unwrap();
+                }
+            },
+        )
+        .unwrap();
+
+        assert!(replaced);
+        assert!(!scan.scan_complete);
+        assert!(!scan.mutation_safe);
+        assert!(scan.entries.iter().any(|entry| {
+            matches!(entry, ProviderCatalogEntry::Readable(pdf) if pdf.provider_locator == "a-safe.pdf")
+        }));
+        assert!(scan.warnings.iter().any(|warning| {
+            warning.provider_locator.as_deref() == Some("z-raced.pdf")
+                && warning.code == "scan_file_unreadable"
+        }));
     }
 
     #[cfg(unix)]

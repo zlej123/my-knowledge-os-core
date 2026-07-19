@@ -527,13 +527,8 @@ fn run(cli: Cli) -> Result<Exit, MkoError> {
 
 fn add(arguments: AddArgs) -> Result<(), MkoError> {
     let context = resolve_context(None).map_err(|error| {
-        if arguments.inbox
-            && matches!(
-                error.code(),
-                "context_not_found" | "profile_missing" | "profile_invalid"
-            )
-        {
-            MkoError::new("inbox_unavailable", "The inbox could not be scanned.")
+        if arguments.inbox {
+            map_add_inbox_error(error)
         } else {
             error
         }
@@ -550,7 +545,14 @@ fn add(arguments: AddArgs) -> Result<(), MkoError> {
         } else {
             BackupAttestation::OutsideOriginalRetained
         });
-    let result = add_input(request, &SystemClock, &MonotonicElapsedClock::start())?;
+    let result =
+        add_input(request, &SystemClock, &MonotonicElapsedClock::start()).map_err(|error| {
+            if arguments.inbox {
+                map_add_inbox_error(error)
+            } else {
+                error
+            }
+        })?;
     match result {
         AddRunResult::Single(result) => {
             if arguments.format == OutputFormat::JsonV1 {
@@ -839,6 +841,32 @@ fn map_inbox_error(error: MkoError) -> MkoError {
         "provider_root_invalid" | "provider_scan_failed" | "repository_unreadable"
     ) {
         MkoError::new("inbox_unavailable", "The inbox could not be scanned.")
+    } else {
+        error
+    }
+}
+
+fn map_add_inbox_error(error: MkoError) -> MkoError {
+    if matches!(
+        error.code(),
+        "context_not_found"
+            | "profile_missing"
+            | "profile_invalid"
+            | "provider_root_invalid"
+            | "provider_inspection_failed"
+            | "provider_scan_failed"
+            | "repository_unreadable"
+            | "repository_root_invalid"
+    ) {
+        MkoError::new("inbox_unavailable", "The inbox could not be scanned.")
+    } else if matches!(
+        error.code(),
+        "scan_time_limit" | "scan_entry_limit" | "scan_byte_limit" | "scan_depth_limit"
+    ) {
+        MkoError::new(
+            "provider_scan_incomplete",
+            "The inbox scan was incomplete; retry after resolving its blockers.",
+        )
     } else {
         error
     }

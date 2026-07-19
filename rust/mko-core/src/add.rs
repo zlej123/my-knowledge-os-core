@@ -16,7 +16,7 @@ use crate::{
     context::ResolvedPersonalContext,
     error::MkoError,
     fingerprint::{FileSnapshot, asset_id, fingerprint_open_file, validate_pdf_content},
-    inbox::{InboxScanRequest, scan_inbox_for_add},
+    inbox::{InboxAddScan, InboxScanRequest, scan_inbox_for_add},
     json_v1::{
         AddOutcome, ImportOutcome, JsonV1Error, NextAction, Recovery, RecoveryKind, UserState,
     },
@@ -308,9 +308,16 @@ fn add_inbox(
         ),
         elapsed_clock,
     )?;
+    apply_inbox_scan(request, audit_clock, scan)
+}
+
+fn apply_inbox_scan(
+    request: AddRequest,
+    audit_clock: &dyn Clock,
+    scan: InboxAddScan,
+) -> Result<BatchAddResult, MkoError> {
+    let mutation_safe = scan.mutation_safe;
     let report = scan.report;
-    let unsafe_partial =
-        !report.errors.is_empty() || report.warnings.iter().any(structural_scan_diagnostic);
     let mut seeds = report
         .items
         .into_iter()
@@ -345,18 +352,15 @@ fn add_inbox(
             diagnostic: Some(diagnostic.clone()),
         });
     }
-    seeds.sort_by(|left, right| {
-        normalized_locator_bytes(&left.provider_locator)
-            .cmp(&normalized_locator_bytes(&right.provider_locator))
-    });
     let limit = usize::try_from(report.scan_limits.max_batch_items).unwrap_or(usize::MAX);
-    let extra = seeds.len().saturating_sub(limit) as u64;
-    seeds.truncate(limit);
+    let total_seed_count = seeds.len();
+    seeds = select_batch_seeds(seeds, limit);
+    let extra = total_seed_count.saturating_sub(seeds.len()) as u64;
 
     let mut items = Vec::new();
     for seed in seeds {
         let output_priority = batch_output_priority(&seed.next_action);
-        let result = if seed.next_action == NextAction::Add && !unsafe_partial {
+        let result = if seed.next_action == NextAction::Add && mutation_safe {
             let outcome = if request.backup_attestation != BackupAttestation::UserVerified {
                 Err(backup_confirmation_required())
             } else {
@@ -416,7 +420,7 @@ fn add_inbox(
         })
     });
     Ok(BatchAddResult {
-        scan_complete: report.scan_complete && !unsafe_partial && extra == 0,
+        scan_complete: report.scan_complete && mutation_safe && extra == 0,
         items: items.into_iter().map(|(_, item)| item).collect(),
         remaining: report.remaining.saturating_add(extra),
     })
@@ -430,14 +434,14 @@ fn capture_discovered_item(
 ) -> Result<(AddOutcome, String), MkoError> {
     validate_portable_relative_path(locator)?;
     let config = CaptureConfig::from_resolved_context(context)?;
-    let relative = PathBuf::from(locator);
-    let source = config.provider_root.join(&relative);
     let expected = expected.ok_or_else(|| {
         MkoError::new(
             "provider_scan_incomplete",
             "The discovered inbox item has no readable content snapshot.",
         )
     })?;
+    let relative = &expected.physical_relative_path;
+    let source = config.provider_root.join(relative);
     let mut retained = provider_path(&config.provider_root, &source)?.file;
     let actual = fingerprint_open_file(&mut retained)?;
     validate_pdf_content(&mut retained)?;
@@ -475,6 +479,41 @@ fn capture_discovered_item(
 
 fn normalized_locator_bytes(locator: &str) -> Vec<u8> {
     locator.nfc().collect::<String>().into_bytes()
+}
+
+fn select_batch_seeds(seeds: Vec<BatchItemSeed>, limit: usize) -> Vec<BatchItemSeed> {
+    let mut queues: [Vec<BatchItemSeed>; 4] = std::array::from_fn(|_| Vec::new());
+    for seed in seeds {
+        let queue = match seed.next_action {
+            NextAction::Add => 0,
+            NextAction::Prepare => 1,
+            NextAction::WriteDraft => 2,
+            _ => 3,
+        };
+        queues[queue].push(seed);
+    }
+    for queue in &mut queues {
+        queue.sort_by(|left, right| {
+            normalized_locator_bytes(&left.provider_locator)
+                .cmp(&normalized_locator_bytes(&right.provider_locator))
+        });
+    }
+
+    let mut selected = Vec::with_capacity(limit.min(queues.iter().map(Vec::len).sum()));
+    for queue in &mut queues[..3] {
+        if selected.len() == limit {
+            break;
+        }
+        if !queue.is_empty() {
+            selected.push(queue.remove(0));
+        }
+    }
+    for queue in &mut queues {
+        while selected.len() < limit && !queue.is_empty() {
+            selected.push(queue.remove(0));
+        }
+    }
+    selected
 }
 
 fn batch_output_priority(action: &NextAction) -> u8 {
@@ -517,22 +556,50 @@ fn batch_error_item(
 }
 
 fn json_error(error: &MkoError) -> JsonV1Error {
-    JsonV1Error {
-        code: error.code().into(),
-        message: if error.code() == "invalid_pdf" {
-            "The PDF could not be validated.".into()
-        } else {
-            error.message().into()
-        },
-        recovery: recovery_for_code(error.code()),
-    }
+    reviewed_batch_error(error.code())
 }
 
 fn json_error_from_diagnostic(diagnostic: crate::json_v1::DiagnosticData) -> JsonV1Error {
+    reviewed_batch_error(&diagnostic.code)
+}
+
+fn reviewed_batch_error(code: &str) -> JsonV1Error {
+    let message = match code {
+        "invalid_pdf" => "The PDF could not be validated.",
+        "pdf_too_large" => "The PDF exceeds the supported processing limit.",
+        "scan_file_unreadable" | "file_unreadable" => {
+            "The inbox PDF could not be reopened safely; retry after it is available."
+        }
+        "fingerprint_changed" => "The inbox PDF changed during processing; retry the scan.",
+        "provider_scan_incomplete" => {
+            "The inbox scan was incomplete; retry after resolving its blockers."
+        }
+        "backup_confirmation_required" => {
+            "confirm a verified second copy before registering an only-copy or temporary PDF"
+        }
+        "provider_missing" | "provider_hydration_failed" | "provider_not_hydrated" => {
+            "The inbox PDF is not locally readable; hydrate it and retry."
+        }
+        "lock_active"
+        | "lock_scan_incomplete"
+        | "provider_import_locked"
+        | "registry_locked"
+        | "lock_held" => {
+            "The inbox item is currently locked; retry after the other operation finishes."
+        }
+        "registry_provider_missing"
+        | "registry_provider_mismatch"
+        | "source_state_mismatch"
+        | "lineage_repair_needed"
+        | "repository_state_inconsistent" => {
+            "The inbox item conflicts with repository state and requires repair."
+        }
+        _ => "The inbox item could not be processed safely.",
+    };
     JsonV1Error {
-        recovery: recovery_for_code(&diagnostic.code),
-        code: diagnostic.code,
-        message: diagnostic.message,
+        code: code.into(),
+        message: message.into(),
+        recovery: recovery_for_code(code),
     }
 }
 
@@ -547,10 +614,12 @@ fn recovery_for_code(code: &str) -> Option<Recovery> {
         | "provider_scan_incomplete"
         | "provider_import_locked"
         | "registry_locked"
-        | "lock_held" => RecoveryKind::Retry,
+        | "lock_held"
+        | "fingerprint_changed"
+        | "file_unreadable"
+        | "scan_file_unreadable" => RecoveryKind::Retry,
         "invalid_pdf"
         | "pdf_too_large"
-        | "scan_file_unreadable"
         | "registry_provider_missing"
         | "registry_provider_mismatch"
         | "source_state_mismatch"
@@ -564,25 +633,12 @@ fn recovery_for_code(code: &str) -> Option<Recovery> {
 fn recovery_action_for_code(code: &str) -> NextAction {
     match code {
         "provider_missing" => NextAction::Hydrate,
-        "lock_active" | "lock_scan_incomplete" | "provider_scan_incomplete" => NextAction::Retry,
+        "lock_active"
+        | "lock_scan_incomplete"
+        | "provider_scan_incomplete"
+        | "scan_file_unreadable" => NextAction::Retry,
         _ => NextAction::Repair,
     }
-}
-
-fn structural_scan_diagnostic(diagnostic: &crate::json_v1::DiagnosticData) -> bool {
-    matches!(
-        diagnostic.code.as_str(),
-        "scan_limit_reached"
-            | "provider_inspection_failed"
-            | "scan_file_unreadable"
-            | "repository_scan_limit_reached"
-            | "lock_scan_incomplete"
-            | "repository_unreadable"
-            | "registry_invalid"
-            | "path_not_portable"
-            | "invalid_state_transition"
-            | "duplicate_conflict"
-    )
 }
 
 fn import_outside_pdf(
@@ -1292,6 +1348,102 @@ fn sync_directory(_path: &Path) -> Result<(), MkoError> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    struct TestClock;
+
+    impl Clock for TestClock {
+        fn now_utc(&self) -> chrono::DateTime<chrono::Utc> {
+            chrono::DateTime::UNIX_EPOCH
+        }
+    }
+
+    #[test]
+    fn mutation_unsafe_scan_globally_blocks_an_unaffected_new_item() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = root.path().join("repository");
+        let provider = root.path().join("provider");
+        fs::create_dir_all(repository.join("assets/registry")).unwrap();
+        fs::create_dir_all(&provider).unwrap();
+        fs::write(provider.join("safe.pdf"), b"%PDF-1.7\nsafe").unwrap();
+        let request = AddRequest::new(
+            ResolvedPersonalContext {
+                repository_root: repository.clone(),
+                provider_root: provider,
+                provider_type: "google-drive-stream".into(),
+                profile_name: "personal".into(),
+                scope: crate::context::Scope::Personal,
+                source: crate::context::ContextSource::Profile,
+            },
+            AddInput::InboxScan,
+        )
+        .with_backup_attestation(BackupAttestation::UserVerified);
+        let scan = InboxAddScan {
+            report: crate::inbox::InboxScanResult {
+                scan_complete: false,
+                scan_limits: DEFAULT_SCAN_LIMITS,
+                items: vec![crate::catalog::CatalogItem {
+                    provider_locator: "safe.pdf".into(),
+                    user_state: UserState::New,
+                    asset_id: None,
+                    next_action: NextAction::Add,
+                    diagnostic: None,
+                }],
+                errors: vec![],
+                warnings: vec![crate::json_v1::DiagnosticData {
+                    code: "fingerprint_changed".into(),
+                    message: "internal path details must not escape".into(),
+                    path: Some("raced.pdf".into()),
+                }],
+                remaining: 0,
+                state_counts: std::collections::BTreeMap::new(),
+                primary_blocker: None,
+                recommended_action: NextAction::Retry,
+            },
+            snapshots: std::collections::HashMap::new(),
+            mutation_safe: false,
+        };
+
+        let result = apply_inbox_scan(request, &TestClock, scan).unwrap();
+
+        assert!(!result.scan_complete);
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].provider_locator, "safe.pdf");
+        assert_eq!(result.items[0].next_action, NextAction::Retry);
+        assert_eq!(
+            result.items[0].error.as_ref().unwrap().code,
+            "provider_scan_incomplete"
+        );
+        assert_eq!(
+            fs::read_dir(repository.join("assets/registry"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn selector_reserves_one_seat_for_each_nonempty_work_queue() {
+        let seed = |locator: &str, next_action| BatchItemSeed {
+            provider_locator: locator.into(),
+            user_state: UserState::Registered,
+            next_action,
+            asset_id: None,
+            diagnostic: None,
+        };
+        let mut seeds = (0..20)
+            .map(|index| seed(&format!("review-{index:02}.pdf"), NextAction::Review))
+            .collect::<Vec<_>>();
+        seeds.push(seed("add.pdf", NextAction::Add));
+        seeds.push(seed("prepare.pdf", NextAction::Prepare));
+        seeds.push(seed("draft.pdf", NextAction::WriteDraft));
+
+        let selected = select_batch_seeds(seeds, 20);
+
+        for expected in [NextAction::Add, NextAction::Prepare, NextAction::WriteDraft] {
+            assert!(selected.iter().any(|seed| seed.next_action == expected));
+        }
+        assert_eq!(selected.len(), 20);
+    }
 
     #[test]
     fn retained_lock_open_rejects_a_path_swapped_to_a_symlink() {
