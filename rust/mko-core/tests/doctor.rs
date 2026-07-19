@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     collections::{BTreeMap, HashMap},
     ffi::{OsStr, OsString},
     fs,
@@ -11,7 +12,7 @@ use mko_core::{
     clock::Clock,
     context::{PlatformEnvironment, Scope},
     doctor::{
-        DoctorEnvironment, DoctorRequest, DoctorStatus, ProviderAccessInspection,
+        DiagnosticArea, DoctorEnvironment, DoctorRequest, DoctorStatus, ProviderAccessInspection,
         ProviderEntryInspection, ProviderEntryState, SystemDoctorEnvironment, diagnose,
     },
     hooks::install_hooks,
@@ -70,6 +71,9 @@ struct Fixture {
     readable: ProviderAccessInspection,
     writable: ProviderAccessInspection,
     provider_entries: Result<Vec<ProviderEntryInspection>, mko_core::error::MkoError>,
+    read_calls: Cell<u32>,
+    write_calls: Cell<u32>,
+    entry_calls: Cell<u32>,
 }
 
 impl DoctorEnvironment for Fixture {
@@ -82,10 +86,12 @@ impl DoctorEnvironment for Fixture {
     }
 
     fn inspect_provider_read_access(&self, _: &Path) -> ProviderAccessInspection {
+        self.read_calls.set(self.read_calls.get() + 1);
         self.readable.clone()
     }
 
     fn inspect_provider_write_access(&self, _: &Path) -> ProviderAccessInspection {
+        self.write_calls.set(self.write_calls.get() + 1);
         self.writable.clone()
     }
 
@@ -93,6 +99,7 @@ impl DoctorEnvironment for Fixture {
         &self,
         _: &Path,
     ) -> Result<Vec<ProviderEntryInspection>, mko_core::error::MkoError> {
+        self.entry_calls.set(self.entry_calls.get() + 1);
         self.provider_entries.clone()
     }
 }
@@ -134,6 +141,9 @@ impl Fixture {
             readable: ProviderAccessInspection::Allowed,
             writable: ProviderAccessInspection::Allowed,
             provider_entries: Ok(Vec::new()),
+            read_calls: Cell::new(0),
+            write_calls: Cell::new(0),
+            entry_calls: Cell::new(0),
         }
     }
 
@@ -286,6 +296,31 @@ fn account_root_is_not_accepted_as_the_personal_inbox() {
         DoctorStatus::Blocked
     );
     assert_eq!(report.next_action, NextAction::Configure);
+    assert_eq!(fixture.read_calls.get(), 0);
+    assert_eq!(fixture.write_calls.get(), 0);
+    assert_eq!(fixture.entry_calls.get(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_provider_root_is_rejected_without_access_or_entry_inspection() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new();
+    let outside = fixture.root.join("outside-provider");
+    fs::create_dir(&outside).unwrap();
+    fs::remove_dir(&fixture.provider).unwrap();
+    symlink(&outside, &fixture.provider).unwrap();
+
+    let report = fixture.report();
+
+    assert_eq!(
+        check(&report, "provider_root_invalid").status,
+        DoctorStatus::Blocked
+    );
+    assert_eq!(fixture.read_calls.get(), 0);
+    assert_eq!(fixture.write_calls.get(), 0);
+    assert_eq!(fixture.entry_calls.get(), 0);
 }
 
 #[test]
@@ -367,6 +402,7 @@ fn provider_access_and_entry_states_accumulate_without_short_circuiting() {
         "provider_pdf_unreadable",
     ] {
         assert_eq!(check(&report, code).status, DoctorStatus::Blocked, "{code}");
+        assert_eq!(check(&report, code).area, DiagnosticArea::Provider);
     }
     assert_eq!(report.next_action, NextAction::Repair);
     assert_eq!(primary_issue(&report).code, "provider_unreadable");
@@ -434,6 +470,51 @@ fn zero_byte_pdf_is_not_a_hydration_signal() {
 }
 
 #[test]
+fn system_provider_metadata_walk_excludes_hidden_and_temporary_entries() {
+    let fixture = Fixture::new();
+    let hidden = fixture.provider.join(".hidden");
+    fs::create_dir(&hidden).unwrap();
+    fs::write(hidden.join("secret.pdf"), b"hidden").unwrap();
+    fs::write(fixture.provider.join("~$temporary.pdf"), b"temporary").unwrap();
+    fs::write(fixture.provider.join("draft.pdf.partial"), b"partial").unwrap();
+    fs::write(fixture.provider.join("visible.pdf"), b"visible").unwrap();
+
+    let entries = SystemDoctorEnvironment::default()
+        .inspect_provider_entries(&fixture.provider)
+        .unwrap();
+    let names = entries
+        .iter()
+        .map(|entry| {
+            entry
+                .path
+                .strip_prefix(&fixture.provider)
+                .unwrap()
+                .to_path_buf()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(names, vec![PathBuf::from("visible.pdf")]);
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn unsupported_hydration_detection_is_explicit_and_nonblocking() {
+    let mut fixture = Fixture::new();
+    fixture.configure();
+    fs::write(fixture.provider.join("visible.pdf"), b"visible").unwrap();
+    fixture.provider_entries =
+        SystemDoctorEnvironment::default().inspect_provider_entries(&fixture.provider);
+
+    let report = fixture.report();
+
+    assert_eq!(
+        check(&report, "provider_hydration_unsupported").status,
+        DoctorStatus::Healthy
+    );
+    assert!(report.healthy);
+}
+
+#[test]
 fn crashed_takeover_lock_is_inspected_as_stale() {
     let fixture = Fixture::new();
     fixture.make_healthy();
@@ -460,6 +541,7 @@ fn active_and_stale_locks_share_the_central_health_and_priority_rules() {
 
     assert_eq!(check(&report, "lock_active").status, DoctorStatus::Warning);
     assert_eq!(check(&report, "stale_lock").status, DoctorStatus::Warning);
+    assert_eq!(check(&report, "stale_lock").area, DiagnosticArea::Lock);
     assert!(!report.healthy);
     assert_eq!(report.next_action, NextAction::Repair);
     assert_eq!(primary_issue(&report).code, "stale_lock");
@@ -533,6 +615,7 @@ fn snapshot_into(root: &Path, path: &Path, entries: &mut Vec<(PathBuf, Vec<u8>)>
     children.sort();
     for child in children {
         if child.file_name().is_some_and(|name| name == ".git") {
+            snapshot_selected_git_files(root, &child, entries);
             continue;
         }
         if child.is_dir() {
@@ -541,6 +624,22 @@ fn snapshot_into(root: &Path, path: &Path, entries: &mut Vec<(PathBuf, Vec<u8>)>
             entries.push((
                 child.strip_prefix(root).unwrap().to_path_buf(),
                 fs::read(&child).unwrap(),
+            ));
+        }
+    }
+}
+
+fn snapshot_selected_git_files(
+    root: &Path,
+    git_directory: &Path,
+    entries: &mut Vec<(PathBuf, Vec<u8>)>,
+) {
+    for relative in ["HEAD", "config", "index", "packed-refs"] {
+        let path = git_directory.join(relative);
+        if path.is_file() {
+            entries.push((
+                path.strip_prefix(root).unwrap().to_path_buf(),
+                fs::read(path).unwrap(),
             ));
         }
     }

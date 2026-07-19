@@ -9,7 +9,7 @@ use crate::{
     clock::SystemClock,
     config::KnowledgeConfig,
     context::{ContextSource, PlatformEnvironment, ResolvedPersonalContext, Scope},
-    doctor::setup_checks_are_healthy,
+    doctor::{DiagnosticArea, setup_checks_are_healthy},
     error::MkoError,
     hooks::{HookState, configured_hook_path, inspect_hook, install_hooks},
     path_policy::canonical_directory,
@@ -50,6 +50,7 @@ pub enum SetupStep {
     Inbox,
     Profile,
     Hook,
+    Runtime,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -384,19 +385,13 @@ pub fn apply_setup(
 
     completed_steps.sort();
     changed_steps.sort();
-    if let Err(error) = setup_checks_are_healthy(
+    if let Err(diagnostic) = setup_checks_are_healthy(
         &preflight.context.repository_root,
         &preflight.context.provider_root,
         &SystemClock,
     ) {
-        let step = match error.code() {
-            "provider_missing"
-            | "provider_unreadable"
-            | "provider_unwritable"
-            | "provider_hydration_failed" => SetupStep::Inbox,
-            "hook_missing" | "hook_conflict" | "hook_unreadable" => SetupStep::Hook,
-            _ => SetupStep::Profile,
-        };
+        let step = setup_step_for_diagnostic_area(diagnostic.area);
+        let error = MkoError::new(&diagnostic.code, &diagnostic.message);
         return Ok(failed_outcome(step, error, completed_steps, changed_steps));
     }
     Ok(SetupOutcome {
@@ -563,6 +558,21 @@ fn inspect_step_status(
                 changed: observation != preflight.hook_observation,
                 completed,
             })
+        }
+        SetupStep::Runtime => Err(MkoError::new(
+            "setup_step_invalid",
+            "runtime diagnostics are not a mutable setup step",
+        )),
+    }
+}
+
+fn setup_step_for_diagnostic_area(area: DiagnosticArea) -> SetupStep {
+    match area {
+        DiagnosticArea::Provider => SetupStep::Inbox,
+        DiagnosticArea::Hook => SetupStep::Hook,
+        DiagnosticArea::Lock => SetupStep::Runtime,
+        DiagnosticArea::Product | DiagnosticArea::Profile | DiagnosticArea::Repository => {
+            SetupStep::Profile
         }
     }
 }
@@ -1014,6 +1024,25 @@ mod windows_tests {
                 .unwrap_err()
                 .code(),
             "profile_permissions_invalid"
+        );
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_area_tests {
+    use crate::doctor::DiagnosticArea;
+
+    use super::{SetupStep, setup_step_for_diagnostic_area};
+
+    #[test]
+    fn provider_and_lock_diagnostics_map_to_honest_setup_steps() {
+        assert_eq!(
+            setup_step_for_diagnostic_area(DiagnosticArea::Provider),
+            SetupStep::Inbox
+        );
+        assert_eq!(
+            setup_step_for_diagnostic_area(DiagnosticArea::Lock),
+            SetupStep::Runtime
         );
     }
 }

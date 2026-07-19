@@ -909,7 +909,9 @@ fn setup_final_health_rejects_an_active_lock_like_doctor() {
     )
     .unwrap();
 
-    assert_eq!(rerun.failure.unwrap().code, "lock_active");
+    let failure = rerun.failure.unwrap();
+    assert_eq!(failure.code, "lock_active");
+    assert_eq!(failure.step, SetupStep::Runtime);
 }
 
 #[test]
@@ -930,7 +932,9 @@ fn setup_final_health_rejects_a_stale_takeover_lock_like_doctor() {
     )
     .unwrap();
 
-    assert_eq!(rerun.failure.unwrap().code, "stale_lock");
+    let failure = rerun.failure.unwrap();
+    assert_eq!(failure.code, "stale_lock");
+    assert_eq!(failure.step, SetupStep::Runtime);
 }
 
 struct FailingWriter {

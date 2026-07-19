@@ -111,6 +111,314 @@ pub struct ProviderScanResult {
     pub total_pdf_bytes: u64,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ProviderMetadataEntry {
+    pub relative_path: PathBuf,
+    pub platform_attributes: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProviderMetadataIssue {
+    pub relative_path: Option<PathBuf>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ProviderMetadataWalk {
+    pub entries: Vec<ProviderMetadataEntry>,
+    pub issues: Vec<ProviderMetadataIssue>,
+}
+
+pub(crate) fn inspect_provider_metadata(
+    provider_root: &Path,
+    limits: ScanLimits,
+) -> Result<ProviderMetadataWalk, MkoError> {
+    inspect_provider_metadata_with_observer(provider_root, limits, &mut |_| {})
+}
+
+fn inspect_provider_metadata_with_observer(
+    provider_root: &Path,
+    limits: ScanLimits,
+    observer: &mut dyn FnMut(&Path),
+) -> Result<ProviderMetadataWalk, MkoError> {
+    validate_limits(limits)?;
+    let root_metadata = std::fs::symlink_metadata(provider_root).map_err(|error| {
+        MkoError::new(
+            "provider_inspection_failed",
+            format!("cannot inspect provider root: {error}"),
+        )
+    })?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err(MkoError::new(
+            "provider_root_invalid",
+            "provider root must be a non-link directory",
+        ));
+    }
+    let root = open_root_directory_nofollow(provider_root).map_err(|error| {
+        MkoError::new(
+            "provider_inspection_failed",
+            format!("cannot open provider root: {error}"),
+        )
+    })?;
+    let mut state = MetadataWalkState {
+        limits,
+        started_at: Instant::now(),
+        entries_seen: 0,
+        total_pdf_bytes: 0,
+        stopped: false,
+        walk: ProviderMetadataWalk::default(),
+        observer,
+    };
+    walk_provider_metadata(&root, Path::new(""), 0, &mut state);
+    state
+        .walk
+        .entries
+        .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(state.walk)
+}
+
+struct MetadataWalkState<'a> {
+    limits: ScanLimits,
+    started_at: Instant,
+    entries_seen: u64,
+    total_pdf_bytes: u64,
+    stopped: bool,
+    walk: ProviderMetadataWalk,
+    observer: &'a mut dyn FnMut(&Path),
+}
+
+fn walk_provider_metadata(
+    directory: &Dir,
+    relative_directory: &Path,
+    depth: u64,
+    state: &mut MetadataWalkState<'_>,
+) {
+    if metadata_limit_reached(state) {
+        return;
+    }
+    let mut read_dir = match directory.entries() {
+        Ok(entries) => entries,
+        Err(error) => {
+            metadata_issue(
+                state,
+                Some(relative_directory.to_path_buf()),
+                format!("cannot read provider subtree: {error}"),
+            );
+            return;
+        }
+    };
+    let remaining = state.limits.max_entries.saturating_sub(state.entries_seen);
+    if remaining == 0 {
+        state.stopped = true;
+        metadata_issue(
+            state,
+            None,
+            "provider inspection reached the entry limit".into(),
+        );
+        return;
+    }
+    let mut entries = Vec::new();
+    let mut inspected = 0;
+    let mut exhausted = false;
+    while inspected < remaining {
+        if metadata_limit_reached(state) {
+            state.entries_seen = state.entries_seen.saturating_add(inspected);
+            return;
+        }
+        let Some(entry) = read_dir.next() else {
+            exhausted = true;
+            break;
+        };
+        inspected += 1;
+        match entry {
+            Ok(entry) => entries.push(entry),
+            Err(error) => metadata_issue(
+                state,
+                Some(relative_directory.to_path_buf()),
+                format!("cannot enumerate provider entry: {error}"),
+            ),
+        }
+    }
+    state.entries_seen = state.entries_seen.saturating_add(inspected);
+    if !exhausted {
+        state.stopped = true;
+        metadata_issue(
+            state,
+            None,
+            "provider inspection reached the entry limit before deterministic ordering was established"
+                .into(),
+        );
+        return;
+    }
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        if metadata_limit_reached(state) {
+            break;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            metadata_issue(
+                state,
+                Some(relative_directory.to_path_buf()),
+                "provider entry name is not valid UTF-8".into(),
+            );
+            continue;
+        };
+        if excluded_name(name) {
+            continue;
+        }
+        let relative = relative_directory.join(name);
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                metadata_issue(
+                    state,
+                    Some(relative),
+                    format!("cannot inspect provider entry type: {error}"),
+                );
+                continue;
+            }
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            if depth >= state.limits.max_depth {
+                metadata_issue(
+                    state,
+                    Some(relative),
+                    "provider inspection reached the depth limit".into(),
+                );
+                continue;
+            }
+            (state.observer)(&relative);
+            match open_directory_nofollow(&entry) {
+                Ok(child) => walk_provider_metadata(&child, &relative, depth + 1, state),
+                Err(error) => metadata_issue(
+                    state,
+                    Some(relative),
+                    format!("cannot open provider subtree without following links: {error}"),
+                ),
+            }
+            continue;
+        }
+        if !file_type.is_file() || !has_pdf_extension(name) {
+            continue;
+        }
+        (state.observer)(&relative);
+        let metadata = match directory.symlink_metadata(name) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                metadata_issue(
+                    state,
+                    Some(relative),
+                    format!("cannot inspect PDF metadata: {error}"),
+                );
+                continue;
+            }
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            metadata_issue(
+                state,
+                Some(relative),
+                "PDF candidate changed to a non-file or link".into(),
+            );
+            continue;
+        }
+        let next_total = match state.total_pdf_bytes.checked_add(metadata.len()) {
+            Some(total) => total,
+            None => {
+                state.stopped = true;
+                metadata_issue(state, None, "provider PDF byte count overflowed".into());
+                break;
+            }
+        };
+        if next_total > state.limits.max_total_bytes {
+            state.stopped = true;
+            metadata_issue(
+                state,
+                None,
+                "provider inspection reached the aggregate PDF byte limit".into(),
+            );
+            break;
+        }
+        state.total_pdf_bytes = next_total;
+        match platform_attributes(directory, name, &metadata) {
+            Ok(platform_attributes) => state.walk.entries.push(ProviderMetadataEntry {
+                relative_path: relative,
+                platform_attributes,
+            }),
+            Err(message) => metadata_issue(state, Some(relative), message),
+        }
+    }
+}
+
+fn metadata_limit_reached(state: &mut MetadataWalkState<'_>) -> bool {
+    if state.stopped {
+        return true;
+    }
+    if state.started_at.elapsed().as_millis() < u128::from(state.limits.max_elapsed_ms) {
+        return false;
+    }
+    state.stopped = true;
+    metadata_issue(
+        state,
+        None,
+        "provider inspection reached the time limit".into(),
+    );
+    true
+}
+
+fn metadata_issue(
+    state: &mut MetadataWalkState<'_>,
+    relative_path: Option<PathBuf>,
+    message: String,
+) {
+    state.walk.issues.push(ProviderMetadataIssue {
+        relative_path,
+        message,
+    });
+}
+
+fn open_root_directory_nofollow(path: &Path) -> std::io::Result<Dir> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_nofollow(&mut options, true);
+    let file = File::open_ambient_with(path, &options, ambient_authority())?;
+    let metadata = file.metadata()?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(std::io::Error::other("root is not a non-link directory"));
+    }
+    Ok(Dir::from_std_file(file.into_std()))
+}
+
+#[cfg(target_os = "macos")]
+fn platform_attributes(
+    directory: &Dir,
+    name: &str,
+    _: &cap_std::fs::Metadata,
+) -> Result<u32, String> {
+    use std::os::fd::AsFd;
+
+    use nix::{fcntl::AtFlags, sys::stat::fstatat};
+
+    fstatat(directory.as_fd(), name, AtFlags::AT_SYMLINK_NOFOLLOW)
+        .map(|metadata| metadata.st_flags)
+        .map_err(|error| format!("cannot inspect PDF platform metadata: {error}"))
+}
+
+#[cfg(windows)]
+fn platform_attributes(_: &Dir, _: &str, metadata: &cap_std::fs::Metadata) -> Result<u32, String> {
+    use cap_std::fs::MetadataExt;
+
+    Ok(metadata.file_attributes())
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn platform_attributes(_: &Dir, _: &str, _: &cap_std::fs::Metadata) -> Result<u32, String> {
+    Ok(0)
+}
+
 pub fn scan_provider_pdfs(
     request: ProviderScanRequest,
     elapsed_clock: &dyn ElapsedClock,
@@ -515,3 +823,67 @@ fn configure_nofollow(options: &mut OpenOptions, directory: bool) {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn configure_nofollow(_options: &mut OpenOptions, _directory: bool) {}
+
+#[cfg(all(test, unix))]
+mod metadata_walk_tests {
+    use std::{fs, os::unix::fs::symlink, path::Path};
+
+    use super::{DEFAULT_SCAN_LIMITS, ScanLimits, inspect_provider_metadata_with_observer};
+
+    #[test]
+    fn metadata_walk_does_not_follow_a_directory_swapped_to_a_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("child");
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir(&child).unwrap();
+        fs::write(child.join("inside.pdf"), b"inside").unwrap();
+        fs::write(outside.path().join("outside.pdf"), b"outside").unwrap();
+        let mut swapped = false;
+
+        let walk = inspect_provider_metadata_with_observer(
+            root.path(),
+            DEFAULT_SCAN_LIMITS,
+            &mut |relative: &Path| {
+                if relative == Path::new("child") && !swapped {
+                    fs::rename(&child, root.path().join("child-original")).unwrap();
+                    symlink(outside.path(), &child).unwrap();
+                    swapped = true;
+                }
+            },
+        )
+        .unwrap();
+
+        assert!(swapped);
+        assert!(
+            walk.entries
+                .iter()
+                .all(|entry| entry.relative_path != Path::new("child/outside.pdf"))
+        );
+        assert!(
+            walk.issues
+                .iter()
+                .any(|issue| issue.relative_path.as_deref() == Some(Path::new("child")))
+        );
+    }
+
+    #[test]
+    fn metadata_walk_enforces_the_shared_entry_bound_before_collecting_a_directory() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("a.pdf"), b"a").unwrap();
+        fs::write(root.path().join("b.pdf"), b"b").unwrap();
+        let limits = ScanLimits {
+            max_entries: 1,
+            ..DEFAULT_SCAN_LIMITS
+        };
+
+        let walk =
+            inspect_provider_metadata_with_observer(root.path(), limits, &mut |_| {}).unwrap();
+
+        assert!(walk.entries.is_empty());
+        assert!(
+            walk.issues
+                .iter()
+                .any(|issue| issue.message.contains("entry limit"))
+        );
+    }
+}

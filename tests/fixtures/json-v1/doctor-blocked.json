@@ -10,9 +10,6 @@
       {"code":"profile_unreadable","status":"blocked","message":"machine profile could not be read or validated","path":"<PROFILE>","recovery":{"kind":"configure"}},
       {"code":"repository_access","status":"healthy","message":"repository is compatible","path":"<REPOSITORY>","recovery":null},
       {"code":"provider_root_invalid","status":"blocked","message":"provider root must be the exact Personal Inbox","path":"<ACCOUNT_ROOT>","recovery":{"kind":"configure"}},
-      {"code":"provider_readable","status":"healthy","message":"Personal Inbox is readable by the current process","path":"<ACCOUNT_ROOT>","recovery":null},
-      {"code":"provider_writable","status":"healthy","message":"Personal Inbox is writable by the current process","path":"<ACCOUNT_ROOT>","recovery":null},
-      {"code":"provider_hydration","status":"healthy","message":"Personal PDF placeholder metadata is healthy","path":"<ACCOUNT_ROOT>","recovery":null},
       {"code":"hook_missing","status":"blocked","message":"managed Git hook is not installed","path":"<REPOSITORY>","recovery":{"kind":"repair"}},
       {"code":"locks_clear","status":"healthy","message":"no operation locks are present","path":"<REPOSITORY>","recovery":null}
     ],

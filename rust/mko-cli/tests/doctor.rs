@@ -65,6 +65,27 @@ fn healthy_and_blocked_json_match_normalized_full_goldens_and_schema() {
     );
 }
 
+#[test]
+fn path_normalization_only_changes_structural_check_paths() {
+    let windows_path = r#"C:\Users\A "quoted"\My-Knowledge-OS-Assets\personal\inbox"#;
+    let mut value = serde_json::json!({
+        "data": {
+            "checks": [{
+                "path": windows_path,
+                "message": format!("keep literal {windows_path}")
+            }]
+        }
+    });
+
+    normalize_check_paths(&mut value, &[(windows_path, "<PROVIDER>")]);
+
+    assert_eq!(value["data"]["checks"][0]["path"], "<PROVIDER>");
+    assert_eq!(
+        value["data"]["checks"][0]["message"],
+        format!("keep literal {windows_path}")
+    );
+}
+
 struct Fixture {
     root: PathBuf,
     repository: PathBuf,
@@ -200,24 +221,51 @@ fn assert_json_golden(fixture: &Fixture, output: &[u8], golden: &str) {
     }
 
     let normalized = normalize_paths(fixture, output);
-    let actual: Value = serde_json::from_str(&normalized).unwrap();
     let expected: Value = serde_json::from_str(golden).unwrap();
-    assert_eq!(actual, expected);
+    assert_eq!(normalized, expected);
 }
 
-fn normalize_paths(fixture: &Fixture, output: &[u8]) -> String {
-    let raw = String::from_utf8(output.to_vec()).unwrap();
+fn normalize_paths(fixture: &Fixture, output: &[u8]) -> Value {
+    let mut value: Value = serde_json::from_slice(output).unwrap();
     let repository = fs::canonicalize(&fixture.repository).unwrap();
-    raw.replace(
-        &fixture.profile_store().path().display().to_string(),
-        "<PROFILE>",
-    )
-    .replace(&repository.display().to_string(), "<REPOSITORY>")
-    .replace(&fixture.provider.display().to_string(), "<PROVIDER>")
-    .replace(
-        &fixture.account_root.display().to_string(),
-        "<ACCOUNT_ROOT>",
-    )
+    let profile = fixture.profile_store().path().display().to_string();
+    let repository = repository.display().to_string();
+    let provider = fixture.provider.display().to_string();
+    let account_root = fixture.account_root.display().to_string();
+    normalize_check_paths(
+        &mut value,
+        &[
+            (&profile, "<PROFILE>"),
+            (&repository, "<REPOSITORY>"),
+            (&provider, "<PROVIDER>"),
+            (&account_root, "<ACCOUNT_ROOT>"),
+        ],
+    );
+    value
+}
+
+fn normalize_check_paths(value: &mut Value, replacements: &[(&str, &str)]) {
+    let Some(checks) = value
+        .get_mut("data")
+        .and_then(|data| data.get_mut("checks"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for check in checks {
+        let Some(path) = check.get_mut("path") else {
+            continue;
+        };
+        let Some(path_text) = path.as_str() else {
+            continue;
+        };
+        if let Some((_, replacement)) = replacements
+            .iter()
+            .find(|(candidate, _)| *candidate == path_text)
+        {
+            *path = Value::String((*replacement).into());
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
