@@ -1264,6 +1264,7 @@ dependencies = [
  "hostname",
  "jsonschema",
  "lopdf",
+ "mko-windows-acl",
  "pdf-extract",
  "regex",
  "serde",
@@ -1273,6 +1274,13 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "unicode-normalization",
+]
+
+[[package]]
+name = "mko-windows-acl"
+version = "0.2.0"
+dependencies = [
+ "tempfile",
  "windows-sys 0.61.2",
 ]
 

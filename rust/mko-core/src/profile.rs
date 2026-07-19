@@ -253,317 +253,34 @@ fn validate_windows_acl_inspection(inspection: &WindowsAclInspection) -> Result<
 
 #[cfg(windows)]
 fn inspect_windows_acl(path: &Path) -> Result<WindowsAclInspection, MkoError> {
-    windows_acl::inspect_path(path)
+    mko_windows_acl::inspect_path(path)
+        .map(windows_acl_inspection)
+        .map_err(windows_acl_error)
 }
 
 #[cfg(windows)]
-mod windows_acl {
-    use std::{
-        ffi::c_void,
-        fs, iter,
-        mem::size_of,
-        os::windows::{
-            ffi::{OsStrExt, OsStringExt},
-            io::AsRawHandle,
-        },
-        path::Path,
-        ptr::{null, null_mut},
-        slice,
+fn windows_acl_inspection(inspection: mko_windows_acl::AclInspection) -> WindowsAclInspection {
+    WindowsAclInspection {
+        owner_is_current_user: inspection.owner_is_current_user,
+        dacl_is_protected: inspection.dacl_is_protected,
+        entries: inspection
+            .entries
+            .into_iter()
+            .map(|entry| WindowsAceInspection {
+                allows_current_user: entry.allows_current_user,
+                access_mask: entry.access_mask,
+            })
+            .collect(),
+    }
+}
+
+#[cfg(windows)]
+fn windows_acl_error(error: mko_windows_acl::Error) -> MkoError {
+    let error_code = match error.kind() {
+        mko_windows_acl::ErrorKind::Write => "profile_write_failed",
+        mko_windows_acl::ErrorKind::Permissions => "profile_permissions_invalid",
     };
-
-    use windows_sys::Win32::{
-        Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, LocalFree},
-        Security::{
-            Authorization::{
-                EXPLICIT_ACCESS_W, GRANT_ACCESS, GetExplicitEntriesFromAclW, GetNamedSecurityInfoW,
-                SE_FILE_OBJECT, SET_ACCESS, SetEntriesInAclW, SetNamedSecurityInfoW,
-                TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
-            },
-            CopySid, DACL_SECURITY_INFORMATION, EqualSid, GetLengthSid,
-            GetSecurityDescriptorControl, GetTokenInformation, OWNER_SECURITY_INFORMATION,
-            PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
-            SUB_CONTAINERS_AND_OBJECTS_INHERIT, TOKEN_QUERY, TOKEN_USER, TokenUser,
-        },
-        Storage::FileSystem::{FILE_NAME_NORMALIZED, GetFinalPathNameByHandleW, VOLUME_NAME_DOS},
-        System::Threading::{GetCurrentProcess, OpenProcessToken},
-    };
-
-    use super::{
-        MkoError, WINDOWS_FULL_CONTROL_MASK, WindowsAceInspection, WindowsAclInspection,
-        validate_windows_acl_inspection,
-    };
-
-    struct OwnedSid {
-        words: Vec<usize>,
-    }
-
-    impl OwnedSid {
-        fn current_user(error_code: &'static str) -> Result<Self, MkoError> {
-            let mut token: HANDLE = null_mut();
-            if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-                return Err(last_api_error(error_code, "open the current process token"));
-            }
-            let token = TokenHandle(token);
-            let mut required = 0;
-            unsafe {
-                GetTokenInformation(token.0, TokenUser, null_mut(), 0, &mut required);
-            }
-            if required == 0 {
-                return Err(last_api_error(error_code, "size the current user token"));
-            }
-            let word_count = (required as usize).div_ceil(size_of::<usize>());
-            let mut token_buffer = vec![0usize; word_count];
-            if unsafe {
-                GetTokenInformation(
-                    token.0,
-                    TokenUser,
-                    token_buffer.as_mut_ptr().cast(),
-                    required,
-                    &mut required,
-                )
-            } == 0
-            {
-                return Err(last_api_error(error_code, "read the current user token"));
-            }
-            let token_user = unsafe { &*token_buffer.as_ptr().cast::<TOKEN_USER>() };
-            let sid_length = unsafe { GetLengthSid(token_user.User.Sid) };
-            if sid_length == 0 {
-                return Err(last_api_error(error_code, "size the current user SID"));
-            }
-            let mut words = vec![0usize; (sid_length as usize).div_ceil(size_of::<usize>())];
-            if unsafe { CopySid(sid_length, words.as_mut_ptr().cast(), token_user.User.Sid) } == 0 {
-                return Err(last_api_error(error_code, "copy the current user SID"));
-            }
-            Ok(Self { words })
-        }
-
-        fn as_psid(&self) -> PSID {
-            self.words.as_ptr().cast_mut().cast()
-        }
-    }
-
-    struct TokenHandle(HANDLE);
-
-    impl Drop for TokenHandle {
-        fn drop(&mut self) {
-            unsafe {
-                CloseHandle(self.0);
-            }
-        }
-    }
-
-    struct LocalAllocation(*mut c_void);
-
-    impl Drop for LocalAllocation {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                unsafe {
-                    LocalFree(self.0);
-                }
-            }
-        }
-    }
-
-    pub(super) fn apply_to_path(path: &Path, inherit: bool) -> Result<(), MkoError> {
-        let user = OwnedSid::current_user("profile_write_failed")?;
-        let acl = owner_only_acl(&user, inherit)?;
-        let path_wide = wide_path(path, "profile_write_failed")?;
-        let status = unsafe {
-            SetNamedSecurityInfoW(
-                path_wide.as_ptr(),
-                SE_FILE_OBJECT,
-                OWNER_SECURITY_INFORMATION
-                    | DACL_SECURITY_INFORMATION
-                    | PROTECTED_DACL_SECURITY_INFORMATION,
-                user.as_psid(),
-                null_mut(),
-                acl.0.cast(),
-                null(),
-            )
-        };
-        win32_status(status, "profile_write_failed", "apply the owner-only ACL")
-    }
-
-    pub(super) fn apply_to_file(file: &fs::File) -> Result<(), MkoError> {
-        let path = final_path(file)?;
-        apply_to_path(&path, false)?;
-        validate_windows_acl_inspection(&inspect_path(&path)?)
-    }
-
-    pub(super) fn inspect_path(path: &Path) -> Result<WindowsAclInspection, MkoError> {
-        let path_wide = wide_path(path, "profile_permissions_invalid")?;
-        let mut owner: PSID = null_mut();
-        let mut dacl = null_mut();
-        let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
-        let status = unsafe {
-            GetNamedSecurityInfoW(
-                path_wide.as_ptr(),
-                SE_FILE_OBJECT,
-                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-                &mut owner,
-                null_mut(),
-                &mut dacl,
-                null_mut(),
-                &mut descriptor,
-            )
-        };
-        win32_status(
-            status,
-            "profile_permissions_invalid",
-            "read the machine profile ACL",
-        )?;
-        let descriptor_guard = LocalAllocation(descriptor);
-        inspect_descriptor(owner, dacl, descriptor_guard.0)
-    }
-
-    fn inspect_descriptor(
-        owner: PSID,
-        dacl: *mut windows_sys::Win32::Security::ACL,
-        descriptor: PSECURITY_DESCRIPTOR,
-    ) -> Result<WindowsAclInspection, MkoError> {
-        if owner.is_null() || dacl.is_null() || descriptor.is_null() {
-            return Err(permission_error(
-                "machine profile has a missing owner or DACL",
-            ));
-        }
-        let user = OwnedSid::current_user("profile_permissions_invalid")?;
-        let mut control = 0;
-        let mut revision = 0;
-        if unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) } == 0 {
-            return Err(last_api_error(
-                "profile_permissions_invalid",
-                "inspect machine profile ACL protection",
-            ));
-        }
-        let mut entry_count = 0;
-        let mut entries = null_mut();
-        let status = unsafe { GetExplicitEntriesFromAclW(dacl, &mut entry_count, &mut entries) };
-        win32_status(
-            status,
-            "profile_permissions_invalid",
-            "inspect machine profile ACL entries",
-        )?;
-        let entries_guard = LocalAllocation(entries.cast());
-        let entries = if entry_count == 0 {
-            Vec::new()
-        } else {
-            if entries.is_null() {
-                return Err(permission_error(
-                    "machine profile ACL entries could not be inspected",
-                ));
-            }
-            unsafe { slice::from_raw_parts(entries, entry_count as usize) }
-                .iter()
-                .map(|entry| WindowsAceInspection {
-                    allows_current_user: (entry.grfAccessMode == SET_ACCESS
-                        || entry.grfAccessMode == GRANT_ACCESS)
-                        && entry.Trustee.TrusteeForm == TRUSTEE_IS_SID
-                        && !entry.Trustee.ptstrName.is_null()
-                        && unsafe { EqualSid(entry.Trustee.ptstrName.cast(), user.as_psid()) } != 0,
-                    access_mask: entry.grfAccessPermissions,
-                })
-                .collect()
-        };
-        drop(entries_guard);
-
-        Ok(WindowsAclInspection {
-            owner_is_current_user: unsafe { EqualSid(owner, user.as_psid()) } != 0,
-            dacl_is_protected: control & SE_DACL_PROTECTED != 0,
-            entries,
-        })
-    }
-
-    fn final_path(file: &fs::File) -> Result<std::path::PathBuf, MkoError> {
-        let handle = file.as_raw_handle().cast();
-        let flags = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
-        let mut buffer = vec![0u16; 512];
-        loop {
-            let written = unsafe {
-                GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, flags)
-            };
-            if written == 0 {
-                return Err(last_api_error(
-                    "profile_write_failed",
-                    "resolve the temporary machine profile path",
-                ));
-            }
-            if (written as usize) < buffer.len() {
-                buffer.truncate(written as usize);
-                return Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(
-                    &buffer,
-                )));
-            }
-            buffer.resize(written as usize, 0);
-        }
-    }
-
-    fn owner_only_acl(user: &OwnedSid, inherit: bool) -> Result<LocalAllocation, MkoError> {
-        let entry = EXPLICIT_ACCESS_W {
-            grfAccessPermissions: WINDOWS_FULL_CONTROL_MASK,
-            grfAccessMode: SET_ACCESS,
-            grfInheritance: if inherit {
-                SUB_CONTAINERS_AND_OBJECTS_INHERIT
-            } else {
-                0
-            },
-            Trustee: TRUSTEE_W {
-                pMultipleTrustee: null_mut(),
-                MultipleTrusteeOperation: 0,
-                TrusteeForm: TRUSTEE_IS_SID,
-                TrusteeType: TRUSTEE_IS_USER,
-                ptstrName: user.as_psid().cast(),
-            },
-        };
-        let mut acl = null_mut();
-        let status = unsafe { SetEntriesInAclW(1, &entry, null(), &mut acl) };
-        win32_status(status, "profile_write_failed", "build the owner-only ACL")?;
-        if acl.is_null() {
-            return Err(MkoError::new(
-                "profile_write_failed",
-                "cannot build the owner-only ACL: Windows returned no ACL",
-            ));
-        }
-        Ok(LocalAllocation(acl.cast()))
-    }
-
-    fn wide_path(path: &Path, error_code: &'static str) -> Result<Vec<u16>, MkoError> {
-        let path_wide: Vec<u16> = path
-            .as_os_str()
-            .encode_wide()
-            .chain(iter::once(0))
-            .collect();
-        if path_wide[..path_wide.len() - 1].contains(&0) {
-            return Err(MkoError::new(
-                error_code,
-                "machine profile path contains an embedded NUL",
-            ));
-        }
-        Ok(path_wide)
-    }
-
-    fn win32_status(status: u32, error_code: &'static str, action: &str) -> Result<(), MkoError> {
-        if status == ERROR_SUCCESS {
-            return Ok(());
-        }
-        Err(MkoError::new(
-            error_code,
-            format!(
-                "cannot {action}: {}",
-                std::io::Error::from_raw_os_error(status as i32)
-            ),
-        ))
-    }
-
-    fn last_api_error(error_code: &'static str, action: &str) -> MkoError {
-        MkoError::new(
-            error_code,
-            format!("cannot {action}: {}", std::io::Error::last_os_error()),
-        )
-    }
-
-    fn permission_error(message: &str) -> MkoError {
-        MkoError::new("profile_permissions_invalid", message)
-    }
+    MkoError::new(error_code, error.to_string())
 }
 
 #[cfg(unix)]
@@ -576,7 +293,11 @@ fn set_owner_private_directory(path: &Path) -> Result<(), MkoError> {
 
 #[cfg(windows)]
 fn set_owner_private_directory(path: &Path) -> Result<(), MkoError> {
-    windows_acl::apply_to_path(path, true)?;
+    mko_windows_acl::apply_owner_only_to_path(
+        path,
+        mko_windows_acl::Inheritance::ContainersAndObjects,
+    )
+    .map_err(windows_acl_error)?;
     validate_windows_acl_inspection(&inspect_windows_acl(path)?)
 }
 
@@ -605,7 +326,8 @@ fn set_owner_private_file(file: &fs::File) -> Result<(), MkoError> {
 
 #[cfg(windows)]
 fn set_owner_private_file(file: &fs::File) -> Result<(), MkoError> {
-    windows_acl::apply_to_file(file)
+    let inspection = mko_windows_acl::apply_owner_only_to_file(file).map_err(windows_acl_error)?;
+    validate_windows_acl_inspection(&windows_acl_inspection(inspection))
 }
 
 #[cfg(not(any(unix, windows)))]
