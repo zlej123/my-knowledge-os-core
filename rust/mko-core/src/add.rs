@@ -482,38 +482,34 @@ fn normalized_locator_bytes(locator: &str) -> Vec<u8> {
 }
 
 fn select_batch_seeds(seeds: Vec<BatchItemSeed>, limit: usize) -> Vec<BatchItemSeed> {
-    let mut queues: [Vec<BatchItemSeed>; 4] = std::array::from_fn(|_| Vec::new());
+    let mut executable = Vec::new();
+    let mut display_only = Vec::new();
     for seed in seeds {
-        let queue = match seed.next_action {
-            NextAction::Add => 0,
-            NextAction::Prepare => 1,
-            NextAction::WriteDraft => 2,
-            _ => 3,
-        };
-        queues[queue].push(seed);
+        if matches!(
+            seed.next_action,
+            NextAction::Add | NextAction::Prepare | NextAction::WriteDraft
+        ) {
+            executable.push(seed);
+        } else {
+            display_only.push(seed);
+        }
     }
-    for queue in &mut queues {
-        queue.sort_by(|left, right| {
+    for group in [&mut executable, &mut display_only] {
+        group.sort_by(|left, right| {
             normalized_locator_bytes(&left.provider_locator)
                 .cmp(&normalized_locator_bytes(&right.provider_locator))
         });
     }
 
-    let mut selected = Vec::with_capacity(limit.min(queues.iter().map(Vec::len).sum()));
-    for queue in &mut queues[..3] {
-        if selected.len() == limit {
-            break;
-        }
-        if !queue.is_empty() {
-            selected.push(queue.remove(0));
-        }
-    }
-    for queue in &mut queues {
-        while selected.len() < limit && !queue.is_empty() {
-            selected.push(queue.remove(0));
-        }
-    }
-    selected
+    executable.truncate(limit);
+    let display_slots = limit.saturating_sub(executable.len());
+    display_only.truncate(display_slots);
+    executable.extend(display_only);
+    executable.sort_by(|left, right| {
+        normalized_locator_bytes(&left.provider_locator)
+            .cmp(&normalized_locator_bytes(&right.provider_locator))
+    });
+    executable
 }
 
 fn batch_output_priority(action: &NextAction) -> u8 {
@@ -1422,7 +1418,7 @@ mod tests {
     }
 
     #[test]
-    fn selector_reserves_one_seat_for_each_nonempty_work_queue() {
+    fn selector_uses_global_nfc_order_across_executable_actions() {
         let seed = |locator: &str, next_action| BatchItemSeed {
             provider_locator: locator.into(),
             user_state: UserState::Registered,
@@ -1431,18 +1427,48 @@ mod tests {
             diagnostic: None,
         };
         let mut seeds = (0..20)
-            .map(|index| seed(&format!("review-{index:02}.pdf"), NextAction::Review))
+            .map(|index| seed(&format!("a-add-{index:02}.pdf"), NextAction::Add))
             .collect::<Vec<_>>();
-        seeds.push(seed("add.pdf", NextAction::Add));
-        seeds.push(seed("prepare.pdf", NextAction::Prepare));
-        seeds.push(seed("draft.pdf", NextAction::WriteDraft));
+        seeds.push(seed("z-prepare.pdf", NextAction::Prepare));
+        seeds.push(seed("00-review.pdf", NextAction::Review));
 
         let selected = select_batch_seeds(seeds, 20);
 
-        for expected in [NextAction::Add, NextAction::Prepare, NextAction::WriteDraft] {
-            assert!(selected.iter().any(|seed| seed.next_action == expected));
-        }
         assert_eq!(selected.len(), 20);
+        assert!(
+            selected
+                .iter()
+                .all(|seed| seed.next_action == NextAction::Add)
+        );
+        assert_eq!(selected[0].provider_locator, "a-add-00.pdf");
+        assert_eq!(selected[19].provider_locator, "a-add-19.pdf");
+    }
+
+    #[test]
+    fn selector_fills_spare_capacity_with_review_and_blocker_items() {
+        let seed = |locator: &str, next_action| BatchItemSeed {
+            provider_locator: locator.into(),
+            user_state: UserState::Registered,
+            next_action,
+            asset_id: None,
+            diagnostic: None,
+        };
+        let selected = select_batch_seeds(
+            vec![
+                seed("z-add.pdf", NextAction::Add),
+                seed("a-review.pdf", NextAction::Review),
+                seed("m-retry.pdf", NextAction::Retry),
+            ],
+            20,
+        );
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|seed| seed.provider_locator.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a-review.pdf", "m-retry.pdf", "z-add.pdf"]
+        );
     }
 
     #[test]

@@ -10,7 +10,9 @@ use mko_core::{
     clock::Clock,
     context::{ContextSource, ResolvedPersonalContext, Scope},
     json_v1::{AddOutcome, NextAction, UserState},
+    prepare::{PrepareRequest, prepare_source_with_extractor},
     provider_scan::ElapsedClock,
+    source::{WriteSourceRequest, write_source_draft_with_clock},
 };
 use tempfile::TempDir;
 
@@ -259,6 +261,10 @@ fn batch_mutates_only_the_first_twenty_nfc_ordered_actionable_items() {
     assert_eq!(batch.items[19].provider_locator, "paper-19.pdf");
     assert_eq!(fixture.registry_count(), 20);
 
+    for item in &batch.items {
+        fixture.advance_to_review(item.asset_id.as_deref().unwrap());
+    }
+
     let AddRunResult::Batch(second) = add(
         AddRequest::new(fixture.context(), AddInput::InboxScan)
             .with_backup_attestation(BackupAttestation::UserVerified),
@@ -276,6 +282,13 @@ fn batch_mutates_only_the_first_twenty_nfc_ordered_actionable_items() {
             .any(|item| item.provider_locator == "paper-20.pdf"),
         "{second:#?}"
     );
+    let final_asset_id = second
+        .items
+        .iter()
+        .find(|item| item.provider_locator == "paper-20.pdf")
+        .and_then(|item| item.asset_id.as_deref())
+        .unwrap();
+    fixture.advance_to_review(final_asset_id);
 
     let AddRunResult::Batch(third) = add(
         AddRequest::new(fixture.context(), AddInput::InboxScan)
@@ -291,7 +304,7 @@ fn batch_mutates_only_the_first_twenty_nfc_ordered_actionable_items() {
         third
             .items
             .iter()
-            .all(|item| item.next_action != NextAction::Add),
+            .all(|item| item.next_action == NextAction::Review),
         "{third:#?}"
     );
 }
@@ -499,7 +512,7 @@ fn partial_provider_scan_never_registers_new_items() {
 }
 
 #[test]
-fn bounded_selection_reserves_work_queue_capacity_before_nfc_fill() {
+fn bounded_selection_uses_global_nfc_across_add_and_prepare_actions() {
     let fixture = Fixture::new();
     fixture.pdf("z-existing.pdf", b"%PDF-1.7\nexisting");
     add(
@@ -531,23 +544,14 @@ fn bounded_selection_reserves_work_queue_capacity_before_nfc_fill() {
 
     assert_eq!(batch.items.len(), 20);
     assert_eq!(batch.remaining, 1);
-    assert_eq!(
-        batch
-            .items
-            .iter()
-            .filter(|item| item.provider_locator.starts_with("a-new-"))
-            .count(),
-        19,
-        "{batch:#?}"
-    );
     assert!(
         batch
             .items
             .iter()
-            .any(|item| item.provider_locator == "z-existing.pdf"),
+            .all(|item| item.provider_locator.starts_with("a-new-")),
         "{batch:#?}"
     );
-    assert_eq!(fixture.registry_count(), 20);
+    assert_eq!(fixture.registry_count(), 21);
 }
 
 #[test]
@@ -677,5 +681,27 @@ impl Fixture {
         fs::read_dir(self.repository.join("assets/registry"))
             .unwrap()
             .count()
+    }
+
+    fn advance_to_review(&self, asset_id: &str) {
+        let bundle_path = self
+            .repository
+            .join(".knowledge-os/runtime/prepared")
+            .join(format!("{asset_id}.json"));
+        prepare_source_with_extractor(
+            PrepareRequest::new(&self.repository, asset_id, &bundle_path)
+                .with_resolved_context(self.context()),
+            |_, _| Ok(vec!["Fixture page".into()]),
+        )
+        .unwrap();
+        write_source_draft_with_clock(
+            WriteSourceRequest::new(
+                &self.repository,
+                &bundle_path,
+                include_bytes!("../../../tests/fixtures/semantic-response.json").to_vec(),
+            ),
+            &FixedClock,
+        )
+        .unwrap();
     }
 }
