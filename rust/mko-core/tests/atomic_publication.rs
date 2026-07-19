@@ -91,3 +91,66 @@ fn publication_lock_cleanup_never_removes_a_replacement_owner() {
     assert_eq!(fs::read_to_string(lock).unwrap(), "owner=replacement\n");
     assert_eq!(fs::read(path).unwrap(), b"approved\n");
 }
+
+#[test]
+fn temp_cleanup_never_removes_a_same_bytes_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("record.md");
+    fs::write(&path, "original\n").unwrap();
+    let directory = Dir::open_ambient_dir(root.path(), ambient_authority()).unwrap();
+    let root_path = root.path().to_path_buf();
+
+    let error = write_replace_capability_validated_at_commit(
+        &directory,
+        Path::new("record.md"),
+        b"approved\n",
+        move || {
+            let temp = fs::read_dir(&root_path)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.extension().and_then(|value| value.to_str()) == Some("tmp"))
+                .expect("temp exists before final validation");
+            let copied_bytes = fs::read(&temp).unwrap();
+            fs::remove_file(&temp).unwrap();
+            fs::write(&temp, copied_bytes).unwrap();
+            Err(MkoError::new("hook_failed", "stop publication"))
+        },
+        || Ok(()),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "hook_failed");
+    assert_eq!(fs::read(&path).unwrap(), b"original\n");
+    assert!(fs::read_dir(root.path()).unwrap().any(|entry| {
+        let entry = entry.unwrap();
+        entry.path() != path && fs::read(entry.path()).unwrap() == b"approved\n"
+    }));
+}
+
+#[test]
+fn publication_lock_cleanup_never_removes_a_copied_owner_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("record.md");
+    let lock = root.path().join(".record.md.publish.lock");
+    fs::write(&path, "original\n").unwrap();
+    let directory = Dir::open_ambient_dir(root.path(), ambient_authority()).unwrap();
+    let replacement_lock = lock.clone();
+
+    let error = write_replace_capability_validated_at_commit(
+        &directory,
+        Path::new("record.md"),
+        b"approved\n",
+        move || {
+            let copied_owner = fs::read(&replacement_lock).unwrap();
+            fs::remove_file(&replacement_lock).unwrap();
+            fs::write(&replacement_lock, copied_owner).unwrap();
+            Err(MkoError::new("hook_failed", "stop publication"))
+        },
+        || Ok(()),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "hook_failed");
+    assert_eq!(fs::read(&path).unwrap(), b"original\n");
+    assert!(fs::read_to_string(lock).unwrap().starts_with("owner="));
+}

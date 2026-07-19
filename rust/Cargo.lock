@@ -1261,6 +1261,7 @@ dependencies = [
  "cap-std",
  "chrono",
  "chrono-tz",
+ "getrandom 0.3.4",
  "granit-parser",
  "hex",
  "hostname",

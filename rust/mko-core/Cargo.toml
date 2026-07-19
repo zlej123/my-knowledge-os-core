@@ -22,6 +22,7 @@ serde-saphyr.workspace = true
 sha2.workspace = true
 sysinfo.workspace = true
 hostname.workspace = true
+getrandom.workspace = true
 pdf-extract.workspace = true
 regex.workspace = true
 unicode-normalization.workspace = true

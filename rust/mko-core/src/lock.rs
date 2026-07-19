@@ -1,6 +1,6 @@
 use std::{
-    fs::{self, OpenOptions},
-    io::Write,
+    fs,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -76,11 +76,24 @@ pub fn inspect_locks(
     Ok(inspections)
 }
 
-#[derive(Debug)]
 pub struct AssetLock {
-    path: PathBuf,
+    directory: Dir,
+    filename: String,
+    repository_root: PathBuf,
     asset_id: String,
     owner_token: String,
+    identity: StableFileIdentity,
+}
+
+impl std::fmt::Debug for AssetLock {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AssetLock")
+            .field("filename", &self.filename)
+            .field("repository_root", &self.repository_root)
+            .field("asset_id", &self.asset_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AssetLock {
@@ -91,23 +104,69 @@ impl AssetLock {
         clock: &dyn Clock,
         clear_stale_lock: bool,
     ) -> Result<Self, MkoError> {
-        validate_asset_id(asset_id)?;
-        let directory = secure_lock_directory(repository_root)?;
-        let path = directory.join(format!("{asset_id}.lock"));
-        clear_stale_takeover_if_requested(&path, asset_id, clock, clear_stale_lock)?;
+        Self::acquire_with_directory_hook(
+            repository_root,
+            asset_id,
+            command,
+            clock,
+            clear_stale_lock,
+            || Ok(()),
+        )
+    }
 
-        match create_lock(&path, asset_id, command, clock) {
+    fn acquire_with_directory_hook<F>(
+        repository_root: &Path,
+        asset_id: &str,
+        command: &str,
+        clock: &dyn Clock,
+        clear_stale_lock: bool,
+        after_directory_open: F,
+    ) -> Result<Self, MkoError>
+    where
+        F: FnOnce() -> Result<(), MkoError>,
+    {
+        validate_asset_id(asset_id)?;
+        let repository_root = fs::canonicalize(repository_root)
+            .map_err(|error| MkoError::new("lock_write_failed", error.to_string()))?;
+        let directory = secure_lock_directory(&repository_root)?;
+        after_directory_open()?;
+        let filename = format!("{asset_id}.lock");
+        clear_stale_takeover_if_requested(
+            &directory,
+            &filename,
+            asset_id,
+            clock,
+            clear_stale_lock,
+        )?;
+
+        match create_lock(
+            &directory,
+            &filename,
+            &repository_root,
+            asset_id,
+            command,
+            clock,
+        ) {
             Ok(lock) => Ok(lock),
             Err(error) if error.code() != "lock_exists" => Err(error),
             Err(_) if !clear_stale_lock => Err(lock_held_error()),
             Err(_) => {
-                let _takeover = TakeoverGuard::acquire(&path, asset_id, command, clock, false)?;
-                if !stale_lock(&path, asset_id, clock)? {
+                let _takeover =
+                    TakeoverGuard::acquire(&directory, &filename, asset_id, command, clock, false)?;
+                if !stale_lock(&directory, &filename, asset_id, clock)? {
                     return Err(lock_held_error());
                 }
-                fs::remove_file(&path)
+                directory
+                    .remove_file(&filename)
                     .map_err(|error| MkoError::new("lock_clear_failed", error.to_string()))?;
-                match create_lock(&path, asset_id, command, clock) {
+                match create_lock(
+                    &directory,
+                    &filename,
+                    &repository_root,
+                    asset_id,
+                    command,
+                    clock,
+                ) {
                     Ok(lock) => Ok(lock),
                     Err(error) if error.code() == "lock_exists" => Err(lock_held_error()),
                     Err(error) => Err(error),
@@ -121,17 +180,15 @@ impl AssetLock {
         repository_root: &Path,
         asset_id: &str,
     ) -> Result<(), MkoError> {
-        let expected = repository_root
-            .join(".knowledge-os/runtime/locks")
-            .join(format!("{asset_id}.lock"));
+        let repository_matches =
+            fs::canonicalize(repository_root).is_ok_and(|root| root == self.repository_root);
         let owned = self.asset_id == asset_id
-            && self.path == expected
-            && fs::read(&self.path)
-                .ok()
-                .and_then(|input| serde_json::from_slice::<LockRecord>(&input).ok())
-                .is_some_and(|record| {
-                    record.asset_id == asset_id && record.owner_token == self.owner_token
-                });
+            && repository_matches
+            && read_lock_record(&self.directory, &self.filename).is_ok_and(|(record, identity)| {
+                identity == self.identity
+                    && record.asset_id == asset_id
+                    && record.owner_token == self.owner_token
+            });
         if owned {
             Ok(())
         } else {
@@ -143,13 +200,12 @@ impl AssetLock {
     }
 }
 
-fn secure_lock_directory(repository_root: &Path) -> Result<PathBuf, MkoError> {
+fn secure_lock_directory(repository_root: &Path) -> Result<Dir, MkoError> {
     let repository = Dir::open_ambient_dir(repository_root, ambient_authority())
         .map_err(|error| MkoError::new("lock_write_failed", error.to_string()))?;
     let knowledge = ensure_real_child_directory(&repository, ".knowledge-os")?;
     let runtime = ensure_real_child_directory(&knowledge, "runtime")?;
-    let _locks = ensure_real_child_directory(&runtime, "locks")?;
-    Ok(repository_root.join(".knowledge-os/runtime/locks"))
+    ensure_real_child_directory(&runtime, "locks")
 }
 
 fn ensure_real_child_directory(parent: &Dir, name: &str) -> Result<Dir, MkoError> {
@@ -187,7 +243,8 @@ fn ensure_real_child_directory(parent: &Dir, name: &str) -> Result<Dir, MkoError
 impl Drop for AssetLock {
     fn drop(&mut self) {
         let Ok(_takeover) = TakeoverGuard::acquire(
-            &self.path,
+            &self.directory,
+            &self.filename,
             &self.asset_id,
             "asset lock release",
             &SystemClock,
@@ -195,32 +252,35 @@ impl Drop for AssetLock {
         ) else {
             return;
         };
-        let owned = fs::read(&self.path)
-            .ok()
-            .and_then(|input| serde_json::from_slice::<LockRecord>(&input).ok())
-            .is_some_and(|record| record.owner_token == self.owner_token);
-        if owned {
-            let _ = fs::remove_file(&self.path);
-        }
+        remove_if_owned(
+            &self.directory,
+            &self.filename,
+            &self.owner_token,
+            self.identity,
+        );
     }
 }
 
 #[derive(Debug)]
-struct TakeoverGuard {
-    path: PathBuf,
+struct TakeoverGuard<'a> {
+    directory: &'a Dir,
+    filename: String,
     owner_token: String,
+    identity: StableFileIdentity,
 }
 
-impl TakeoverGuard {
+impl<'a> TakeoverGuard<'a> {
     fn acquire(
-        lock_path: &Path,
+        directory: &'a Dir,
+        lock_filename: &str,
         asset_id: &str,
         command: &str,
         clock: &dyn Clock,
         clear_stale_lock: bool,
     ) -> Result<Self, MkoError> {
         Self::acquire_with_writer(
-            lock_path,
+            directory,
+            lock_filename,
             asset_id,
             command,
             clock,
@@ -234,7 +294,8 @@ impl TakeoverGuard {
     }
 
     fn acquire_with_writer<F>(
-        lock_path: &Path,
+        directory: &'a Dir,
+        lock_filename: &str,
         asset_id: &str,
         command: &str,
         clock: &dyn Clock,
@@ -242,10 +303,10 @@ impl TakeoverGuard {
         write_record: F,
     ) -> Result<Self, MkoError>
     where
-        F: FnOnce(&mut fs::File, &LockRecord) -> std::io::Result<()>,
+        F: FnOnce(&mut cap_std::fs::File, &LockRecord) -> std::io::Result<()>,
     {
-        let path = lock_path.with_extension("lock.takeover");
-        let owner_token = next_owner_token();
+        let filename = format!("{lock_filename}.takeover");
+        let owner_token = next_owner_token()?;
         let record = LockRecord {
             pid: std::process::id(),
             hostname: current_hostname()?,
@@ -254,45 +315,70 @@ impl TakeoverGuard {
             asset_id: asset_id.into(),
             owner_token: owner_token.clone(),
         };
-        let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+        let mut file = match directory.open_with(
+            &filename,
+            cap_std::fs::OpenOptions::new().write(true).create_new(true),
+        ) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if !clear_stale_lock || !stale_lock(&path, asset_id, clock)? {
+                if !clear_stale_lock || !stale_lock(directory, &filename, asset_id, clock)? {
                     return Err(lock_held_error());
                 }
-                fs::remove_file(&path)
+                directory
+                    .remove_file(&filename)
                     .map_err(|error| MkoError::new("lock_clear_failed", error.to_string()))?;
-                OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&path)
+                directory
+                    .open_with(
+                        &filename,
+                        cap_std::fs::OpenOptions::new().write(true).create_new(true),
+                    )
                     .map_err(|error| MkoError::new("lock_write_failed", error.to_string()))?
             }
             Err(error) => return Err(MkoError::new("lock_write_failed", error.to_string())),
         };
         if let Err(error) = write_record(&mut file, &record) {
-            let _ = fs::remove_file(&path);
+            let _ = directory.remove_file(&filename);
             return Err(MkoError::new("lock_write_failed", error.to_string()));
         }
-        Ok(Self { path, owner_token })
+        let identity = stable_file_identity(
+            &file
+                .metadata()
+                .map_err(|error| MkoError::new("lock_write_failed", error.to_string()))?,
+        )?;
+        Ok(Self {
+            directory,
+            filename,
+            owner_token,
+            identity,
+        })
     }
 }
 
-impl Drop for TakeoverGuard {
+impl Drop for TakeoverGuard<'_> {
     fn drop(&mut self) {
-        remove_if_owned(&self.path, &self.owner_token);
+        remove_if_owned(
+            self.directory,
+            &self.filename,
+            &self.owner_token,
+            self.identity,
+        );
     }
 }
 
 fn create_lock(
-    path: &Path,
+    directory: &Dir,
+    filename: &str,
+    repository_root: &Path,
     asset_id: &str,
     command: &str,
     clock: &dyn Clock,
 ) -> Result<AssetLock, MkoError> {
     let hostname = current_hostname()?;
-    let owner_token = next_owner_token();
-    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
+    let owner_token = next_owner_token()?;
+    let mut file = match directory.open_with(
+        filename,
+        cap_std::fs::OpenOptions::new().write(true).create_new(true),
+    ) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(MkoError::new(
@@ -313,49 +399,94 @@ fn create_lock(
     let bytes = serde_json::to_vec(&record)
         .map_err(|error| MkoError::new("lock_write_failed", error.to_string()))?;
     if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
-        let _ = fs::remove_file(path);
+        let _ = directory.remove_file(filename);
         return Err(MkoError::new("lock_write_failed", error.to_string()));
     }
+    let identity = stable_file_identity(
+        &file
+            .metadata()
+            .map_err(|error| MkoError::new("lock_write_failed", error.to_string()))?,
+    )?;
     Ok(AssetLock {
-        path: path.to_path_buf(),
+        directory: directory
+            .try_clone()
+            .map_err(|error| MkoError::new("lock_write_failed", error.to_string()))?,
+        filename: filename.into(),
+        repository_root: repository_root.to_path_buf(),
         asset_id: asset_id.into(),
         owner_token,
+        identity,
     })
 }
 
 fn clear_stale_takeover_if_requested(
-    lock_path: &Path,
+    directory: &Dir,
+    lock_filename: &str,
     asset_id: &str,
     clock: &dyn Clock,
     clear_stale_lock: bool,
 ) -> Result<(), MkoError> {
-    let takeover_path = lock_path.with_extension("lock.takeover");
-    if !takeover_path.exists() {
-        return Ok(());
+    let takeover_filename = format!("{lock_filename}.takeover");
+    match directory.symlink_metadata(&takeover_filename) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(MkoError::new("lock_read_failed", error.to_string())),
     }
-    if !clear_stale_lock || !stale_lock(&takeover_path, asset_id, clock)? {
+    if !clear_stale_lock || !stale_lock(directory, &takeover_filename, asset_id, clock)? {
         return Err(lock_held_error());
     }
-    fs::remove_file(&takeover_path)
+    directory
+        .remove_file(&takeover_filename)
         .map_err(|error| MkoError::new("lock_clear_failed", error.to_string()))
 }
 
-fn remove_if_owned(path: &Path, owner_token: &str) {
-    let owned = fs::read(path)
-        .ok()
-        .and_then(|input| serde_json::from_slice::<LockRecord>(&input).ok())
-        .is_some_and(|record| record.owner_token == owner_token);
+fn remove_if_owned(
+    directory: &Dir,
+    filename: &str,
+    owner_token: &str,
+    identity: StableFileIdentity,
+) {
+    let Ok(cleanup_token) = secure_token() else {
+        return;
+    };
+    let quarantine = format!(".{filename}.cleanup-{cleanup_token}");
+    match directory.rename(filename, directory, &quarantine) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(_) => return,
+    }
+    let owned = read_lock_record(directory, &quarantine).is_ok_and(|(record, current_identity)| {
+        current_identity == identity && record.owner_token == owner_token
+    });
     if owned {
-        let _ = fs::remove_file(path);
+        let _ = directory.remove_file(&quarantine);
+        return;
+    }
+
+    // The rename may have moved another actor's replacement. Restore its
+    // public name with create-new semantics; otherwise preserve the quarantine.
+    if directory
+        .hard_link(&quarantine, directory, filename)
+        .is_ok()
+    {
+        let _ = directory.remove_file(&quarantine);
     }
 }
 
-fn next_owner_token() -> String {
-    format!(
-        "{}-{}",
+fn next_owner_token() -> Result<String, MkoError> {
+    Ok(format!(
+        "{}-{}-{}",
         std::process::id(),
-        NEXT_OWNER_TOKEN.fetch_add(1, Ordering::Relaxed)
-    )
+        NEXT_OWNER_TOKEN.fetch_add(1, Ordering::Relaxed),
+        secure_token()?
+    ))
+}
+
+fn secure_token() -> Result<String, MkoError> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random)
+        .map_err(|_| MkoError::new("lock_write_failed", "secure randomness is unavailable"))?;
+    Ok(hex::encode(random))
 }
 
 fn io_error(message: String) -> std::io::Error {
@@ -389,19 +520,94 @@ fn lock_held_error() -> MkoError {
     )
 }
 
-fn stale_lock(path: &Path, expected_asset_id: &str, clock: &dyn Clock) -> Result<bool, MkoError> {
-    let input =
-        fs::read(path).map_err(|error| MkoError::new("lock_read_failed", error.to_string()))?;
-    let record: LockRecord = serde_json::from_slice(&input).map_err(|_| {
+fn stale_lock(
+    directory: &Dir,
+    filename: &str,
+    expected_asset_id: &str,
+    clock: &dyn Clock,
+) -> Result<bool, MkoError> {
+    let (record, _) = read_lock_record(directory, filename)?;
+    if record.asset_id != expected_asset_id {
+        return Ok(false);
+    }
+    record_is_stale(&record, clock)
+}
+
+fn read_lock_record(
+    directory: &Dir,
+    filename: &str,
+) -> Result<(LockRecord, StableFileIdentity), MkoError> {
+    let mut file = directory
+        .open(filename)
+        .map_err(|error| MkoError::new("lock_read_failed", error.to_string()))?;
+    let identity = stable_file_identity(
+        &file
+            .metadata()
+            .map_err(|error| MkoError::new("lock_read_failed", error.to_string()))?,
+    )?;
+    let mut input = Vec::new();
+    Read::by_ref(&mut file)
+        .take(64 * 1024)
+        .read_to_end(&mut input)
+        .map_err(|error| MkoError::new("lock_read_failed", error.to_string()))?;
+    let record = serde_json::from_slice(&input).map_err(|_| {
         MkoError::new(
             "lock_held",
             "asset operation lock is unreadable; inspect it manually",
         )
     })?;
-    if record.asset_id != expected_asset_id {
-        return Ok(false);
-    }
-    record_is_stale(&record, clock)
+    Ok((record, identity))
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StableFileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StableFileIdentity {
+    volume_serial_number: u64,
+    file_index: u64,
+}
+
+#[cfg(not(any(unix, windows)))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StableFileIdentity;
+
+#[cfg(unix)]
+fn stable_file_identity(metadata: &cap_std::fs::Metadata) -> Result<StableFileIdentity, MkoError> {
+    use cap_std::fs::MetadataExt;
+    Ok(StableFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn stable_file_identity(metadata: &cap_std::fs::Metadata) -> Result<StableFileIdentity, MkoError> {
+    use cap_std::fs::MetadataExt;
+    Ok(StableFileIdentity {
+        volume_serial_number: metadata.volume_serial_number().ok_or_else(|| {
+            MkoError::new(
+                "lock_write_failed",
+                "lock file has no stable volume identity",
+            )
+        })?,
+        file_index: metadata.file_index().ok_or_else(|| {
+            MkoError::new("lock_write_failed", "lock file has no stable file identity")
+        })?,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn stable_file_identity(_: &cap_std::fs::Metadata) -> Result<StableFileIdentity, MkoError> {
+    Err(MkoError::new(
+        "lock_write_failed",
+        "stable lock file identity is unsupported on this platform",
+    ))
 }
 
 fn record_is_stale(record: &LockRecord, clock: &dyn Clock) -> Result<bool, MkoError> {
@@ -431,6 +637,7 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
+    use cap_std::{ambient_authority, fs::Dir};
     use chrono::{DateTime, Utc};
 
     use super::{AssetLock, LockRecord, TakeoverGuard};
@@ -476,8 +683,12 @@ mod tests {
             .join(".knowledge-os/runtime/locks")
             .join(format!("{asset_id}.lock"));
         fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        let lock_directory =
+            Dir::open_ambient_dir(lock_path.parent().unwrap(), ambient_authority()).unwrap();
+        let lock_filename = lock_path.file_name().unwrap().to_str().unwrap();
         let takeover = TakeoverGuard::acquire(
-            &lock_path,
+            &lock_directory,
+            lock_filename,
             &asset_id,
             "takeover",
             &time("2026-07-18T00:00:00Z"),
@@ -525,8 +736,10 @@ mod tests {
         let repository = test_directory();
         let asset_id = asset_id();
         let lock_path = repository.join(format!("{asset_id}.lock"));
+        let lock_directory = Dir::open_ambient_dir(&repository, ambient_authority()).unwrap();
         let error = TakeoverGuard::acquire_with_writer(
-            &lock_path,
+            &lock_directory,
+            lock_path.file_name().unwrap().to_str().unwrap(),
             &asset_id,
             "takeover",
             &time("2026-07-18T00:00:00Z"),
@@ -545,8 +758,10 @@ mod tests {
         let repository = test_directory();
         let asset_id = asset_id();
         let lock_path = repository.join(format!("{asset_id}.lock"));
+        let lock_directory = Dir::open_ambient_dir(&repository, ambient_authority()).unwrap();
         let error = TakeoverGuard::acquire_with_writer(
-            &lock_path,
+            &lock_directory,
+            lock_path.file_name().unwrap().to_str().unwrap(),
             &asset_id,
             "takeover",
             &time("2026-07-18T00:00:00Z"),
@@ -569,8 +784,10 @@ mod tests {
         let repository = test_directory();
         let asset_id = asset_id();
         let lock_path = repository.join(format!("{asset_id}.lock"));
+        let lock_directory = Dir::open_ambient_dir(&repository, ambient_authority()).unwrap();
         let takeover = TakeoverGuard::acquire(
-            &lock_path,
+            &lock_directory,
+            lock_path.file_name().unwrap().to_str().unwrap(),
             &asset_id,
             "takeover",
             &time("2026-07-18T00:00:00Z"),
@@ -594,6 +811,45 @@ mod tests {
         drop(takeover);
 
         assert!(lock_path.with_extension("lock.takeover").exists());
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_lock_directory_survives_ambient_rename_and_copied_owner_attack() {
+        use std::os::unix::fs::symlink;
+
+        let repository = test_directory();
+        let asset_id = asset_id();
+        let ambient_locks = repository.join(".knowledge-os/runtime/locks");
+        let retained_locks = repository.join(".knowledge-os/runtime/retained-locks");
+        let outside = repository.join("outside-locks");
+        fs::create_dir(&outside).unwrap();
+
+        let lock = AssetLock::acquire_with_directory_hook(
+            &repository,
+            &asset_id,
+            "asset-operation",
+            &time("2026-07-18T00:00:00Z"),
+            false,
+            || {
+                fs::rename(&ambient_locks, &retained_locks).unwrap();
+                symlink(&outside, &ambient_locks).unwrap();
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let filename = format!("{asset_id}.lock");
+        assert!(retained_locks.join(&filename).is_file());
+        assert!(!outside.join(&filename).exists());
+        fs::copy(retained_locks.join(&filename), outside.join(&filename)).unwrap();
+
+        lock.assert_owned_for(&repository, &asset_id).unwrap();
+        drop(lock);
+
+        assert!(!retained_locks.join(&filename).exists());
+        assert!(outside.join(&filename).is_file());
         let _ = fs::remove_dir_all(repository);
     }
 }

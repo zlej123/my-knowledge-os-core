@@ -1,8 +1,7 @@
 use std::{
-    fs::{self, OpenOptions},
-    io::Write,
+    fs,
+    io::{Read, Write},
     path::Path,
-    sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -12,7 +11,6 @@ use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 
 use crate::error::MkoError;
 
-static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 const LOCK_WAIT: Duration = Duration::from_secs(1);
 const LOCK_RETRY: Duration = Duration::from_millis(10);
 
@@ -46,6 +44,8 @@ where
             )
         })?;
     let _lock = PublicationLock::acquire(parent, filename)?;
+    let parent_directory = Dir::open_ambient_dir(parent, cap_std::ambient_authority())
+        .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => {
             validate_existing(path)?;
@@ -60,28 +60,33 @@ where
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(MkoError::new("registry_write_failed", error.to_string())),
     }
-    let temporary = parent.join(format!(
-        ".{filename}.{}.{}.tmp",
-        std::process::id(),
-        NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
+    let temporary = format!(".{filename}.{}.tmp", secure_cleanup_token()?);
+    let mut file = parent_directory
+        .open_with(
+            &temporary,
+            CapOpenOptions::new().write(true).create_new(true),
+        )
         .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+    let temporary_identity = stable_capability_identity(
+        &file
+            .metadata()
+            .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?,
+    )?;
     let write_result: Result<AtomicWriteResult, MkoError> = (|| {
         file.write_all(bytes)
             .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
         file.sync_all()
             .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
         drop(file);
-        fs::rename(&temporary, path)
+        parent_directory
+            .rename(&temporary, &parent_directory, filename)
             .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
-        sync_directory(parent)?;
+        sync_capability_directory(&parent_directory)?;
         Ok(AtomicWriteResult::Created)
     })();
-    let _ = fs::remove_file(&temporary);
+    if write_result.is_err() {
+        cleanup_capability_entry(&parent_directory, &temporary, temporary_identity, None);
+    }
     write_result
 }
 
@@ -217,17 +222,18 @@ where
     B: FnOnce() -> Result<(), MkoError>,
     V: FnOnce() -> Result<(), MkoError>,
 {
-    let temporary = format!(
-        ".{filename}.{}.{}.tmp",
-        std::process::id(),
-        NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed)
-    );
+    let temporary = format!(".{filename}.{}.tmp", secure_cleanup_token()?);
     let mut file = directory
         .open_with(
             &temporary,
             CapOpenOptions::new().write(true).create_new(true),
         )
         .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+    let temporary_identity = stable_capability_identity(
+        &file
+            .metadata()
+            .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?,
+    )?;
     let result = (|| {
         file.write_all(bytes)
             .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
@@ -241,8 +247,13 @@ where
             .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
         sync_capability_directory(directory)
     })();
-    let _ = directory.remove_file(&temporary);
-    result
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            cleanup_capability_entry(directory, &temporary, temporary_identity, None);
+            Err(error)
+        }
+    }
 }
 
 fn capability_filename(path: &Path) -> Result<&str, MkoError> {
@@ -271,6 +282,7 @@ struct CapabilityPublicationLock<'a> {
     directory: &'a Dir,
     filename: String,
     owner_token: String,
+    identity: StableCapabilityIdentity,
 }
 
 impl<'a> CapabilityPublicationLock<'a> {
@@ -283,17 +295,16 @@ impl<'a> CapabilityPublicationLock<'a> {
                 CapOpenOptions::new().write(true).create_new(true),
             ) {
                 Ok(mut file) => {
-                    let owner_token = format!(
-                        "{}-{}",
-                        std::process::id(),
-                        NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed)
-                    );
+                    let owner_token = secure_cleanup_token()?;
                     writeln!(file, "owner={owner_token}").map_err(lock_error)?;
                     file.sync_all().map_err(lock_error)?;
+                    let identity =
+                        stable_capability_identity(&file.metadata().map_err(lock_error)?)?;
                     return Ok(Self {
                         directory,
                         filename: lock_filename,
                         owner_token,
+                        identity,
                     });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -313,15 +324,124 @@ impl<'a> CapabilityPublicationLock<'a> {
 
 impl Drop for CapabilityPublicationLock<'_> {
     fn drop(&mut self) {
-        let owned = self
-            .directory
-            .read_to_string(&self.filename)
-            .ok()
-            .is_some_and(|contents| contents == format!("owner={}\n", self.owner_token));
-        if owned {
-            let _ = self.directory.remove_file(&self.filename);
-        }
+        cleanup_capability_entry(
+            self.directory,
+            &self.filename,
+            self.identity,
+            Some(&format!("owner={}\n", self.owner_token)),
+        );
     }
+}
+
+fn cleanup_capability_entry(
+    directory: &Dir,
+    filename: &str,
+    identity: StableCapabilityIdentity,
+    expected_contents: Option<&str>,
+) {
+    let Ok(token) = secure_cleanup_token() else {
+        return;
+    };
+    let quarantine = format!(".{filename}.cleanup-{token}");
+    match directory.rename(filename, directory, &quarantine) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(_) => return,
+    }
+
+    let owned = directory.open(&quarantine).ok().is_some_and(|mut file| {
+        let same_identity = file
+            .metadata()
+            .ok()
+            .and_then(|metadata| stable_capability_identity(&metadata).ok())
+            == Some(identity);
+        let same_contents = expected_contents.is_none_or(|expected| {
+            let mut contents = String::new();
+            file.read_to_string(&mut contents).is_ok() && contents == expected
+        });
+        same_identity && same_contents
+    });
+    if owned {
+        let _ = directory.remove_file(&quarantine);
+        return;
+    }
+
+    // Never delete a replacement moved by the atomic rename. Restore its
+    // public name with create-new semantics, or leave the quarantine orphaned.
+    if directory
+        .hard_link(&quarantine, directory, filename)
+        .is_ok()
+    {
+        let _ = directory.remove_file(&quarantine);
+    }
+}
+
+fn secure_cleanup_token() -> Result<String, MkoError> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random).map_err(|_| {
+        MkoError::new(
+            "registry_write_failed",
+            "secure randomness is unavailable for publication cleanup",
+        )
+    })?;
+    Ok(hex::encode(random))
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StableCapabilityIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StableCapabilityIdentity {
+    volume_serial_number: u64,
+    file_index: u64,
+}
+
+#[cfg(not(any(unix, windows)))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StableCapabilityIdentity;
+
+#[cfg(unix)]
+fn stable_capability_identity(
+    metadata: &cap_std::fs::Metadata,
+) -> Result<StableCapabilityIdentity, MkoError> {
+    use cap_std::fs::MetadataExt;
+    Ok(StableCapabilityIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn stable_capability_identity(
+    metadata: &cap_std::fs::Metadata,
+) -> Result<StableCapabilityIdentity, MkoError> {
+    use cap_std::fs::MetadataExt;
+    Ok(StableCapabilityIdentity {
+        volume_serial_number: metadata.volume_serial_number().ok_or_else(|| {
+            MkoError::new(
+                "registry_write_failed",
+                "file has no stable volume identity",
+            )
+        })?,
+        file_index: metadata.file_index().ok_or_else(|| {
+            MkoError::new("registry_write_failed", "file has no stable file identity")
+        })?,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn stable_capability_identity(
+    _: &cap_std::fs::Metadata,
+) -> Result<StableCapabilityIdentity, MkoError> {
+    Err(MkoError::new(
+        "registry_write_failed",
+        "stable file identity is unsupported on this platform",
+    ))
 }
 
 #[cfg(unix)]
@@ -338,20 +458,35 @@ fn sync_capability_directory(_directory: &Dir) -> Result<(), MkoError> {
 }
 
 struct PublicationLock {
-    path: std::path::PathBuf,
+    directory: Dir,
+    filename: String,
+    owner_token: String,
+    identity: StableCapabilityIdentity,
 }
 
 impl PublicationLock {
     fn acquire(parent: &Path, filename: &str) -> Result<Self, MkoError> {
-        let path = parent.join(format!(".{filename}.publish.lock"));
+        let directory =
+            Dir::open_ambient_dir(parent, cap_std::ambient_authority()).map_err(lock_error)?;
+        let lock_filename = format!(".{filename}.publish.lock");
+        let owner_token = secure_cleanup_token()?;
         let deadline = Instant::now() + LOCK_WAIT;
         loop {
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
+            match directory.open_with(
+                &lock_filename,
+                CapOpenOptions::new().write(true).create_new(true),
+            ) {
                 Ok(mut file) => {
-                    let lock = Self { path };
-                    writeln!(file, "pid={}", std::process::id()).map_err(lock_error)?;
+                    writeln!(file, "owner={owner_token}").map_err(lock_error)?;
                     file.sync_all().map_err(lock_error)?;
-                    return Ok(lock);
+                    let identity =
+                        stable_capability_identity(&file.metadata().map_err(lock_error)?)?;
+                    return Ok(Self {
+                        directory,
+                        filename: lock_filename,
+                        owner_token,
+                        identity,
+                    });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     if Instant::now() >= deadline {
@@ -370,7 +505,12 @@ impl PublicationLock {
 
 impl Drop for PublicationLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        cleanup_capability_entry(
+            &self.directory,
+            &self.filename,
+            self.identity,
+            Some(&format!("owner={}\n", self.owner_token)),
+        );
     }
 }
 

@@ -52,9 +52,16 @@ Full verification run from the repository-defined locations:
 ## Review cycles
 
 - Pre-implementation design review findings were incorporated before final verification.
-- Independent post-commit code/spec review: pending.
+- The first independent post-commit code/spec review was not approved and found two Important race conditions.
+- Follow-up RED tests proved that the former implementation returned from the retained lock directory to an ambient path and that name-only cleanup deleted same-bytes/same-owner replacement files.
+- `AssetLock` now retains the final lock-directory capability for create, read, takeover, ownership assertion, and removal. A directory rename followed by an external symlink replacement cannot redirect those operations; a copied owner record outside remains untouched.
+- Capability publication temp and lock cleanup now bind cryptographically random owner names to stable file identity. Cleanup atomically renames the public name to a private quarantine before verification. A foreign replacement is restored with create-new hard-link semantics when possible, or deliberately preserved as an orphan when safe restoration is impossible.
+- The same owner-bound cleanup primitive now also covers the existing ambient-entry `write_new` temporary and publication-lock surfaces; they retain a parent directory capability instead of using name-only cleanup.
+- Follow-up focused verification: atomic publication 5 passed, retained lock-directory race 1 passed, state/lock 19 passed, review transaction 17 passed, legacy approval 31 passed.
+- Second independent post-commit code/spec review: pending after the follow-up commit.
 
 ## Commit
 
 - Commit message: `feat: add snapshot-bound human review`
 - Final hash is reported after commit rather than embedded here to avoid a self-referential commit hash.
+- Follow-up commit hash is likewise reported after commit.
