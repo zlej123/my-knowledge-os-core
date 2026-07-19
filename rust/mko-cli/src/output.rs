@@ -7,21 +7,33 @@ use mko_core::{
 
 pub use mko_core::json_v1::RecoveryKind;
 
+pub fn emit_encoded_json(encoded: &str) -> Result<(), MkoError> {
+    let stdout = io::stdout();
+    write_json_line(&mut stdout.lock(), encoded)
+}
+
+pub fn emit_json_value(value: &serde_json::Value) -> Result<(), MkoError> {
+    let stdout = io::stdout();
+    emit_json_value_to(&mut stdout.lock(), value)
+}
+
+fn emit_json_value_to(writer: &mut impl Write, value: &serde_json::Value) -> Result<(), MkoError> {
+    let encoded = serde_json::to_string(value)
+        .map_err(|error| MkoError::new("json_output_failed", error.to_string()))?;
+    write_json_line(writer, &encoded)
+}
+
 pub fn emit_legacy_json_error(code: &str, message: &str) -> Result<(), MkoError> {
-    let encoded = serde_json::to_string(&serde_json::json!({
+    emit_json_value(&serde_json::json!({
         "result": "error",
         "error": {"code": code, "message": message},
     }))
-    .map_err(|error| MkoError::new("json_output_failed", error.to_string()))?;
-    let stdout = io::stdout();
-    write_json_line(&mut stdout.lock(), &encoded)
 }
 
 pub fn emit_json_v1(output: JsonV1Success) -> Result<(), MkoError> {
     let encoded = serde_json::to_string(&output)
         .map_err(|error| MkoError::new("json_output_failed", error.to_string()))?;
-    let stdout = io::stdout();
-    write_json_line(&mut stdout.lock(), &encoded)
+    emit_encoded_json(&encoded)
 }
 
 fn write_json_line(writer: &mut impl Write, encoded: &str) -> Result<(), MkoError> {
@@ -34,8 +46,7 @@ pub fn emit_json_v1_failure(command: JsonV1Command, error: &MkoError) -> Result<
     let failure = json_v1_failure(command, error);
     let encoded = serde_json::to_string(&failure)
         .map_err(|error| MkoError::new("json_output_failed", error.to_string()))?;
-    let stdout = io::stdout();
-    write_json_line(&mut stdout.lock(), &encoded)
+    emit_encoded_json(&encoded)
 }
 
 pub fn json_v1_failure(command: JsonV1Command, error: &MkoError) -> JsonV1Failure {
@@ -80,7 +91,9 @@ pub fn recovery_for_error_code(code: &str) -> Option<RecoveryKind> {
 mod tests {
     use std::io::{self, Write};
 
-    use super::write_json_line;
+    use serde_json::json;
+
+    use super::{emit_json_value_to, write_json_line};
 
     struct FlushFailure;
 
@@ -101,5 +114,21 @@ mod tests {
 
         assert_eq!(error.code(), "json_output_failed");
         assert_eq!(error.message(), "closed pipe");
+    }
+
+    #[test]
+    fn json_value_output_preserves_the_serialized_legacy_bytes() {
+        let mut output = Vec::new();
+
+        emit_json_value_to(
+            &mut output,
+            &json!({"result": "error", "error": {"code": "usage", "message": "bad input"}}),
+        )
+        .unwrap();
+
+        assert_eq!(
+            output,
+            b"{\"error\":{\"code\":\"usage\",\"message\":\"bad input\"},\"result\":\"error\"}\n"
+        );
     }
 }

@@ -35,7 +35,9 @@ use mko_core::{
     },
 };
 
-use crate::output::{emit_json_v1, emit_json_v1_failure, emit_legacy_json_error};
+use crate::output::{
+    emit_encoded_json, emit_json_v1, emit_json_v1_failure, emit_json_value, emit_legacy_json_error,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum OutputFormat {
@@ -48,6 +50,167 @@ pub enum OutputFormat {
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+// This parser is deliberately frozen at the v0.1 argument contract. It is used
+// only to render legacy `--json` parse errors, whose serialized bytes are an API.
+#[derive(Parser)]
+#[command(name = "mko", version = mko_core::version::PRODUCT_VERSION, about = "My Knowledge OS deterministic core")]
+struct LegacyCli {
+    #[command(subcommand)]
+    command: LegacyCommand,
+}
+
+#[derive(Subcommand)]
+enum LegacyCommand {
+    Asset {
+        #[command(subcommand)]
+        command: LegacyAssetCommand,
+    },
+    Source {
+        #[command(subcommand)]
+        command: LegacySourceCommand,
+    },
+    Check(LegacyCheckArgs),
+    Human {
+        #[command(subcommand)]
+        command: LegacyHumanCommand,
+    },
+    Hooks {
+        #[command(subcommand)]
+        command: LegacyHooksCommand,
+    },
+    #[command(name = "__extract-pdf", hide = true)]
+    ExtractPdf,
+}
+
+#[derive(Subcommand)]
+enum LegacySourceCommand {
+    Prepare(LegacyPrepareArgs),
+    WriteDraft(LegacyWriteDraftArgs),
+    RepairState(LegacyRepairStateArgs),
+}
+
+#[derive(Subcommand)]
+enum LegacyAssetCommand {
+    Capture(LegacyCaptureArgs),
+    Inspect(LegacyAssetOperationArgs),
+    AcceptChange(LegacyAssetOperationArgs),
+    RepairLineage(LegacyAssetOperationArgs),
+}
+
+#[derive(Subcommand)]
+enum LegacyHumanCommand {
+    ApproveSource(LegacyApproveSourceArgs),
+}
+
+#[derive(Subcommand)]
+enum LegacyHooksCommand {
+    Install(LegacyHookInstallArgs),
+}
+
+#[derive(Args)]
+struct LegacyCaptureArgs {
+    #[arg(long)]
+    repo: PathBuf,
+    #[arg(long)]
+    local_config: Option<PathBuf>,
+    #[arg(long)]
+    file: PathBuf,
+    #[arg(long)]
+    title: Option<String>,
+    #[arg(long = "domain")]
+    domains: Vec<String>,
+    #[arg(long)]
+    slug: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct LegacyAssetOperationArgs {
+    #[arg(long)]
+    repo: PathBuf,
+    #[arg(long)]
+    local_config: Option<PathBuf>,
+    #[arg(long)]
+    asset_id: String,
+    #[arg(long)]
+    clear_stale_lock: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct LegacyCheckArgs {
+    #[arg(long)]
+    repo: PathBuf,
+    #[arg(long)]
+    json: bool,
+    #[arg(long)]
+    staged: bool,
+}
+
+#[derive(Args)]
+struct LegacyApproveSourceArgs {
+    #[arg(long)]
+    repo: PathBuf,
+    #[arg(long)]
+    source_id: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct LegacyHookInstallArgs {
+    #[arg(long)]
+    repo: PathBuf,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct LegacyPrepareArgs {
+    #[arg(long)]
+    repo: PathBuf,
+    #[arg(long)]
+    local_config: Option<PathBuf>,
+    #[arg(long)]
+    asset_id: String,
+    #[arg(long)]
+    output: PathBuf,
+    #[arg(long)]
+    clear_stale_lock: bool,
+}
+
+#[derive(Args)]
+struct LegacyWriteDraftArgs {
+    #[arg(long)]
+    repo: PathBuf,
+    #[arg(long)]
+    bundle: PathBuf,
+    #[arg(long)]
+    response: PathBuf,
+    #[arg(long)]
+    slug: Option<String>,
+    #[arg(long)]
+    replace_pending: bool,
+    #[arg(long)]
+    clear_stale_lock: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct LegacyRepairStateArgs {
+    #[arg(long)]
+    repo: PathBuf,
+    #[arg(long)]
+    asset_id: String,
+    #[arg(long)]
+    clear_stale_lock: bool,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
@@ -267,7 +430,8 @@ pub fn entry() {
             let _ = error.print();
         }
         Err(error) => {
-            let usage = MkoError::new("usage", error.to_string());
+            let usage = legacy_usage_error(&args)
+                .unwrap_or_else(|| MkoError::new("usage", error.to_string()));
             if let Some(command) = json_v1_command_from_invalid_arguments(&args) {
                 emit_json_v1_failure_or_stderr(command, &usage);
             } else {
@@ -436,11 +600,9 @@ fn write_draft(arguments: WriteDraftArgs) -> Result<(), MkoError> {
             },
         })
     } else if arguments.json {
-        println!(
-            "{}",
-            serde_json::json!({"result":result.result,"source_id":result.source_id,"source_path":result.source_path,"content_revision":result.content_revision})
-        );
-        Ok(())
+        emit_json_value(
+            &serde_json::json!({"result":result.result,"source_id":result.source_id,"source_path":result.source_path,"content_revision":result.content_revision}),
+        )
     } else {
         println!(
             "{} {} {} {}",
@@ -465,11 +627,10 @@ fn check(arguments: CheckArgs) -> Result<Exit, MkoError> {
             data: check_data(&report),
         })?;
     } else if arguments.json {
-        println!(
-            "{}",
-            serde_json::to_string(&report)
-                .map_err(|error| MkoError::new("check_failed", error.to_string()))?
-        );
+        emit_encoded_json(
+            &serde_json::to_string(&report)
+                .map_err(|error| MkoError::new("check_failed", error.to_string()))?,
+        )?;
     } else if report.is_ok() {
         println!("ok");
     } else {
@@ -635,10 +796,9 @@ fn repair_source(arguments: RepairStateArgs) -> Result<(), MkoError> {
             .with_clear_stale_lock(arguments.clear_stale_lock),
     )?;
     if arguments.json {
-        println!(
-            "{}",
-            serde_json::json!({"result":result.result,"source_id":result.source_id,"asset_id":result.asset_id})
-        );
+        emit_json_value(
+            &serde_json::json!({"result":result.result,"source_id":result.source_id,"asset_id":result.asset_id}),
+        )?;
     } else {
         println!("{} {} {}", result.result, result.source_id, result.asset_id);
     }
@@ -652,12 +812,10 @@ fn extract_pdf() -> Result<(), MkoError> {
             message: error.message().into(),
         },
     };
-    println!(
-        "{}",
-        serde_json::to_string(&response)
-            .map_err(|error| MkoError::new("pdf_extraction_failed", error.to_string()))?
-    );
-    Ok(())
+    emit_encoded_json(
+        &serde_json::to_string(&response)
+            .map_err(|error| MkoError::new("pdf_extraction_failed", error.to_string()))?,
+    )
 }
 fn capture(arguments: CaptureArgs) -> Result<(), MkoError> {
     let mut request = CaptureRequest::new(arguments.repo, arguments.file)
@@ -669,10 +827,9 @@ fn capture(arguments: CaptureArgs) -> Result<(), MkoError> {
     }
     let result = capture_asset(request)?;
     if arguments.json {
-        println!(
-            "{}",
-            serde_json::json!({"result":result.result,"asset_id":result.asset_id,"registry_path":result.registry_path})
-        );
+        emit_json_value(
+            &serde_json::json!({"result":result.result,"asset_id":result.asset_id,"registry_path":result.registry_path}),
+        )?;
     } else {
         println!(
             "{} {} {}",
@@ -686,10 +843,7 @@ fn inspect(arguments: AssetOperationArgs) -> Result<(), MkoError> {
     let asset = inspect_asset(operation_request(&arguments))?;
     let status = asset_status_name(&asset.asset_status);
     if json {
-        println!(
-            "{}",
-            serde_json::json!({"result":status,"asset_id":asset.id})
-        );
+        emit_json_value(&serde_json::json!({"result":status,"asset_id":asset.id}))?;
     } else {
         println!("{status} {}", asset.id);
     }
@@ -699,10 +853,9 @@ fn accept_change(arguments: AssetOperationArgs) -> Result<(), MkoError> {
     let json = arguments.json;
     let asset = accept_changed_asset(operation_request(&arguments))?;
     if json {
-        println!(
-            "{}",
-            serde_json::json!({"result":"accepted","asset_id":asset.id,"supersedes":asset.supersedes})
-        );
+        emit_json_value(
+            &serde_json::json!({"result":"accepted","asset_id":asset.id,"supersedes":asset.supersedes}),
+        )?;
     } else {
         println!(
             "accepted {} supersedes {}",
@@ -717,10 +870,7 @@ fn repair_asset_lineage(arguments: AssetOperationArgs) -> Result<(), MkoError> {
     let asset_id = arguments.asset_id.clone();
     repair_lineage(operation_request(&arguments))?;
     if json {
-        println!(
-            "{}",
-            serde_json::json!({"result":"repaired","asset_id":asset_id})
-        );
+        emit_json_value(&serde_json::json!({"result":"repaired","asset_id":asset_id}))?;
     } else {
         println!("repaired {asset_id}");
     }
@@ -732,10 +882,9 @@ fn approve(arguments: ApproveSourceArgs) -> Result<(), MkoError> {
         &arguments.source_id,
     ))?;
     if arguments.json {
-        println!(
-            "{}",
-            serde_json::json!({"result":"approved","source_id":result.source_id,"source_path":result.source_path,"revision":result.revision})
-        );
+        emit_json_value(
+            &serde_json::json!({"result":"approved","source_id":result.source_id,"source_path":result.source_path,"revision":result.revision}),
+        )?;
     } else {
         println!("approved {} {}", result.source_id, result.revision);
     }
@@ -744,10 +893,7 @@ fn approve(arguments: ApproveSourceArgs) -> Result<(), MkoError> {
 fn install_hook(arguments: HookInstallArgs) -> Result<(), MkoError> {
     let result = install_hooks(&arguments.repo)?;
     if arguments.json {
-        println!(
-            "{}",
-            serde_json::json!({"result":result.result,"hook_path":result.hook_path})
-        );
+        emit_json_value(&serde_json::json!({"result":result.result,"hook_path":result.hook_path}))?;
     } else {
         println!("{} {}", result.result, result.hook_path);
     }
@@ -865,6 +1011,15 @@ fn arguments_before_terminator(args: &[std::ffi::OsString]) -> &[std::ffi::OsStr
         .position(|argument| argument == "--")
         .unwrap_or(args.len());
     &args[..end]
+}
+
+fn legacy_usage_error(args: &[std::ffi::OsString]) -> Option<MkoError> {
+    if !legacy_json_requested_from_invalid_arguments(args) {
+        return None;
+    }
+    LegacyCli::try_parse_from(args)
+        .err()
+        .map(|error| MkoError::new("usage", error.to_string()))
 }
 
 trait AddOutcomeName {

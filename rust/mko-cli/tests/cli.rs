@@ -133,7 +133,12 @@ fn legacy_json_usage_errors_remain_byte_frozen_for_source_commands() {
     let cases = [
         (
             ["source", "prepare", "--json"].as_slice(),
-            b"{\"error\":{\"code\":\"usage\",\"message\":\"error: unexpected argument '--json' found\\n\\nUsage: mko source prepare [OPTIONS] --asset-id <ASSET_ID> --output <OUTPUT>\\n\\nFor more information, try '--help'.\\n\"},\"result\":\"error\"}\n"
+            b"{\"error\":{\"code\":\"usage\",\"message\":\"error: unexpected argument '--json' found\\n\\nUsage: mko source prepare [OPTIONS] --repo <REPO> --asset-id <ASSET_ID> --output <OUTPUT>\\n\\nFor more information, try '--help'.\\n\"},\"result\":\"error\"}\n"
+                .as_slice(),
+        ),
+        (
+            ["source", "write-draft", "--json"].as_slice(),
+            b"{\"error\":{\"code\":\"usage\",\"message\":\"error: the following required arguments were not provided:\\n  --repo <REPO>\\n  --bundle <BUNDLE>\\n  --response <RESPONSE>\\n\\nUsage: mko source write-draft --repo <REPO> --bundle <BUNDLE> --response <RESPONSE> --json\\n\\nFor more information, try '--help'.\\n\"},\"result\":\"error\"}\n"
                 .as_slice(),
         ),
         (
