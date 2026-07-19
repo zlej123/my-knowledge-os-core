@@ -175,6 +175,21 @@ fn json_v1_rejects_legacy_json_switch_without_mixing_stdout_or_stderr() {
 
 #[test]
 #[allow(deprecated)]
+fn positional_format_after_terminator_does_not_select_json_v1_usage_errors() {
+    let env = JsonV1Env::new();
+    let output = env
+        .command(["add", "--", "--format", "json-v1"])
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Usage: mko add"));
+}
+
+#[test]
+#[allow(deprecated)]
 fn legacy_detailed_commands_require_repo_without_touching_the_default_profile() {
     let env = JsonV1Env::new();
     let pdf = env.root.join("outside.pdf");

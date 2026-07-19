@@ -35,7 +35,7 @@ use mko_core::{
     },
 };
 
-use crate::output::{emit_json_v1, emit_json_v1_failure};
+use crate::output::{emit_json_v1, emit_json_v1_failure, emit_legacy_json_error};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum OutputFormat {
@@ -786,10 +786,9 @@ fn draft_outcome(result: &str) -> Result<DraftOutcome, MkoError> {
 }
 fn emit_legacy_error(code: &str, message: &str, json: bool) {
     if json {
-        println!(
-            "{}",
-            serde_json::json!({"result":"error","error":{"code":code,"message":message}})
-        );
+        if let Err(output_error) = emit_legacy_json_error(code, message) {
+            eprintln!("{}: {}", output_error.code(), output_error.message());
+        }
     } else {
         eprintln!("{code}: {message}");
     }
@@ -829,6 +828,7 @@ fn json_v1_command(cli: &Cli) -> Option<JsonV1Command> {
 }
 
 fn json_v1_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option<JsonV1Command> {
+    let args = arguments_before_terminator(args);
     let json_v1 = args
         .windows(2)
         .any(|pair| pair[0] == "--format" && pair[1] == "json-v1")
@@ -849,21 +849,22 @@ fn json_v1_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option
 }
 
 fn legacy_json_requested_from_invalid_arguments(args: &[std::ffi::OsString]) -> bool {
+    let args = arguments_before_terminator(args);
     if !args.iter().any(|argument| argument == "--json") {
         return false;
     }
     matches!(
-        (
-            args.get(1).and_then(|argument| argument.to_str()),
-            args.get(2).and_then(|argument| argument.to_str())
-        ),
-        (Some("asset"), _)
-            | (Some("check"), _)
-            | (Some("human"), _)
-            | (Some("hooks"), _)
-            | (Some("source"), Some("write-draft"))
-            | (Some("source"), Some("repair-state"))
+        args.get(1).and_then(|argument| argument.to_str()),
+        Some("asset" | "source" | "check" | "human" | "hooks" | "__extract-pdf")
     )
+}
+
+fn arguments_before_terminator(args: &[std::ffi::OsString]) -> &[std::ffi::OsString] {
+    let end = args
+        .iter()
+        .position(|argument| argument == "--")
+        .unwrap_or(args.len());
+    &args[..end]
 }
 
 trait AddOutcomeName {

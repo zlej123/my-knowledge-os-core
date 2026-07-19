@@ -129,6 +129,35 @@ fn asset_capture_emits_complete_json_for_usage_errors() {
 
 #[test]
 #[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
+fn legacy_json_usage_errors_remain_byte_frozen_for_source_commands() {
+    let cases = [
+        (
+            ["source", "prepare", "--json"].as_slice(),
+            b"{\"error\":{\"code\":\"usage\",\"message\":\"error: unexpected argument '--json' found\\n\\nUsage: mko source prepare [OPTIONS] --asset-id <ASSET_ID> --output <OUTPUT>\\n\\nFor more information, try '--help'.\\n\"},\"result\":\"error\"}\n"
+                .as_slice(),
+        ),
+        (
+            ["source", "repair-state", "--json"].as_slice(),
+            b"{\"error\":{\"code\":\"usage\",\"message\":\"error: the following required arguments were not provided:\\n  --repo <REPO>\\n  --asset-id <ASSET_ID>\\n\\nUsage: mko source repair-state --repo <REPO> --asset-id <ASSET_ID> --json\\n\\nFor more information, try '--help'.\\n\"},\"result\":\"error\"}\n"
+                .as_slice(),
+        ),
+    ];
+
+    for (arguments, expected_stdout) in cases {
+        let output = Command::cargo_bin("mko")
+            .unwrap()
+            .args(arguments)
+            .assert()
+            .code(2)
+            .get_output()
+            .clone();
+        assert_eq!(output.stdout, expected_stdout);
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
+#[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
 fn asset_lifecycle_commands_report_a_changed_asset_and_its_successor() {
     let env = CliTestEnv::new();
     let pdf = env.provider.join("paper.pdf");
