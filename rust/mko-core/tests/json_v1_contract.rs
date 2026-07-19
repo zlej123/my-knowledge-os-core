@@ -58,6 +58,11 @@ const GOLDENS: &[(&str, &[u8], bool)] = &[
         true,
     ),
     (
+        "doctor-blocked.json",
+        include_bytes!("../../../tests/fixtures/json-v1/doctor-blocked.json"),
+        true,
+    ),
+    (
         "doctor-error.json",
         include_bytes!("../../../tests/fixtures/json-v1/doctor-error.json"),
         false,

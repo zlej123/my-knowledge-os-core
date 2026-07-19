@@ -10,9 +10,12 @@ use chrono::{DateTime, Utc};
 use mko_core::{
     clock::Clock,
     context::{PlatformEnvironment, Scope},
-    doctor::{DoctorEnvironment, DoctorRequest, DoctorStatus, diagnose},
+    doctor::{
+        DoctorEnvironment, DoctorRequest, DoctorStatus, ProviderAccessInspection,
+        ProviderEntryInspection, ProviderEntryState, SystemDoctorEnvironment, diagnose,
+    },
     hooks::install_hooks,
-    json_v1::{NextAction, RecoveryKind},
+    json_v1::NextAction,
     lock::LockRecord,
     profile::{MachineProfileFile, PersonalProfile, ProfileStore},
     version::{KNOWLEDGE_CONTRACT_VERSION, PRODUCT_VERSION},
@@ -20,6 +23,7 @@ use mko_core::{
 use tempfile::TempDir;
 
 const CONFIG: &str = "system: my-knowledge-os\nscope: personal\ncore_version: 0.1.0\nschema_version: 1\nprovider:\n  name: personal_google_drive\n  type: google-drive-stream\n  root_env: MKO_PERSONAL_PROVIDER_ROOT\n";
+const INBOX_SUFFIX: &str = "My-Knowledge-OS-Assets/personal/inbox";
 
 #[derive(Clone)]
 struct FakePlatform {
@@ -57,10 +61,15 @@ impl Clock for FixedClock {
 
 struct Fixture {
     _root: TempDir,
+    root: PathBuf,
     repository: PathBuf,
     provider: PathBuf,
+    account_root: PathBuf,
     platform: FakePlatform,
     clock: FixedClock,
+    readable: ProviderAccessInspection,
+    writable: ProviderAccessInspection,
+    provider_entries: Result<Vec<ProviderEntryInspection>, mko_core::error::MkoError>,
 }
 
 impl DoctorEnvironment for Fixture {
@@ -71,13 +80,29 @@ impl DoctorEnvironment for Fixture {
     fn clock(&self) -> &dyn Clock {
         &self.clock
     }
+
+    fn inspect_provider_read_access(&self, _: &Path) -> ProviderAccessInspection {
+        self.readable.clone()
+    }
+
+    fn inspect_provider_write_access(&self, _: &Path) -> ProviderAccessInspection {
+        self.writable.clone()
+    }
+
+    fn inspect_provider_entries(
+        &self,
+        _: &Path,
+    ) -> Result<Vec<ProviderEntryInspection>, mko_core::error::MkoError> {
+        self.provider_entries.clone()
+    }
 }
 
 impl Fixture {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
         let repository = root.path().join("repository");
-        let provider = root.path().join("provider");
+        let account_root = root.path().join("provider-account");
+        let provider = account_root.join(INBOX_SUFFIX);
         let home = root.path().join("home");
         let config_home = root.path().join("config");
         let current_dir = root.path().join("outside");
@@ -87,24 +112,36 @@ impl Fixture {
         fs::write(repository.join("knowledge-os.yaml"), CONFIG).unwrap();
         git(&repository, &["init", "--quiet"]);
         Self {
+            root: root.path().to_path_buf(),
             _root: root,
             repository,
-            provider,
+            provider: provider.clone(),
+            account_root,
             platform: FakePlatform {
                 config_home,
                 home,
                 current_dir,
-                environment: HashMap::new(),
+                environment: HashMap::from([(
+                    OsString::from("MKO_PERSONAL_PROVIDER_ROOT"),
+                    provider.into_os_string(),
+                )]),
             },
             clock: FixedClock(
                 DateTime::parse_from_rfc3339("2026-07-19T00:00:00Z")
                     .unwrap()
                     .with_timezone(&Utc),
             ),
+            readable: ProviderAccessInspection::Allowed,
+            writable: ProviderAccessInspection::Allowed,
+            provider_entries: Ok(Vec::new()),
         }
     }
 
     fn configure(&self) {
+        self.configure_paths(&self.repository, &self.provider);
+    }
+
+    fn configure_paths(&self, repository: &Path, provider: &Path) {
         let store = ProfileStore::from_platform(&self.platform).unwrap();
         store
             .write(&MachineProfileFile {
@@ -113,8 +150,8 @@ impl Fixture {
                 profiles: BTreeMap::from([(
                     "personal".into(),
                     PersonalProfile {
-                        repository_root: self.repository.clone(),
-                        provider_root: self.provider.clone(),
+                        repository_root: repository.to_path_buf(),
+                        provider_root: provider.to_path_buf(),
                         scope: Scope::Personal,
                     },
                 )]),
@@ -129,12 +166,43 @@ impl Fixture {
     fn report(&self) -> mko_core::doctor::DoctorReport {
         diagnose(self.request(), self)
     }
+
+    fn make_healthy(&self) {
+        self.configure();
+        install_hooks(&self.repository).unwrap();
+    }
+
+    fn write_lock(&self, suffix: &str, pid: u32) -> PathBuf {
+        let asset_id = format!("personal-asset-{}", "a".repeat(64));
+        let path = self
+            .repository
+            .join(".knowledge-os/runtime/locks")
+            .join(format!("{asset_id}.{suffix}"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_vec(&LockRecord {
+                pid,
+                hostname: hostname::get().unwrap().to_string_lossy().into_owned(),
+                started_at: DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                command: "prepare".into(),
+                asset_id,
+                owner_token: "crashed".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        path
+    }
 }
 
 #[test]
-fn reports_versions_and_does_not_mutate_knowledge_records() {
+fn reports_versions_profile_schema_and_does_not_mutate_any_diagnostic_surface() {
     let fixture = Fixture::new();
-    let before = snapshot(&fixture.repository);
+    fixture.make_healthy();
+    let before = snapshot(&fixture.root);
 
     let report = fixture.report();
 
@@ -144,16 +212,109 @@ fn reports_versions_and_does_not_mutate_knowledge_records() {
         KNOWLEDGE_CONTRACT_VERSION
     );
     assert_eq!(
-        check(&report, "profile_missing").status,
-        DoctorStatus::Blocked
+        check(&report, "profile_valid").status,
+        DoctorStatus::Healthy
     );
-    assert_eq!(report.next_action, NextAction::Configure);
-    assert_eq!(snapshot(&fixture.repository), before);
+    assert!(report.healthy);
+    assert_eq!(report.next_action, NextAction::None);
+    assert_eq!(snapshot(&fixture.root), before);
 }
 
 #[test]
-fn reports_incompatible_repository_without_hiding_the_missing_profile() {
+fn explicit_repository_uses_its_environment_provider_not_a_mismatched_profile() {
     let fixture = Fixture::new();
+    let other_repository = fixture.root.join("other-repository");
+    let other_provider = fixture.root.join("other-account").join(INBOX_SUFFIX);
+    fs::create_dir_all(&other_repository).unwrap();
+    fs::create_dir_all(&other_provider).unwrap();
+    fs::write(other_repository.join("knowledge-os.yaml"), CONFIG).unwrap();
+    fixture.configure_paths(&other_repository, &other_provider);
+
+    let report = fixture.report();
+
+    assert_eq!(
+        check(&report, "repository_access").path.as_deref(),
+        Some(fs::canonicalize(&fixture.repository).unwrap().as_path())
+    );
+    assert_eq!(
+        check(&report, "provider_inbox").path.as_deref(),
+        Some(fixture.provider.as_path())
+    );
+    assert_eq!(
+        check(&report, "profile_valid").status,
+        DoctorStatus::Healthy
+    );
+}
+
+#[test]
+fn ancestor_repository_wins_and_uses_its_environment_provider() {
+    let mut fixture = Fixture::new();
+    let nested = fixture.repository.join("sources/nested");
+    fs::create_dir_all(&nested).unwrap();
+    fixture.platform.current_dir = nested;
+    let other_repository = fixture.root.join("other-repository");
+    let other_provider = fixture.root.join("other-account").join(INBOX_SUFFIX);
+    fs::create_dir_all(&other_repository).unwrap();
+    fs::create_dir_all(&other_provider).unwrap();
+    fs::write(other_repository.join("knowledge-os.yaml"), CONFIG).unwrap();
+    fixture.configure_paths(&other_repository, &other_provider);
+
+    let report = diagnose(DoctorRequest::new(), &fixture);
+
+    assert_eq!(
+        check(&report, "repository_access").path.as_deref(),
+        Some(fs::canonicalize(&fixture.repository).unwrap().as_path())
+    );
+    assert_eq!(
+        check(&report, "provider_inbox").path.as_deref(),
+        Some(fixture.provider.as_path())
+    );
+}
+
+#[test]
+fn account_root_is_not_accepted_as_the_personal_inbox() {
+    let mut fixture = Fixture::new();
+    fixture.platform.environment.insert(
+        OsString::from("MKO_PERSONAL_PROVIDER_ROOT"),
+        fixture.account_root.as_os_str().to_owned(),
+    );
+
+    let report = fixture.report();
+
+    assert_eq!(
+        check(&report, "provider_root_invalid").status,
+        DoctorStatus::Blocked
+    );
+    assert_eq!(report.next_action, NextAction::Configure);
+}
+
+#[test]
+fn explicit_repository_reports_a_missing_environment_provider() {
+    let mut fixture = Fixture::new();
+    fixture
+        .platform
+        .environment
+        .remove(OsStr::new("MKO_PERSONAL_PROVIDER_ROOT"));
+
+    let report = fixture.report();
+
+    assert_eq!(
+        check(&report, "profile_missing").status,
+        DoctorStatus::Blocked
+    );
+    assert_eq!(
+        check(&report, "provider_missing").status,
+        DoctorStatus::Blocked
+    );
+    assert_eq!(report.next_action, NextAction::Configure);
+}
+
+#[test]
+fn profile_health_is_reported_independently_and_has_first_priority() {
+    let fixture = Fixture::new();
+    let store = ProfileStore::from_platform(&fixture.platform).unwrap();
+    fs::create_dir_all(store.path().parent().unwrap()).unwrap();
+    fs::write(store.path(), "schema_version: nope\n").unwrap();
     fs::write(
         fixture.repository.join("knowledge-os.yaml"),
         "scope: shared\n",
@@ -163,140 +324,172 @@ fn reports_incompatible_repository_without_hiding_the_missing_profile() {
     let report = fixture.report();
 
     assert_eq!(
+        check(&report, "profile_unreadable").status,
+        DoctorStatus::Blocked
+    );
+    assert_eq!(
         check(&report, "repository_incompatible").status,
         DoctorStatus::Blocked
     );
-    assert_eq!(
-        check(&report, "profile_missing").status,
-        DoctorStatus::Blocked
-    );
     assert_eq!(report.next_action, NextAction::Configure);
+    assert_eq!(primary_issue(&report).code, "profile_unreadable");
 }
 
 #[test]
-fn reports_provider_missing_hydration_failure_and_writable_state_independently() {
-    let fixture = Fixture::new();
+fn provider_access_and_entry_states_accumulate_without_short_circuiting() {
+    let mut fixture = Fixture::new();
     fixture.configure();
-    fs::remove_dir(&fixture.provider).unwrap();
+    fixture.readable = ProviderAccessInspection::Denied;
+    fixture.writable = ProviderAccessInspection::Denied;
+    fixture.provider_entries = Ok(vec![
+        ProviderEntryInspection::new(
+            fixture.provider.join("offline.pdf"),
+            ProviderEntryState::NotHydrated,
+        ),
+        ProviderEntryInspection::new(
+            fixture.provider.join("broken.pdf"),
+            ProviderEntryState::Corrupt,
+        ),
+        ProviderEntryInspection::with_detail(
+            fixture.provider.join("secret.pdf"),
+            ProviderEntryState::Unreadable,
+            "entry metadata denied",
+        ),
+    ]);
 
-    let missing = fixture.report();
-    assert_eq!(
-        check(&missing, "provider_missing").status,
-        DoctorStatus::Blocked
+    let report = fixture.report();
+
+    for code in [
+        "provider_unreadable",
+        "provider_unwritable",
+        "provider_hydration_failed",
+        "provider_pdf_corrupt",
+        "provider_pdf_unreadable",
+    ] {
+        assert_eq!(check(&report, code).status, DoctorStatus::Blocked, "{code}");
+    }
+    assert_eq!(report.next_action, NextAction::Repair);
+    assert_eq!(primary_issue(&report).code, "provider_unreadable");
+    assert!(
+        check(&report, "provider_pdf_unreadable")
+            .message
+            .contains("entry metadata denied")
     );
-    assert_eq!(missing.next_action, NextAction::Configure);
-
-    fs::create_dir(&fixture.provider).unwrap();
-    fs::write(fixture.provider.join("unhydrated.pdf"), []).unwrap();
-    let hydration = fixture.report();
-    assert_eq!(
-        check(&hydration, "provider_hydration_failed").recovery,
-        Some(RecoveryKind::Hydrate)
-    );
-    assert_eq!(hydration.next_action, NextAction::Hydrate);
-}
-
-#[cfg(unix)]
-#[test]
-fn reports_unreadable_and_unwritable_provider_without_writing_to_it() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let fixture = Fixture::new();
-    fixture.configure();
-    fs::set_permissions(&fixture.provider, fs::Permissions::from_mode(0o200)).unwrap();
-    let unreadable = fixture.report();
-    assert_eq!(
-        check(&unreadable, "provider_unreadable").status,
-        DoctorStatus::Blocked
-    );
-
-    fs::set_permissions(&fixture.provider, fs::Permissions::from_mode(0o500)).unwrap();
-    let unwritable = fixture.report();
-    assert_eq!(
-        check(&unwritable, "provider_unwritable").status,
-        DoctorStatus::Blocked
-    );
-    fs::set_permissions(&fixture.provider, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
 #[test]
-fn reports_missing_custom_and_managed_hooks() {
+fn indeterminate_access_and_hydration_are_not_reported_as_healthy() {
+    let mut fixture = Fixture::new();
+    fixture.configure();
+    fixture.readable = ProviderAccessInspection::Indeterminate("read ACL unavailable".into());
+    fixture.writable = ProviderAccessInspection::Indeterminate("write ACL unavailable".into());
+    fixture.provider_entries = Ok(vec![ProviderEntryInspection::new(
+        fixture.provider.join("unknown.pdf"),
+        ProviderEntryState::Unknown,
+    )]);
+
+    let report = fixture.report();
+
+    assert_eq!(
+        check(&report, "provider_read_inspection_failed").status,
+        DoctorStatus::Blocked
+    );
+    assert_eq!(
+        check(&report, "provider_write_inspection_failed").status,
+        DoctorStatus::Blocked
+    );
+    assert_eq!(
+        check(&report, "provider_inspection_failed").status,
+        DoctorStatus::Blocked
+    );
+    assert!(!report.healthy);
+}
+
+#[test]
+fn zero_byte_pdf_is_not_a_hydration_signal() {
     let fixture = Fixture::new();
     fixture.configure();
+    fs::write(fixture.provider.join("empty.pdf"), []).unwrap();
 
-    let missing = fixture.report();
-    assert_eq!(
-        check(&missing, "hook_missing").status,
-        DoctorStatus::Blocked
-    );
+    let entries = SystemDoctorEnvironment::default()
+        .inspect_provider_entries(&fixture.provider)
+        .unwrap();
+    let report = fixture.report();
 
-    git(
-        &fixture.repository,
-        &["config", "--local", "core.hooksPath", "custom-hooks"],
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.state != ProviderEntryState::NotHydrated)
     );
-    let custom = fixture.report();
+    assert!(
+        report
+            .checks
+            .iter()
+            .all(|check| check.code != "provider_hydration_failed")
+    );
     assert_eq!(
-        check(&custom, "hook_conflict").status,
-        DoctorStatus::Blocked
-    );
-    git(
-        &fixture.repository,
-        &["config", "--local", "--unset", "core.hooksPath"],
-    );
-    install_hooks(&fixture.repository).unwrap();
-
-    assert_eq!(
-        check(&fixture.report(), "hook_managed").status,
+        check(&report, "provider_hydration").status,
         DoctorStatus::Healthy
     );
 }
 
 #[test]
-fn stale_lock_is_reported_and_has_lower_priority_than_configuration() {
+fn crashed_takeover_lock_is_inspected_as_stale() {
     let fixture = Fixture::new();
-    let asset_id = format!("personal-asset-{}", "a".repeat(64));
-    let lock = fixture
-        .repository
-        .join(".knowledge-os/runtime/locks")
-        .join(format!("{asset_id}.lock"));
-    fs::create_dir_all(lock.parent().unwrap()).unwrap();
-    fs::write(
-        &lock,
-        serde_json::to_vec(&LockRecord {
-            pid: u32::MAX,
-            hostname: hostname::get().unwrap().to_string_lossy().into_owned(),
-            started_at: DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
-            command: "prepare".into(),
-            asset_id,
-            owner_token: "crashed".into(),
-        })
-        .unwrap(),
-    )
-    .unwrap();
+    fixture.make_healthy();
+    let takeover = fixture.write_lock("lock.takeover", u32::MAX);
 
     let report = fixture.report();
 
-    assert_eq!(check(&report, "stale_lock").status, DoctorStatus::Warning);
-    assert_eq!(report.next_action, NextAction::Configure);
+    assert_eq!(
+        check(&report, "stale_lock").path,
+        Some(fs::canonicalize(takeover).unwrap())
+    );
+    assert!(!report.healthy);
+    assert_eq!(report.next_action, NextAction::Repair);
 }
 
 #[test]
-fn healthy_setup_has_no_recovery_action() {
+fn active_and_stale_locks_share_the_central_health_and_priority_rules() {
     let fixture = Fixture::new();
-    fixture.configure();
-    install_hooks(&fixture.repository).unwrap();
+    fixture.make_healthy();
+    fixture.write_lock("lock", std::process::id());
+    fixture.write_lock("lock.takeover", u32::MAX);
 
     let report = fixture.report();
 
-    assert!(report.healthy);
-    assert_eq!(report.next_action, NextAction::None);
-    assert!(
+    assert_eq!(check(&report, "lock_active").status, DoctorStatus::Warning);
+    assert_eq!(check(&report, "stale_lock").status, DoctorStatus::Warning);
+    assert!(!report.healthy);
+    assert_eq!(report.next_action, NextAction::Repair);
+    assert_eq!(primary_issue(&report).code, "stale_lock");
+}
+
+#[test]
+fn healthy_report_has_the_complete_stable_check_order() {
+    let fixture = Fixture::new();
+    fixture.make_healthy();
+
+    let report = fixture.report();
+
+    assert_eq!(
         report
             .checks
             .iter()
-            .all(|check| check.status == DoctorStatus::Healthy)
+            .map(|check| check.code.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "product_version",
+            "contract_version",
+            "profile_valid",
+            "repository_access",
+            "provider_inbox",
+            "provider_readable",
+            "provider_writable",
+            "provider_hydration",
+            "hook_managed",
+            "locks_clear",
+        ]
     );
 }
 
@@ -309,6 +502,12 @@ fn check<'a>(
         .iter()
         .find(|check| check.code == code)
         .unwrap_or_else(|| panic!("missing doctor check {code}: {:#?}", report.checks))
+}
+
+fn primary_issue(report: &mko_core::doctor::DoctorReport) -> &mko_core::doctor::DoctorCheck {
+    report
+        .primary_issue()
+        .expect("blocked report has a primary issue")
 }
 
 fn git(repository: &Path, arguments: &[&str]) {

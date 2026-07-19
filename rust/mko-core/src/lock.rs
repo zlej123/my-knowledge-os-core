@@ -55,7 +55,10 @@ pub fn inspect_locks(
     for entry in entries {
         let entry = entry.map_err(|error| MkoError::new("lock_read_failed", error.to_string()))?;
         let path = entry.path();
-        if path.extension() != Some(std::ffi::OsStr::new("lock")) {
+        let Some(name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
+            continue;
+        };
+        if !name.ends_with(".lock") && !name.ends_with(".lock.takeover") {
             continue;
         }
         let state = match fs::read(&path)

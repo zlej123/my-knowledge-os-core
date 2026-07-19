@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
@@ -6,53 +7,71 @@ use std::{
 };
 
 use assert_cmd::Command;
-use mko_core::json_v1::{DoctorCheckStatus, JsonV1Success, NextAction};
+use mko_core::{
+    context::Scope,
+    hooks::install_hooks,
+    json_v1::JsonV1Success,
+    profile::{MachineProfileFile, PersonalProfile, ProfileStore},
+};
+use serde_json::Value;
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
 const CONFIG: &str = "system: my-knowledge-os\nscope: personal\ncore_version: 0.1.0\nschema_version: 1\nprovider:\n  name: personal_google_drive\n  type: google-drive-stream\n  root_env: MKO_PERSONAL_PROVIDER_ROOT\n";
+const INBOX_SUFFIX: &str = "My-Knowledge-OS-Assets/personal/inbox";
 
 #[test]
 #[allow(deprecated)]
-fn doctor_human_output_is_korean_first_and_json_uses_stable_codes() {
+fn doctor_human_output_is_korean_first_without_leaking_stable_codes() {
     let fixture = Fixture::new();
+    fixture.write_unreadable_profile();
 
-    let human = Command::cargo_bin("mko")
-        .unwrap()
+    let human = fixture
+        .command()
         .args(["doctor", "--repo"])
         .arg(&fixture.repository)
         .assert()
         .success()
+        .stderr("")
         .get_output()
         .stdout
         .clone();
     let human = String::from_utf8(human).unwrap();
-    assert!(human.contains("설정"), "{human}");
-    assert!(!human.contains("profile_missing"), "{human}");
 
-    let json = Command::cargo_bin("mko")
-        .unwrap()
-        .args(["doctor", "--repo"])
-        .arg(&fixture.repository)
-        .args(["--format", "json-v1"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let JsonV1Success::Doctor { data, .. } = serde_json::from_slice(&json).unwrap() else {
-        panic!("doctor must use the doctor JSON-v1 envelope")
-    };
-    assert!(!data.healthy);
-    assert_eq!(data.next_action, NextAction::Configure);
-    assert!(data.checks.iter().any(|check| {
-        check.code == "profile_missing" && check.status == DoctorCheckStatus::Blocked
-    }));
+    assert!(human.contains("설정"), "{human}");
+    assert!(!human.contains("profile_unreadable"), "{human}");
+}
+
+#[test]
+#[allow(deprecated)]
+fn healthy_and_blocked_json_match_normalized_full_goldens_and_schema() {
+    let healthy = Fixture::new();
+    healthy.make_healthy();
+    let healthy_output = healthy.json_output();
+    assert_json_golden(
+        &healthy,
+        &healthy_output,
+        include_str!("../../../tests/fixtures/json-v1/doctor-healthy.json"),
+    );
+
+    let blocked = Fixture::new();
+    blocked.write_unreadable_profile();
+    blocked.use_account_root_as_provider();
+    let blocked_output = blocked.json_output();
+    assert_json_golden(
+        &blocked,
+        &blocked_output,
+        include_str!("../../../tests/fixtures/json-v1/doctor-blocked.json"),
+    );
 }
 
 struct Fixture {
     root: PathBuf,
     repository: PathBuf,
+    account_root: PathBuf,
+    provider: PathBuf,
+    home: PathBuf,
+    config_home: PathBuf,
 }
 
 impl Fixture {
@@ -64,10 +83,101 @@ impl Fixture {
         ));
         fs::create_dir(&root).unwrap();
         let repository = root.join("repository");
-        fs::create_dir(&repository).unwrap();
+        let account_root = root.join("provider-account");
+        let provider = account_root.join(INBOX_SUFFIX);
+        let home = root.join("home");
+        let config_home = platform_config_home(&root, &home);
+        for path in [&repository, &provider, &home, &config_home] {
+            fs::create_dir_all(path).unwrap();
+        }
         fs::write(repository.join("knowledge-os.yaml"), CONFIG).unwrap();
         git(&repository, &["init", "--quiet"]);
-        Self { root, repository }
+        Self {
+            root,
+            repository,
+            account_root,
+            provider,
+            home,
+            config_home,
+        }
+    }
+
+    fn profile_store(&self) -> ProfileStore {
+        ProfileStore::at(self.config_home.join("mko/profiles.yaml"))
+    }
+
+    fn make_healthy(&self) {
+        self.profile_store()
+            .write(&MachineProfileFile {
+                schema_version: 1,
+                default_profile: "personal".into(),
+                profiles: BTreeMap::from([(
+                    "personal".into(),
+                    PersonalProfile {
+                        repository_root: self.repository.clone(),
+                        provider_root: self.provider.clone(),
+                        scope: Scope::Personal,
+                    },
+                )]),
+            })
+            .unwrap();
+        install_hooks(&self.repository).unwrap();
+    }
+
+    fn write_unreadable_profile(&self) {
+        let store = self.profile_store();
+        fs::create_dir_all(store.path().parent().unwrap()).unwrap();
+        fs::write(store.path(), "schema_version: nope\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                store.path().parent().unwrap(),
+                fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+            fs::set_permissions(store.path(), fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    fn use_account_root_as_provider(&self) {
+        fs::write(self.root.join("use-account-root"), []).unwrap();
+    }
+
+    #[allow(deprecated)]
+    fn command(&self) -> Command {
+        let mut command = Command::cargo_bin("mko").unwrap();
+        command.env("HOME", &self.home);
+        command.env("MKO_PERSONAL_PROVIDER_ROOT", self.command_provider());
+        #[cfg(target_os = "linux")]
+        command.env("XDG_CONFIG_HOME", &self.config_home);
+        #[cfg(windows)]
+        {
+            command.env("APPDATA", &self.config_home);
+            command.env("USERPROFILE", &self.home);
+        }
+        command
+    }
+
+    fn command_provider(&self) -> &Path {
+        if self.root.join("use-account-root").exists() {
+            &self.account_root
+        } else {
+            &self.provider
+        }
+    }
+
+    fn json_output(&self) -> Vec<u8> {
+        self.command()
+            .args(["doctor", "--repo"])
+            .arg(&self.repository)
+            .args(["--format", "json-v1"])
+            .assert()
+            .success()
+            .stderr("")
+            .get_output()
+            .stdout
+            .clone()
     }
 }
 
@@ -75,6 +185,54 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+fn assert_json_golden(fixture: &Fixture, output: &[u8], golden: &str) {
+    let typed: JsonV1Success = serde_json::from_slice(output).unwrap();
+    let actual_schema_value = serde_json::to_value(&typed).unwrap();
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../../schemas/machine-output-v1.schema.json"
+    ))
+    .unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    if let Err(error) = validator.validate(&actual_schema_value) {
+        panic!("doctor JSON failed schema validation: {error}");
+    }
+
+    let normalized = normalize_paths(fixture, output);
+    let actual: Value = serde_json::from_str(&normalized).unwrap();
+    let expected: Value = serde_json::from_str(golden).unwrap();
+    assert_eq!(actual, expected);
+}
+
+fn normalize_paths(fixture: &Fixture, output: &[u8]) -> String {
+    let raw = String::from_utf8(output.to_vec()).unwrap();
+    let repository = fs::canonicalize(&fixture.repository).unwrap();
+    raw.replace(
+        &fixture.profile_store().path().display().to_string(),
+        "<PROFILE>",
+    )
+    .replace(&repository.display().to_string(), "<REPOSITORY>")
+    .replace(&fixture.provider.display().to_string(), "<PROVIDER>")
+    .replace(
+        &fixture.account_root.display().to_string(),
+        "<ACCOUNT_ROOT>",
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn platform_config_home(_: &Path, home: &Path) -> PathBuf {
+    home.join("Library/Application Support")
+}
+
+#[cfg(target_os = "linux")]
+fn platform_config_home(root: &Path, _: &Path) -> PathBuf {
+    root.join("config")
+}
+
+#[cfg(windows)]
+fn platform_config_home(root: &Path, _: &Path) -> PathBuf {
+    root.join("config")
 }
 
 fn git(repository: &Path, arguments: &[&str]) {

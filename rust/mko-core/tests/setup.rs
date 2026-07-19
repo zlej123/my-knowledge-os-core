@@ -7,10 +7,12 @@ use std::{
     sync::Mutex,
 };
 
+use chrono::{DateTime, Utc};
 use mko_core::{
     context::{PlatformEnvironment, Scope},
     error::MkoError,
     hooks::{HookState, PRE_COMMIT_SCRIPT, inspect_hook},
+    lock::LockRecord,
     profile::{MachineProfileFile, PersonalProfile, ProfileStore},
     setup::{
         SetupRequest, SetupStep, SetupWriter, SystemSetupWriter, apply_setup,
@@ -889,6 +891,48 @@ fn setup_rerun_is_safe_and_performs_no_redundant_writes() {
     assert_eq!(snapshot_tree(&fixture.root), before);
 }
 
+#[test]
+fn setup_final_health_rejects_an_active_lock_like_doctor() {
+    let fixture = Fixture::new(false);
+    let drive = fixture.mac_drive("alice@example.com");
+    let first = apply_setup(
+        preflight_setup(fixture.request(&drive), &fixture.platform).unwrap(),
+        &SystemSetupWriter,
+    )
+    .unwrap();
+    assert!(first.is_complete());
+    write_setup_lock(&fixture.repository, "lock", std::process::id());
+
+    let rerun = apply_setup(
+        preflight_setup(fixture.request(&drive), &fixture.platform).unwrap(),
+        &SystemSetupWriter,
+    )
+    .unwrap();
+
+    assert_eq!(rerun.failure.unwrap().code, "lock_active");
+}
+
+#[test]
+fn setup_final_health_rejects_a_stale_takeover_lock_like_doctor() {
+    let fixture = Fixture::new(false);
+    let drive = fixture.mac_drive("alice@example.com");
+    let first = apply_setup(
+        preflight_setup(fixture.request(&drive), &fixture.platform).unwrap(),
+        &SystemSetupWriter,
+    )
+    .unwrap();
+    assert!(first.is_complete());
+    write_setup_lock(&fixture.repository, "lock.takeover", u32::MAX);
+
+    let rerun = apply_setup(
+        preflight_setup(fixture.request(&drive), &fixture.platform).unwrap(),
+        &SystemSetupWriter,
+    )
+    .unwrap();
+
+    assert_eq!(rerun.failure.unwrap().code, "stale_lock");
+}
+
 struct FailingWriter {
     fail_at: SetupStep,
     system: SystemSetupWriter,
@@ -1079,6 +1123,29 @@ fn profile(repository_root: &Path, provider_root: &Path) -> MachineProfileFile {
             },
         )]),
     }
+}
+
+fn write_setup_lock(repository: &Path, suffix: &str, pid: u32) {
+    let asset_id = format!("personal-asset-{}", "c".repeat(64));
+    let path = repository
+        .join(".knowledge-os/runtime/locks")
+        .join(format!("{asset_id}.{suffix}"));
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        path,
+        serde_json::to_vec(&LockRecord {
+            pid,
+            hostname: hostname::get().unwrap().to_string_lossy().into_owned(),
+            started_at: DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            command: "prepare".into(),
+            asset_id,
+            owner_token: "crashed".into(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
 }
 
 fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {

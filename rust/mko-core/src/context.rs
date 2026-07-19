@@ -52,6 +52,18 @@ pub struct ResolveContextRequest {
     explicit_scope: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum SelectedPersonalContext {
+    Repository {
+        repository_root: PathBuf,
+        source: ContextSource,
+    },
+    Profile {
+        profile_name: String,
+        profile: PersonalProfile,
+    },
+}
+
 impl ResolveContextRequest {
     pub fn new() -> Self {
         Self::default()
@@ -105,6 +117,22 @@ pub fn resolve_personal_context(
     request: ResolveContextRequest,
     platform: &dyn PlatformEnvironment,
 ) -> Result<ResolvedPersonalContext, MkoError> {
+    match select_personal_context(request, platform)? {
+        SelectedPersonalContext::Repository {
+            repository_root,
+            source,
+        } => resolve_unprofiled_context(&repository_root, source, platform),
+        SelectedPersonalContext::Profile {
+            profile_name,
+            profile,
+        } => resolve_profile_context(&profile_name, &profile),
+    }
+}
+
+pub(crate) fn select_personal_context(
+    request: ResolveContextRequest,
+    platform: &dyn PlatformEnvironment,
+) -> Result<SelectedPersonalContext, MkoError> {
     if let Some(explicit_scope) = request.explicit_scope.as_deref()
         && explicit_scope != Scope::Personal.as_str()
     {
@@ -114,13 +142,19 @@ pub fn resolve_personal_context(
         ));
     }
 
-    if let Some(repository) = request.explicit_repository_root.as_deref() {
-        return resolve_unprofiled_context(repository, ContextSource::Explicit, platform);
+    if let Some(repository_root) = request.explicit_repository_root {
+        return Ok(SelectedPersonalContext::Repository {
+            repository_root,
+            source: ContextSource::Explicit,
+        });
     }
 
     let current_dir = platform.current_dir()?;
-    if let Some(repository) = ancestor_knowledge_base(&current_dir)? {
-        return resolve_unprofiled_context(&repository, ContextSource::Ancestor, platform);
+    if let Some(repository_root) = ancestor_knowledge_base(&current_dir)? {
+        return Ok(SelectedPersonalContext::Repository {
+            repository_root,
+            source: ContextSource::Ancestor,
+        });
     }
 
     let store = ProfileStore::from_platform(platform)?;
@@ -137,7 +171,10 @@ pub fn resolve_personal_context(
             MkoError::new("profile_invalid", "default machine profile does not exist")
         })?;
 
-    resolve_profile_context(&profiles.default_profile, profile)
+    Ok(SelectedPersonalContext::Profile {
+        profile_name: profiles.default_profile.clone(),
+        profile: profile.clone(),
+    })
 }
 
 fn resolve_unprofiled_context(

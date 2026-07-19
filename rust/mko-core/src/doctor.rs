@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
 };
@@ -6,7 +7,10 @@ use std::{
 use crate::{
     clock::{Clock, SystemClock},
     config::KnowledgeConfig,
-    context::{PlatformEnvironment, SystemPlatformEnvironment},
+    context::{
+        ContextSource, PlatformEnvironment, ResolveContextRequest, SelectedPersonalContext,
+        SystemPlatformEnvironment, select_personal_context,
+    },
     error::MkoError,
     hooks::{HookState, inspect_hook},
     json_v1::{DoctorCheckStatus, NextAction, RecoveryKind},
@@ -14,6 +18,10 @@ use crate::{
     profile::ProfileStore,
     version::{KNOWLEDGE_CONTRACT_VERSION, PRODUCT_VERSION},
 };
+
+const PERSONAL_INBOX_SUFFIX: [&str; 3] = ["My-Knowledge-OS-Assets", "personal", "inbox"];
+const MAX_PROVIDER_ENTRIES: usize = 4_096;
+const MAX_PROVIDER_DEPTH: usize = 32;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DoctorRequest {
@@ -31,9 +39,69 @@ impl DoctorRequest {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProviderAccessInspection {
+    Allowed,
+    Denied,
+    Indeterminate(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderEntryState {
+    Hydrated,
+    NotHydrated,
+    Corrupt,
+    Unreadable,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderEntryInspection {
+    pub path: PathBuf,
+    pub state: ProviderEntryState,
+    pub detail: Option<String>,
+}
+
+impl ProviderEntryInspection {
+    pub fn new(path: impl AsRef<Path>, state: ProviderEntryState) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+            state,
+            detail: None,
+        }
+    }
+
+    pub fn with_detail(
+        path: impl AsRef<Path>,
+        state: ProviderEntryState,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+            state,
+            detail: Some(detail.into()),
+        }
+    }
+}
+
 pub trait DoctorEnvironment {
     fn platform(&self) -> &dyn PlatformEnvironment;
     fn clock(&self) -> &dyn Clock;
+
+    fn inspect_provider_read_access(&self, provider: &Path) -> ProviderAccessInspection {
+        inspect_system_provider_access(provider, ProviderAccess::ReadDirectory)
+    }
+
+    fn inspect_provider_write_access(&self, provider: &Path) -> ProviderAccessInspection {
+        inspect_system_provider_access(provider, ProviderAccess::WriteDirectory)
+    }
+
+    fn inspect_provider_entries(
+        &self,
+        provider: &Path,
+    ) -> Result<Vec<ProviderEntryInspection>, MkoError> {
+        inspect_system_provider_entries(provider)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -70,28 +138,95 @@ pub struct DoctorReport {
     pub next_action: NextAction,
 }
 
+impl DoctorReport {
+    pub fn primary_issue(&self) -> Option<&DoctorCheck> {
+        primary_issue(&self.checks)
+    }
+}
+
 pub fn diagnose(request: DoctorRequest, environment: &dyn DoctorEnvironment) -> DoctorReport {
     let mut checks = vec![
         healthy("product_version", PRODUCT_VERSION, None),
         healthy("contract_version", KNOWLEDGE_CONTRACT_VERSION, None),
     ];
-    let profile =
-        ProfileStore::from_platform(environment.platform()).and_then(|store| store.read());
-    let profile = match profile {
-        Ok(Some(profile)) => Some(profile),
-        Ok(None) => {
-            checks.push(blocked(
-                "profile_missing",
-                "machine profile is not configured",
-                None,
-                RecoveryKind::Configure,
-            ));
+    checks.push(profile_check(environment.platform()));
+
+    let selected = select_personal_context(
+        request
+            .repository_root
+            .map_or_else(ResolveContextRequest::new, |repository| {
+                ResolveContextRequest::new().with_explicit_repository(repository)
+            }),
+        environment.platform(),
+    );
+
+    let mut provider = None;
+    let repository = match selected {
+        Ok(SelectedPersonalContext::Repository {
+            repository_root,
+            source,
+        }) => match inspect_repository(&repository_root) {
+            Ok((repository_root, knowledge)) => {
+                checks.push(healthy(
+                    "repository_access",
+                    "repository is compatible",
+                    Some(&repository_root),
+                ));
+                provider = environment
+                    .platform()
+                    .environment_value(OsStr::new(&knowledge.provider.root_env))
+                    .map(PathBuf::from);
+                if provider.is_none() {
+                    checks.push(blocked(
+                        "provider_missing",
+                        "Personal Inbox environment path is not configured",
+                        None,
+                        RecoveryKind::Configure,
+                    ));
+                }
+                Some((repository_root, source))
+            }
+            Err(_) => {
+                checks.push(blocked(
+                    "repository_incompatible",
+                    "repository is not a compatible Personal knowledge base",
+                    Some(&repository_root),
+                    RecoveryKind::Configure,
+                ));
+                None
+            }
+        },
+        Ok(SelectedPersonalContext::Profile { profile, .. }) => {
+            provider = Some(profile.provider_root);
+            match inspect_repository(&profile.repository_root) {
+                Ok((repository_root, _)) => {
+                    checks.push(healthy(
+                        "repository_access",
+                        "repository is compatible",
+                        Some(&repository_root),
+                    ));
+                    Some((repository_root, ContextSource::Profile))
+                }
+                Err(_) => {
+                    checks.push(blocked(
+                        "repository_incompatible",
+                        "repository is not a compatible Personal knowledge base",
+                        Some(&profile.repository_root),
+                        RecoveryKind::Configure,
+                    ));
+                    None
+                }
+            }
+        }
+        Err(error)
+            if error.code() == "context_not_found" || error.code().starts_with("profile_") =>
+        {
             None
         }
         Err(_) => {
             checks.push(blocked(
-                "profile_unreadable",
-                "machine profile could not be read",
+                "repository_incompatible",
+                "repository context could not be inspected",
                 None,
                 RecoveryKind::Configure,
             ));
@@ -99,62 +234,16 @@ pub fn diagnose(request: DoctorRequest, environment: &dyn DoctorEnvironment) -> 
         }
     };
 
-    let repository = request.repository_root.or_else(|| {
-        profile.as_ref().and_then(|profile| {
-            profile
-                .profiles
-                .get(&profile.default_profile)
-                .map(|personal| personal.repository_root.clone())
-        })
-    });
-    let repository = repository.and_then(|path| match canonical_repository(&path) {
-        Ok(path) => Some(path),
-        Err(_) => {
-            checks.push(blocked(
-                "repository_incompatible",
-                "repository is not a compatible Personal knowledge base",
-                Some(&path),
-                RecoveryKind::Configure,
-            ));
-            None
-        }
-    });
-    let provider = profile.as_ref().and_then(|profile| {
-        profile
-            .profiles
-            .get(&profile.default_profile)
-            .map(|personal| personal.provider_root.clone())
-    });
     if let Some(provider) = provider.as_deref() {
-        checks.extend(provider_checks(provider));
+        checks.extend(provider_checks(provider, environment));
     }
 
-    if let Some(repository) = repository.as_deref() {
-        match KnowledgeConfig::read(repository) {
-            Ok(_) => checks.push(healthy(
-                "repository_access",
-                "repository is compatible",
-                Some(repository),
-            )),
-            Err(_) => checks.push(blocked(
-                "repository_incompatible",
-                "repository is not a compatible Personal knowledge base",
-                Some(repository),
-                RecoveryKind::Configure,
-            )),
-        }
+    if let Some((repository, _)) = repository.as_ref() {
         checks.push(hook_check(repository));
         checks.extend(lock_checks(repository, environment.clock()));
     }
 
-    let next_action = next_action(&checks);
-    DoctorReport {
-        healthy: checks
-            .iter()
-            .all(|check| check.status == DoctorCheckStatus::Healthy),
-        checks,
-        next_action,
-    }
+    report(checks)
 }
 
 pub(crate) fn final_setup_checks(
@@ -162,12 +251,16 @@ pub(crate) fn final_setup_checks(
     provider: &Path,
     clock: &dyn Clock,
 ) -> Vec<DoctorCheck> {
+    let environment = SetupDoctorEnvironment {
+        platform: SystemPlatformEnvironment,
+        clock,
+    };
     let mut checks = Vec::new();
-    match KnowledgeConfig::read(repository) {
-        Ok(_) => checks.push(healthy(
+    match inspect_repository(repository) {
+        Ok((repository, _)) => checks.push(healthy(
             "repository_access",
             "repository is compatible",
-            Some(repository),
+            Some(&repository),
         )),
         Err(_) => checks.push(blocked(
             "repository_incompatible",
@@ -176,7 +269,7 @@ pub(crate) fn final_setup_checks(
             RecoveryKind::Configure,
         )),
     }
-    checks.extend(provider_checks(provider));
+    checks.extend(provider_checks(provider, &environment));
     checks.push(hook_check(repository));
     checks.extend(lock_checks(repository, clock));
     checks
@@ -188,16 +281,69 @@ pub(crate) fn setup_checks_are_healthy(
     clock: &dyn Clock,
 ) -> Result<(), MkoError> {
     let checks = final_setup_checks(repository, provider, clock);
-    if let Some(failed) = checks
-        .into_iter()
-        .find(|check| check.status == DoctorCheckStatus::Blocked)
-    {
-        return Err(MkoError::new(failed.code, failed.message));
+    if checks_are_healthy(&checks) {
+        return Ok(());
     }
-    Ok(())
+    let failed = primary_issue(&checks).expect("an unhealthy check set has a primary issue");
+    Err(MkoError::new(&failed.code, &failed.message))
 }
 
-fn canonical_repository(path: &Path) -> Result<PathBuf, MkoError> {
+struct SetupDoctorEnvironment<'a> {
+    platform: SystemPlatformEnvironment,
+    clock: &'a dyn Clock,
+}
+
+impl DoctorEnvironment for SetupDoctorEnvironment<'_> {
+    fn platform(&self) -> &dyn PlatformEnvironment {
+        &self.platform
+    }
+
+    fn clock(&self) -> &dyn Clock {
+        self.clock
+    }
+}
+
+fn report(checks: Vec<DoctorCheck>) -> DoctorReport {
+    DoctorReport {
+        healthy: checks_are_healthy(&checks),
+        next_action: primary_issue(&checks)
+            .map(action_for_issue)
+            .unwrap_or(NextAction::None),
+        checks,
+    }
+}
+
+fn profile_check(platform: &dyn PlatformEnvironment) -> DoctorCheck {
+    match ProfileStore::from_platform(platform) {
+        Ok(store) => match store.read() {
+            Ok(Some(_)) => healthy(
+                "profile_valid",
+                "machine profile schema is valid",
+                Some(store.path()),
+            ),
+            Ok(None) => blocked(
+                "profile_missing",
+                "machine profile is not configured",
+                Some(store.path()),
+                RecoveryKind::Configure,
+            ),
+            Err(_) => blocked(
+                "profile_unreadable",
+                "machine profile could not be read or validated",
+                Some(store.path()),
+                RecoveryKind::Configure,
+            ),
+        },
+        Err(_) => blocked(
+            "profile_unreadable",
+            "machine profile location could not be inspected",
+            None,
+            RecoveryKind::Configure,
+        ),
+    }
+}
+
+fn inspect_repository(path: &Path) -> Result<(PathBuf, KnowledgeConfig), MkoError> {
     let metadata = fs::metadata(path)
         .map_err(|error| MkoError::new("repository_incompatible", error.to_string()))?;
     if !metadata.is_dir() {
@@ -206,98 +352,362 @@ fn canonical_repository(path: &Path) -> Result<PathBuf, MkoError> {
             "repository path is not a directory",
         ));
     }
-    fs::canonicalize(path)
-        .map_err(|error| MkoError::new("repository_incompatible", error.to_string()))
+    let canonical = fs::canonicalize(path)
+        .map_err(|error| MkoError::new("repository_incompatible", error.to_string()))?;
+    let knowledge = KnowledgeConfig::read(&canonical)
+        .map_err(|error| MkoError::new("repository_incompatible", error.to_string()))?;
+    Ok((canonical, knowledge))
 }
 
-fn provider_checks(provider: &Path) -> Vec<DoctorCheck> {
-    let metadata = match fs::metadata(provider) {
-        Ok(metadata) if metadata.is_dir() => metadata,
-        Ok(_) => {
-            return vec![blocked(
-                "provider_unreadable",
-                "Personal Inbox is not a directory",
-                Some(provider),
-                RecoveryKind::FixPermissions,
-            )];
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return vec![blocked(
-                "provider_missing",
-                "Personal Inbox does not exist",
-                Some(provider),
-                RecoveryKind::Configure,
-            )];
-        }
-        Err(_) => {
-            return vec![blocked(
-                "provider_unreadable",
-                "Personal Inbox cannot be read",
-                Some(provider),
-                RecoveryKind::FixPermissions,
-            )];
-        }
-    };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = metadata.permissions().mode();
-        if mode & 0o444 == 0 {
-            return vec![blocked(
-                "provider_unreadable",
-                "Personal Inbox cannot be read",
-                Some(provider),
-                RecoveryKind::FixPermissions,
-            )];
-        }
-        if mode & 0o222 == 0 {
-            return vec![blocked(
-                "provider_unwritable",
-                "Personal Inbox cannot be written",
-                Some(provider),
-                RecoveryKind::FixPermissions,
-            )];
-        }
+fn provider_checks(provider: &Path, environment: &dyn DoctorEnvironment) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+    checks.push(provider_identity_check(provider));
+    checks.push(provider_read_check(
+        provider,
+        environment.inspect_provider_read_access(provider),
+    ));
+    checks.push(provider_write_check(
+        provider,
+        environment.inspect_provider_write_access(provider),
+    ));
+    checks.extend(provider_entry_checks(
+        provider,
+        environment.inspect_provider_entries(provider),
+    ));
+    checks
+}
+
+fn provider_identity_check(provider: &Path) -> DoctorCheck {
+    if !provider.is_absolute() || !is_exact_personal_inbox(provider) {
+        return blocked(
+            "provider_root_invalid",
+            "provider root must be the exact Personal Inbox",
+            Some(provider),
+            RecoveryKind::Configure,
+        );
     }
-    if metadata.permissions().readonly() {
-        return vec![blocked(
-            "provider_unwritable",
-            "Personal Inbox cannot be written",
+    match fs::symlink_metadata(provider) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => healthy(
+            "provider_inbox",
+            "provider root is the exact Personal Inbox",
+            Some(provider),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => blocked(
+            "provider_missing",
+            "Personal Inbox does not exist",
+            Some(provider),
+            RecoveryKind::Configure,
+        ),
+        _ => blocked(
+            "provider_root_invalid",
+            "Personal Inbox must be a real directory",
+            Some(provider),
+            RecoveryKind::Configure,
+        ),
+    }
+}
+
+fn is_exact_personal_inbox(provider: &Path) -> bool {
+    let suffix = PERSONAL_INBOX_SUFFIX
+        .into_iter()
+        .fold(PathBuf::new(), |path, component| path.join(component));
+    provider.ends_with(suffix)
+        && provider
+            .ancestors()
+            .nth(PERSONAL_INBOX_SUFFIX.len())
+            .is_some_and(|account_root| account_root.file_name().is_some())
+}
+
+fn provider_read_check(provider: &Path, inspection: ProviderAccessInspection) -> DoctorCheck {
+    match inspection {
+        ProviderAccessInspection::Allowed => healthy(
+            "provider_readable",
+            "Personal Inbox is readable by the current process",
+            Some(provider),
+        ),
+        ProviderAccessInspection::Denied => blocked(
+            "provider_unreadable",
+            "Personal Inbox cannot be read by the current process",
             Some(provider),
             RecoveryKind::FixPermissions,
-        )];
+        ),
+        ProviderAccessInspection::Indeterminate(detail) => blocked(
+            "provider_read_inspection_failed",
+            &format!("Personal Inbox read access could not be determined: {detail}"),
+            Some(provider),
+            RecoveryKind::FixPermissions,
+        ),
     }
-    let entries = match fs::read_dir(provider) {
-        Ok(entries) => entries,
-        Err(_) => {
+}
+
+fn provider_write_check(provider: &Path, inspection: ProviderAccessInspection) -> DoctorCheck {
+    match inspection {
+        ProviderAccessInspection::Allowed => healthy(
+            "provider_writable",
+            "Personal Inbox is writable by the current process",
+            Some(provider),
+        ),
+        ProviderAccessInspection::Denied => blocked(
+            "provider_unwritable",
+            "Personal Inbox cannot be written by the current process",
+            Some(provider),
+            RecoveryKind::FixPermissions,
+        ),
+        ProviderAccessInspection::Indeterminate(detail) => blocked(
+            "provider_write_inspection_failed",
+            &format!("Personal Inbox write access could not be determined: {detail}"),
+            Some(provider),
+            RecoveryKind::FixPermissions,
+        ),
+    }
+}
+
+fn provider_entry_checks(
+    provider: &Path,
+    inspections: Result<Vec<ProviderEntryInspection>, MkoError>,
+) -> Vec<DoctorCheck> {
+    let mut inspections = match inspections {
+        Ok(inspections) => inspections,
+        Err(error) => {
             return vec![blocked(
-                "provider_unreadable",
-                "Personal Inbox cannot be read",
+                "provider_inspection_failed",
+                &format!("Personal Inbox entries could not be inspected: {error}"),
                 Some(provider),
-                RecoveryKind::FixPermissions,
+                RecoveryKind::Repair,
             )];
         }
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
-            && fs::metadata(&path).map_or(true, |metadata| metadata.len() == 0)
-        {
-            return vec![blocked(
-                "provider_hydration_failed",
-                "a Personal PDF is not hydrated for reading",
-                Some(&path),
-                RecoveryKind::Hydrate,
-            )];
+    inspections.sort_by(|left, right| left.path.cmp(&right.path));
+    let mut checks = inspections
+        .into_iter()
+        .filter_map(|inspection| {
+            let detail = inspection
+                .detail
+                .as_deref()
+                .map(|detail| format!(": {detail}"))
+                .unwrap_or_default();
+            match inspection.state {
+                ProviderEntryState::Hydrated => None,
+                ProviderEntryState::NotHydrated => Some(blocked(
+                    "provider_hydration_failed",
+                    &format!("a Personal PDF is a cloud placeholder{detail}"),
+                    Some(&inspection.path),
+                    RecoveryKind::Hydrate,
+                )),
+                ProviderEntryState::Corrupt => Some(blocked(
+                    "provider_pdf_corrupt",
+                    &format!("a Personal PDF entry is invalid{detail}"),
+                    Some(&inspection.path),
+                    RecoveryKind::Repair,
+                )),
+                ProviderEntryState::Unreadable => Some(blocked(
+                    "provider_pdf_unreadable",
+                    &format!("a Personal PDF entry could not be inspected{detail}"),
+                    Some(&inspection.path),
+                    RecoveryKind::FixPermissions,
+                )),
+                ProviderEntryState::Unknown => Some(blocked(
+                    "provider_inspection_failed",
+                    &format!("a Personal PDF hydration state could not be determined{detail}"),
+                    Some(&inspection.path),
+                    RecoveryKind::Repair,
+                )),
+            }
+        })
+        .collect::<Vec<_>>();
+    if checks.is_empty() {
+        checks.push(healthy(
+            "provider_hydration",
+            "Personal PDF placeholder metadata is healthy",
+            Some(provider),
+        ));
+    }
+    checks
+}
+
+#[derive(Clone, Copy)]
+enum ProviderAccess {
+    ReadDirectory,
+    WriteDirectory,
+    ReadFile,
+}
+
+#[cfg(unix)]
+fn inspect_system_provider_access(
+    provider: &Path,
+    access: ProviderAccess,
+) -> ProviderAccessInspection {
+    use nix::{
+        errno::Errno,
+        fcntl::{AT_FDCWD, AtFlags},
+        unistd::{AccessFlags, faccessat},
+    };
+
+    let mode = match access {
+        ProviderAccess::ReadDirectory => AccessFlags::R_OK | AccessFlags::X_OK,
+        ProviderAccess::WriteDirectory => AccessFlags::W_OK | AccessFlags::X_OK,
+        ProviderAccess::ReadFile => AccessFlags::R_OK,
+    };
+    match faccessat(AT_FDCWD, provider, mode, AtFlags::AT_EACCESS) {
+        Ok(()) => ProviderAccessInspection::Allowed,
+        Err(Errno::EACCES | Errno::EPERM) => ProviderAccessInspection::Denied,
+        Err(error) => ProviderAccessInspection::Indeterminate(error.to_string()),
+    }
+}
+
+#[cfg(windows)]
+fn inspect_system_provider_access(
+    provider: &Path,
+    access: ProviderAccess,
+) -> ProviderAccessInspection {
+    let access = match access {
+        ProviderAccess::ReadDirectory => mko_windows_acl::EffectiveAccess::ReadDirectory,
+        ProviderAccess::WriteDirectory => mko_windows_acl::EffectiveAccess::WriteDirectory,
+        ProviderAccess::ReadFile => mko_windows_acl::EffectiveAccess::ReadFile,
+    };
+    match mko_windows_acl::check_effective_access(provider, access) {
+        Ok(true) => ProviderAccessInspection::Allowed,
+        Ok(false) => ProviderAccessInspection::Denied,
+        Err(error) => ProviderAccessInspection::Indeterminate(error.to_string()),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn inspect_system_provider_access(_: &Path, _: ProviderAccess) -> ProviderAccessInspection {
+    ProviderAccessInspection::Indeterminate(
+        "effective access inspection is unsupported on this platform".into(),
+    )
+}
+
+fn inspect_system_provider_entries(
+    provider: &Path,
+) -> Result<Vec<ProviderEntryInspection>, MkoError> {
+    let mut inspections = Vec::new();
+    let mut stack = vec![(provider.to_path_buf(), 0usize)];
+    let mut seen = 0usize;
+    while let Some((directory, depth)) = stack.pop() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) => {
+                inspections.push(ProviderEntryInspection::with_detail(
+                    &directory,
+                    ProviderEntryState::Unreadable,
+                    error.to_string(),
+                ));
+                continue;
+            }
+        };
+        for entry in entries {
+            seen += 1;
+            if seen > MAX_PROVIDER_ENTRIES {
+                inspections.push(ProviderEntryInspection::with_detail(
+                    provider,
+                    ProviderEntryState::Unknown,
+                    format!("inspection exceeded {MAX_PROVIDER_ENTRIES} entries"),
+                ));
+                return Ok(inspections);
+            }
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    inspections.push(ProviderEntryInspection::with_detail(
+                        &directory,
+                        ProviderEntryState::Unreadable,
+                        error.to_string(),
+                    ));
+                    continue;
+                }
+            };
+            let path = entry.path();
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    inspections.push(ProviderEntryInspection::with_detail(
+                        &path,
+                        ProviderEntryState::Unreadable,
+                        error.to_string(),
+                    ));
+                    continue;
+                }
+            };
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                if depth >= MAX_PROVIDER_DEPTH {
+                    inspections.push(ProviderEntryInspection::with_detail(
+                        &path,
+                        ProviderEntryState::Unknown,
+                        format!("inspection exceeded depth {MAX_PROVIDER_DEPTH}"),
+                    ));
+                } else {
+                    stack.push((path, depth + 1));
+                }
+                continue;
+            }
+            if !path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+            {
+                continue;
+            }
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                inspections.push(ProviderEntryInspection::new(
+                    path,
+                    ProviderEntryState::Corrupt,
+                ));
+                continue;
+            }
+            match inspect_system_provider_access(&path, ProviderAccess::ReadFile) {
+                ProviderAccessInspection::Allowed => inspections.push(
+                    ProviderEntryInspection::new(&path, platform_hydration_state(&metadata)),
+                ),
+                ProviderAccessInspection::Denied => {
+                    inspections.push(ProviderEntryInspection::with_detail(
+                        &path,
+                        ProviderEntryState::Unreadable,
+                        "current process does not have read access",
+                    ))
+                }
+                ProviderAccessInspection::Indeterminate(detail) => {
+                    inspections.push(ProviderEntryInspection::with_detail(
+                        &path,
+                        ProviderEntryState::Unknown,
+                        format!("read access could not be determined: {detail}"),
+                    ))
+                }
+            }
         }
     }
-    vec![healthy(
-        "provider_access",
-        "Personal Inbox is readable and writable",
-        Some(provider),
-    )]
+    Ok(inspections)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_hydration_state(metadata: &fs::Metadata) -> ProviderEntryState {
+    use std::os::macos::fs::MetadataExt;
+
+    const SF_DATALESS: u32 = 0x4000_0000;
+    if metadata.st_flags() & SF_DATALESS != 0 {
+        ProviderEntryState::NotHydrated
+    } else {
+        ProviderEntryState::Hydrated
+    }
+}
+
+#[cfg(windows)]
+fn platform_hydration_state(metadata: &fs::Metadata) -> ProviderEntryState {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
+    const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+    let attributes = metadata.file_attributes();
+    if attributes & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) != 0 {
+        ProviderEntryState::NotHydrated
+    } else {
+        ProviderEntryState::Hydrated
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn platform_hydration_state(_: &fs::Metadata) -> ProviderEntryState {
+    ProviderEntryState::Unknown
 }
 
 fn hook_check(repository: &Path) -> DoctorCheck {
@@ -330,6 +740,11 @@ fn hook_check(repository: &Path) -> DoctorCheck {
 
 fn lock_checks(repository: &Path, clock: &dyn Clock) -> Vec<DoctorCheck> {
     match inspect_locks(repository, clock) {
+        Ok(inspections) if inspections.is_empty() => vec![healthy(
+            "locks_clear",
+            "no operation locks are present",
+            Some(repository),
+        )],
         Ok(inspections) => inspections
             .into_iter()
             .map(|inspection| match inspection.state {
@@ -362,31 +777,58 @@ fn lock_checks(repository: &Path, clock: &dyn Clock) -> Vec<DoctorCheck> {
     }
 }
 
-fn next_action(checks: &[DoctorCheck]) -> NextAction {
-    let priority = [
-        ("profile_missing", NextAction::Configure),
-        ("profile_unreadable", NextAction::Configure),
-        ("repository_incompatible", NextAction::Configure),
-        ("provider_missing", NextAction::Configure),
-        ("provider_unreadable", NextAction::Repair),
-        ("provider_unwritable", NextAction::Repair),
-        ("provider_hydration_failed", NextAction::Hydrate),
-        ("hook_conflict", NextAction::Repair),
-        ("hook_missing", NextAction::Repair),
-        ("hook_unreadable", NextAction::Repair),
-        ("stale_lock", NextAction::Repair),
-        ("lock_unreadable", NextAction::Repair),
-        ("lock_active", NextAction::Retry),
-    ];
-    priority
+fn checks_are_healthy(checks: &[DoctorCheck]) -> bool {
+    checks
         .iter()
-        .find_map(|(code, action)| {
-            checks
-                .iter()
-                .any(|check| check.code == *code)
-                .then(|| action.clone())
-        })
-        .unwrap_or(NextAction::None)
+        .all(|check| check.status == DoctorCheckStatus::Healthy)
+}
+
+fn primary_issue(checks: &[DoctorCheck]) -> Option<&DoctorCheck> {
+    checks
+        .iter()
+        .filter(|check| check.status != DoctorCheckStatus::Healthy)
+        .min_by_key(|check| issue_priority(&check.code))
+}
+
+fn issue_priority(code: &str) -> usize {
+    const PRIORITY: &[&str] = &[
+        "profile_missing",
+        "profile_unreadable",
+        "repository_incompatible",
+        "provider_root_invalid",
+        "provider_missing",
+        "provider_unreadable",
+        "provider_read_inspection_failed",
+        "provider_unwritable",
+        "provider_write_inspection_failed",
+        "provider_pdf_unreadable",
+        "provider_pdf_corrupt",
+        "provider_inspection_failed",
+        "provider_hydration_failed",
+        "hook_conflict",
+        "hook_missing",
+        "hook_unreadable",
+        "stale_lock",
+        "lock_unreadable",
+        "lock_active",
+    ];
+    PRIORITY
+        .iter()
+        .position(|candidate| *candidate == code)
+        .unwrap_or(PRIORITY.len())
+}
+
+fn action_for_issue(check: &DoctorCheck) -> NextAction {
+    match check.code.as_str() {
+        "profile_missing"
+        | "profile_unreadable"
+        | "repository_incompatible"
+        | "provider_root_invalid"
+        | "provider_missing" => NextAction::Configure,
+        "provider_hydration_failed" => NextAction::Hydrate,
+        "lock_active" => NextAction::Retry,
+        _ => NextAction::Repair,
+    }
 }
 
 fn healthy(code: &str, message: &str, path: Option<&Path>) -> DoctorCheck {

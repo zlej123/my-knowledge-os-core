@@ -17,7 +17,9 @@ use std::{
 };
 
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, LocalFree},
+    Foundation::{
+        CloseHandle, ERROR_ACCESS_DENIED, ERROR_SUCCESS, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+    },
     Security::{
         Authorization::{
             EXPLICIT_ACCESS_W, GRANT_ACCESS, GetExplicitEntriesFromAclW, GetNamedSecurityInfoW,
@@ -29,7 +31,12 @@ use windows_sys::Win32::{
         PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
         TOKEN_QUERY, TOKEN_USER, TokenUser,
     },
-    Storage::FileSystem::{FILE_NAME_NORMALIZED, GetFinalPathNameByHandleW, VOLUME_NAME_DOS},
+    Storage::FileSystem::{
+        CreateFileW, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_DATA, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, GetFinalPathNameByHandleW, OPEN_EXISTING,
+        VOLUME_NAME_DOS,
+    },
     System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
 
@@ -52,6 +59,13 @@ pub struct AclInspection {
     pub owner_is_current_user: bool,
     pub dacl_is_protected: bool,
     pub entries: Vec<AceInspection>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EffectiveAccess {
+    ReadDirectory,
+    WriteDirectory,
+    ReadFile,
 }
 
 #[derive(Debug)]
@@ -211,6 +225,40 @@ pub fn inspect_path(path: &Path) -> Result<AclInspection, Error> {
     )?;
     let descriptor_guard = LocalAllocation(descriptor);
     inspect_descriptor(owner, dacl, descriptor_guard.0)
+}
+
+pub fn check_effective_access(path: &Path, access: EffectiveAccess) -> Result<bool, Error> {
+    let path_wide = wide_path(path, ErrorKind::Permissions)?;
+    let desired_access = match access {
+        EffectiveAccess::ReadDirectory => FILE_LIST_DIRECTORY,
+        EffectiveAccess::WriteDirectory => FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY,
+        EffectiveAccess::ReadFile => FILE_READ_DATA,
+    };
+    // SAFETY: The path is NUL-terminated, the call only opens an existing directory for an ACL
+    // access check, and no security attributes or template handle are supplied.
+    let handle = unsafe {
+        CreateFileW(
+            path_wide.as_ptr(),
+            desired_access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
+            return Ok(false);
+        }
+        return Err(message_error(
+            ErrorKind::Permissions,
+            format!("cannot evaluate current-user directory access: {error}"),
+        ));
+    }
+    drop(TokenHandle(handle));
+    Ok(true)
 }
 
 fn inspect_descriptor(
@@ -376,8 +424,8 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::{
-        AclInspection, Error, ErrorKind, FULL_CONTROL_MASK, Inheritance, apply_owner_only_to_file,
-        apply_owner_only_to_path, inspect_path,
+        AclInspection, EffectiveAccess, Error, ErrorKind, FULL_CONTROL_MASK, Inheritance,
+        apply_owner_only_to_file, apply_owner_only_to_path, check_effective_access, inspect_path,
     };
 
     #[test]
@@ -418,5 +466,16 @@ mod tests {
         assert_eq!(inspection.entries.len(), 1);
         assert!(inspection.entries[0].allows_current_user);
         assert_eq!(inspection.entries[0].access_mask, FULL_CONTROL_MASK);
+    }
+
+    #[test]
+    fn current_user_effective_directory_access_is_evaluated_without_a_write_probe() {
+        let root = tempfile::tempdir().unwrap();
+
+        assert!(check_effective_access(root.path(), EffectiveAccess::ReadDirectory).unwrap());
+        assert!(check_effective_access(root.path(), EffectiveAccess::WriteDirectory).unwrap());
+        let file = root.path().join("paper.pdf");
+        fs::write(&file, b"%PDF-1.7").unwrap();
+        assert!(check_effective_access(&file, EffectiveAccess::ReadFile).unwrap());
     }
 }
