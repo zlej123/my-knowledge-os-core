@@ -114,7 +114,38 @@ pub struct ProviderScanResult {
 #[derive(Clone, Debug)]
 pub(crate) struct ProviderMetadataEntry {
     pub relative_path: PathBuf,
-    pub platform_attributes: u32,
+    hydration: ProviderHydrationDisposition,
+    size_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProviderHydrationDisposition {
+    Placeholder,
+    Supported,
+    #[cfg_attr(any(target_os = "macos", windows), allow(dead_code))]
+    Unsupported,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderMetadataAccess<T> {
+    Placeholder,
+    Supported(T),
+    Unsupported(T),
+}
+
+impl ProviderMetadataEntry {
+    pub(crate) fn inspect_access<T>(
+        &self,
+        inspect: impl FnOnce() -> T,
+    ) -> ProviderMetadataAccess<T> {
+        match self.hydration {
+            ProviderHydrationDisposition::Placeholder => ProviderMetadataAccess::Placeholder,
+            ProviderHydrationDisposition::Supported => ProviderMetadataAccess::Supported(inspect()),
+            ProviderHydrationDisposition::Unsupported => {
+                ProviderMetadataAccess::Unsupported(inspect())
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -132,13 +163,15 @@ pub(crate) struct ProviderMetadataWalk {
 pub(crate) fn inspect_provider_metadata(
     provider_root: &Path,
     limits: ScanLimits,
+    elapsed_clock: &dyn ElapsedClock,
 ) -> Result<ProviderMetadataWalk, MkoError> {
-    inspect_provider_metadata_with_observer(provider_root, limits, &mut |_| {})
+    inspect_provider_metadata_with_observer(provider_root, limits, elapsed_clock, &mut |_| {})
 }
 
 fn inspect_provider_metadata_with_observer(
     provider_root: &Path,
     limits: ScanLimits,
+    elapsed_clock: &dyn ElapsedClock,
     observer: &mut dyn FnMut(&Path),
 ) -> Result<ProviderMetadataWalk, MkoError> {
     validate_limits(limits)?;
@@ -160,9 +193,11 @@ fn inspect_provider_metadata_with_observer(
             format!("cannot open provider root: {error}"),
         )
     })?;
+    let started_ms = elapsed_clock.elapsed_ms();
     let mut state = MetadataWalkState {
         limits,
-        started_at: Instant::now(),
+        started_ms,
+        elapsed_clock,
         entries_seen: 0,
         total_pdf_bytes: 0,
         stopped: false,
@@ -179,7 +214,8 @@ fn inspect_provider_metadata_with_observer(
 
 struct MetadataWalkState<'a> {
     limits: ScanLimits,
-    started_at: Instant,
+    started_ms: u64,
+    elapsed_clock: &'a dyn ElapsedClock,
     entries_seen: u64,
     total_pdf_bytes: u64,
     stopped: bool,
@@ -306,26 +342,15 @@ fn walk_provider_metadata(
             continue;
         }
         (state.observer)(&relative);
-        let metadata = match directory.symlink_metadata(name) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                metadata_issue(
-                    state,
-                    Some(relative),
-                    format!("cannot inspect PDF metadata: {error}"),
-                );
+        let metadata_entry = match inspect_enumerated_pdf(&entry, directory, name, relative.clone())
+        {
+            Ok(metadata_entry) => metadata_entry,
+            Err(message) => {
+                metadata_issue(state, Some(relative), message);
                 continue;
             }
         };
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            metadata_issue(
-                state,
-                Some(relative),
-                "PDF candidate changed to a non-file or link".into(),
-            );
-            continue;
-        }
-        let next_total = match state.total_pdf_bytes.checked_add(metadata.len()) {
+        let next_total = match state.total_pdf_bytes.checked_add(metadata_entry.size_bytes) {
             Some(total) => total,
             None => {
                 state.stopped = true;
@@ -343,13 +368,7 @@ fn walk_provider_metadata(
             break;
         }
         state.total_pdf_bytes = next_total;
-        match platform_attributes(directory, name, &metadata) {
-            Ok(platform_attributes) => state.walk.entries.push(ProviderMetadataEntry {
-                relative_path: relative,
-                platform_attributes,
-            }),
-            Err(message) => metadata_issue(state, Some(relative), message),
-        }
+        state.walk.entries.push(metadata_entry);
     }
 }
 
@@ -357,7 +376,12 @@ fn metadata_limit_reached(state: &mut MetadataWalkState<'_>) -> bool {
     if state.stopped {
         return true;
     }
-    if state.started_at.elapsed().as_millis() < u128::from(state.limits.max_elapsed_ms) {
+    if state
+        .elapsed_clock
+        .elapsed_ms()
+        .saturating_sub(state.started_ms)
+        < state.limits.max_elapsed_ms
+    {
         return false;
     }
     state.stopped = true;
@@ -367,6 +391,110 @@ fn metadata_limit_reached(state: &mut MetadataWalkState<'_>) -> bool {
         "provider inspection reached the time limit".into(),
     );
     true
+}
+
+#[cfg(windows)]
+fn inspect_enumerated_pdf(
+    entry: &DirEntry,
+    directory: &Dir,
+    name: &str,
+    relative_path: PathBuf,
+) -> Result<ProviderMetadataEntry, String> {
+    use cap_std::fs::MetadataExt;
+
+    // On Windows this reads the attributes retained by directory enumeration.
+    // Do not replace it with a path-based metadata call: RECALL_ON_OPEN must be
+    // classified before any operation that can acquire a new file handle.
+    let enumerated = entry
+        .metadata()
+        .map_err(|error| format!("cannot inspect enumerated PDF metadata: {error}"))?;
+    inspect_windows_enumerated_pdf(
+        relative_path,
+        enumerated.file_attributes(),
+        enumerated.len(),
+        || inspect_nofollow_pdf_metadata(directory, name),
+    )
+}
+
+#[cfg(not(windows))]
+fn inspect_enumerated_pdf(
+    _: &DirEntry,
+    directory: &Dir,
+    name: &str,
+    relative_path: PathBuf,
+) -> Result<ProviderMetadataEntry, String> {
+    let size_bytes = inspect_nofollow_pdf_metadata(directory, name)?;
+    Ok(ProviderMetadataEntry {
+        relative_path,
+        hydration: non_windows_hydration_disposition(directory, name)?,
+        size_bytes,
+    })
+}
+
+fn inspect_nofollow_pdf_metadata(directory: &Dir, name: &str) -> Result<u64, String> {
+    let metadata = directory
+        .symlink_metadata(name)
+        .map_err(|error| format!("cannot inspect PDF metadata: {error}"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("PDF candidate changed to a non-file or link".into());
+    }
+    Ok(metadata.len())
+}
+
+#[cfg(any(windows, test))]
+fn inspect_windows_enumerated_pdf(
+    relative_path: PathBuf,
+    attributes: u32,
+    enumerated_size: u64,
+    inspect_metadata_handle: impl FnOnce() -> Result<u64, String>,
+) -> Result<ProviderMetadataEntry, String> {
+    const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
+    const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
+    const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+    if attributes
+        & (FILE_ATTRIBUTE_OFFLINE
+            | FILE_ATTRIBUTE_RECALL_ON_OPEN
+            | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+        != 0
+    {
+        return Ok(ProviderMetadataEntry {
+            relative_path,
+            hydration: ProviderHydrationDisposition::Placeholder,
+            size_bytes: enumerated_size,
+        });
+    }
+    Ok(ProviderMetadataEntry {
+        relative_path,
+        hydration: ProviderHydrationDisposition::Supported,
+        size_bytes: inspect_metadata_handle()?,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn non_windows_hydration_disposition(
+    directory: &Dir,
+    name: &str,
+) -> Result<ProviderHydrationDisposition, String> {
+    use std::os::fd::AsFd;
+
+    use nix::{fcntl::AtFlags, sys::stat::fstatat};
+
+    const SF_DATALESS: u32 = 0x4000_0000;
+    let metadata = fstatat(directory.as_fd(), name, AtFlags::AT_SYMLINK_NOFOLLOW)
+        .map_err(|error| format!("cannot inspect PDF platform metadata: {error}"))?;
+    Ok(if metadata.st_flags & SF_DATALESS != 0 {
+        ProviderHydrationDisposition::Placeholder
+    } else {
+        ProviderHydrationDisposition::Supported
+    })
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn non_windows_hydration_disposition(
+    _: &Dir,
+    _: &str,
+) -> Result<ProviderHydrationDisposition, String> {
+    Ok(ProviderHydrationDisposition::Unsupported)
 }
 
 fn metadata_issue(
@@ -390,33 +518,6 @@ fn open_root_directory_nofollow(path: &Path) -> std::io::Result<Dir> {
         return Err(std::io::Error::other("root is not a non-link directory"));
     }
     Ok(Dir::from_std_file(file.into_std()))
-}
-
-#[cfg(target_os = "macos")]
-fn platform_attributes(
-    directory: &Dir,
-    name: &str,
-    _: &cap_std::fs::Metadata,
-) -> Result<u32, String> {
-    use std::os::fd::AsFd;
-
-    use nix::{fcntl::AtFlags, sys::stat::fstatat};
-
-    fstatat(directory.as_fd(), name, AtFlags::AT_SYMLINK_NOFOLLOW)
-        .map(|metadata| metadata.st_flags)
-        .map_err(|error| format!("cannot inspect PDF platform metadata: {error}"))
-}
-
-#[cfg(windows)]
-fn platform_attributes(_: &Dir, _: &str, metadata: &cap_std::fs::Metadata) -> Result<u32, String> {
-    use cap_std::fs::MetadataExt;
-
-    Ok(metadata.file_attributes())
-}
-
-#[cfg(not(any(target_os = "macos", windows)))]
-fn platform_attributes(_: &Dir, _: &str, _: &cap_std::fs::Metadata) -> Result<u32, String> {
-    Ok(0)
 }
 
 pub fn scan_provider_pdfs(
@@ -824,12 +925,43 @@ fn configure_nofollow(options: &mut OpenOptions, directory: bool) {
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn configure_nofollow(_options: &mut OpenOptions, _directory: bool) {}
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod metadata_walk_tests {
-    use std::{fs, os::unix::fs::symlink, path::Path};
+    use std::{
+        cell::Cell,
+        fs,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
-    use super::{DEFAULT_SCAN_LIMITS, ScanLimits, inspect_provider_metadata_with_observer};
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
+    use super::{
+        DEFAULT_SCAN_LIMITS, ElapsedClock, ProviderMetadataAccess, ScanLimits,
+        inspect_provider_metadata_with_observer, inspect_windows_enumerated_pdf,
+    };
+
+    struct FixedElapsedClock;
+
+    impl ElapsedClock for FixedElapsedClock {
+        fn elapsed_ms(&self) -> u64 {
+            0
+        }
+    }
+
+    #[derive(Default)]
+    struct AdvancingElapsedClock {
+        elapsed_ms: AtomicU64,
+    }
+
+    impl ElapsedClock for AdvancingElapsedClock {
+        fn elapsed_ms(&self) -> u64 {
+            self.elapsed_ms.fetch_add(5, Ordering::Relaxed)
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn metadata_walk_does_not_follow_a_directory_swapped_to_a_symlink() {
         let root = tempfile::tempdir().unwrap();
@@ -843,6 +975,7 @@ mod metadata_walk_tests {
         let walk = inspect_provider_metadata_with_observer(
             root.path(),
             DEFAULT_SCAN_LIMITS,
+            &FixedElapsedClock,
             &mut |relative: &Path| {
                 if relative == Path::new("child") && !swapped {
                     fs::rename(&child, root.path().join("child-original")).unwrap();
@@ -876,14 +1009,115 @@ mod metadata_walk_tests {
             ..DEFAULT_SCAN_LIMITS
         };
 
-        let walk =
-            inspect_provider_metadata_with_observer(root.path(), limits, &mut |_| {}).unwrap();
+        let walk = inspect_provider_metadata_with_observer(
+            root.path(),
+            limits,
+            &FixedElapsedClock,
+            &mut |_| {},
+        )
+        .unwrap();
 
         assert!(walk.entries.is_empty());
         assert!(
             walk.issues
                 .iter()
                 .any(|issue| issue.message.contains("entry limit"))
+        );
+    }
+
+    #[test]
+    fn enumerated_windows_recall_on_open_skips_metadata_handle_and_access() {
+        const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
+        let metadata_calls = Cell::new(0);
+        let entry = inspect_windows_enumerated_pdf(
+            PathBuf::from("placeholder.pdf"),
+            FILE_ATTRIBUTE_RECALL_ON_OPEN,
+            42,
+            || {
+                metadata_calls.set(metadata_calls.get() + 1);
+                Ok(42)
+            },
+        )
+        .unwrap();
+        let access_calls = Cell::new(0);
+
+        let access = entry.inspect_access(|| {
+            access_calls.set(access_calls.get() + 1);
+        });
+
+        assert_eq!(access, ProviderMetadataAccess::Placeholder);
+        assert_eq!(metadata_calls.get(), 0);
+        assert_eq!(access_calls.get(), 0);
+    }
+
+    #[test]
+    fn enumerated_windows_placeholder_flags_all_skip_later_inspection() {
+        for attributes in [0x0000_1000, 0x0004_0000, 0x0040_0000] {
+            let metadata_calls = Cell::new(0);
+            let entry = inspect_windows_enumerated_pdf(
+                PathBuf::from("placeholder.pdf"),
+                attributes,
+                42,
+                || {
+                    metadata_calls.set(metadata_calls.get() + 1);
+                    Ok(42)
+                },
+            )
+            .unwrap();
+            let access_calls = Cell::new(0);
+
+            let access = entry.inspect_access(|| {
+                access_calls.set(access_calls.get() + 1);
+            });
+
+            assert_eq!(access, ProviderMetadataAccess::Placeholder);
+            assert_eq!(metadata_calls.get(), 0, "attributes {attributes:#010x}");
+            assert_eq!(access_calls.get(), 0, "attributes {attributes:#010x}");
+        }
+    }
+
+    #[test]
+    fn enumerated_windows_non_placeholder_runs_metadata_and_denied_access_once() {
+        let metadata_calls = Cell::new(0);
+        let entry = inspect_windows_enumerated_pdf(PathBuf::from("local.pdf"), 0, 42, || {
+            metadata_calls.set(metadata_calls.get() + 1);
+            Ok(42)
+        })
+        .unwrap();
+        let access_calls = Cell::new(0);
+
+        let access = entry.inspect_access(|| {
+            access_calls.set(access_calls.get() + 1);
+            false
+        });
+
+        assert_eq!(access, ProviderMetadataAccess::Supported(false));
+        assert_eq!(metadata_calls.get(), 1);
+        assert_eq!(access_calls.get(), 1);
+    }
+
+    #[test]
+    fn metadata_walk_uses_injected_elapsed_clock_for_time_limit() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("visible.pdf"), b"visible").unwrap();
+        let limits = ScanLimits {
+            max_elapsed_ms: 1,
+            ..DEFAULT_SCAN_LIMITS
+        };
+
+        let walk = inspect_provider_metadata_with_observer(
+            root.path(),
+            limits,
+            &AdvancingElapsedClock::default(),
+            &mut |_| {},
+        )
+        .unwrap();
+
+        assert!(walk.entries.is_empty());
+        assert!(
+            walk.issues
+                .iter()
+                .any(|issue| issue.message.contains("time limit"))
         );
     }
 }

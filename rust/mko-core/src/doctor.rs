@@ -16,7 +16,10 @@ use crate::{
     json_v1::{DoctorCheckStatus, NextAction, RecoveryKind},
     lock::{LockState, inspect_locks},
     profile::ProfileStore,
-    provider_scan::{DEFAULT_SCAN_LIMITS, inspect_provider_metadata},
+    provider_scan::{
+        DEFAULT_SCAN_LIMITS, MonotonicElapsedClock, ProviderMetadataAccess,
+        inspect_provider_metadata,
+    },
     version::{KNOWLEDGE_CONTRACT_VERSION, PRODUCT_VERSION},
 };
 
@@ -646,16 +649,25 @@ fn inspect_system_provider_access(_: &Path, _: ProviderAccess) -> ProviderAccess
 fn inspect_system_provider_entries(
     provider: &Path,
 ) -> Result<Vec<ProviderEntryInspection>, MkoError> {
-    let walk = inspect_provider_metadata(provider, DEFAULT_SCAN_LIMITS)?;
+    let elapsed_clock = MonotonicElapsedClock::start();
+    let walk = inspect_provider_metadata(provider, DEFAULT_SCAN_LIMITS, &elapsed_clock)?;
     let mut inspections = walk
         .entries
         .into_iter()
         .map(|entry| {
-            let path = provider.join(entry.relative_path);
-            ProviderEntryInspection::new(
-                &path,
-                inspect_pdf_platform_state(&path, entry.platform_attributes),
-            )
+            let path = provider.join(&entry.relative_path);
+            let state = match entry
+                .inspect_access(|| inspect_system_provider_access(&path, ProviderAccess::ReadFile))
+            {
+                ProviderMetadataAccess::Placeholder => ProviderEntryState::NotHydrated,
+                ProviderMetadataAccess::Supported(inspection) => {
+                    state_after_access(inspection, false)
+                }
+                ProviderMetadataAccess::Unsupported(inspection) => {
+                    state_after_access(inspection, true)
+                }
+            };
+            ProviderEntryInspection::new(&path, state)
         })
         .collect::<Vec<_>>();
     inspections.extend(walk.issues.into_iter().map(|issue| {
@@ -668,52 +680,6 @@ fn inspect_system_provider_entries(
         )
     }));
     Ok(inspections)
-}
-
-#[cfg(target_os = "macos")]
-fn inspect_pdf_platform_state(path: &Path, attributes: u32) -> ProviderEntryState {
-    const SF_DATALESS: u32 = 0x4000_0000;
-    if attributes & SF_DATALESS != 0 {
-        return ProviderEntryState::NotHydrated;
-    }
-    state_after_access(
-        inspect_system_provider_access(path, ProviderAccess::ReadFile),
-        false,
-    )
-}
-
-#[cfg(windows)]
-fn inspect_pdf_platform_state(path: &Path, attributes: u32) -> ProviderEntryState {
-    inspect_windows_pdf_attributes(attributes, || {
-        inspect_system_provider_access(path, ProviderAccess::ReadFile)
-    })
-}
-
-#[cfg(any(windows, test))]
-fn inspect_windows_pdf_attributes(
-    attributes: u32,
-    inspect_access: impl FnOnce() -> ProviderAccessInspection,
-) -> ProviderEntryState {
-    const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
-    const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
-    const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
-    if attributes
-        & (FILE_ATTRIBUTE_OFFLINE
-            | FILE_ATTRIBUTE_RECALL_ON_OPEN
-            | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
-        != 0
-    {
-        return ProviderEntryState::NotHydrated;
-    }
-    state_after_access(inspect_access(), false)
-}
-
-#[cfg(not(any(target_os = "macos", windows)))]
-fn inspect_pdf_platform_state(path: &Path, _: u32) -> ProviderEntryState {
-    state_after_access(
-        inspect_system_provider_access(path, ProviderAccess::ReadFile),
-        true,
-    )
 }
 
 fn state_after_access(
@@ -902,38 +868,5 @@ fn warning(
         message: message.into(),
         path,
         recovery: Some(recovery),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::cell::Cell;
-
-    use super::{ProviderAccessInspection, ProviderEntryState, inspect_windows_pdf_attributes};
-
-    #[test]
-    fn windows_placeholder_attributes_skip_effective_access_data_open() {
-        for attributes in [0x0000_1000, 0x0004_0000, 0x0040_0000] {
-            let calls = Cell::new(0);
-            let state = inspect_windows_pdf_attributes(attributes, || {
-                calls.set(calls.get() + 1);
-                ProviderAccessInspection::Allowed
-            });
-
-            assert_eq!(state, ProviderEntryState::NotHydrated);
-            assert_eq!(calls.get(), 0, "attributes {attributes:#010x}");
-        }
-    }
-
-    #[test]
-    fn windows_non_placeholder_denied_access_is_unreadable() {
-        let calls = Cell::new(0);
-        let state = inspect_windows_pdf_attributes(0, || {
-            calls.set(calls.get() + 1);
-            ProviderAccessInspection::Denied
-        });
-
-        assert_eq!(state, ProviderEntryState::Unreadable);
-        assert_eq!(calls.get(), 1);
     }
 }
