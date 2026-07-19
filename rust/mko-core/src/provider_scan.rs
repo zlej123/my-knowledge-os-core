@@ -23,6 +23,8 @@ pub struct ScanLimits {
     pub max_total_bytes: u64,
     pub max_elapsed_ms: u64,
     pub max_depth: u64,
+    /// Downstream Task 9 projection ceiling. The scanner still fingerprints every
+    /// PDF within the safety bounds so duplicate detection remains complete.
     pub max_batch_items: u64,
 }
 
@@ -188,22 +190,30 @@ fn walk_directory(
         );
         return Ok(());
     }
+    let retained_limit = usize::try_from(remaining).unwrap_or(usize::MAX);
     let mut entries = Vec::new();
+    let mut overflowed = false;
     for entry in read_dir {
         if time_limit_reached(state) {
             return Ok(());
         }
-        if entries.len() as u64 >= remaining {
-            mark_incomplete(
-                state,
-                "scan_entry_limit",
-                "provider scan reached the entry limit".into(),
-                None,
-            );
-            break;
-        }
         match entry {
-            Ok(entry) => entries.push(entry),
+            Ok(entry) if entries.len() < retained_limit => entries.push(entry),
+            Ok(entry) => {
+                overflowed = true;
+                let candidate_name = entry.file_name();
+                let Some((largest_index, largest_name)) = entries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, retained)| (index, retained.file_name()))
+                    .max_by(|left, right| left.1.cmp(&right.1))
+                else {
+                    continue;
+                };
+                if candidate_name < largest_name {
+                    entries[largest_index] = entry;
+                }
+            }
             Err(error) => mark_incomplete(
                 state,
                 "scan_entry_unreadable",
@@ -214,6 +224,14 @@ fn walk_directory(
     }
     entries.sort_by_key(|entry| entry.file_name());
     reject_directory_collisions(&entries)?;
+    if overflowed {
+        mark_incomplete(
+            state,
+            "scan_entry_limit",
+            "provider scan reached the entry limit".into(),
+            None,
+        );
+    }
 
     for entry in entries {
         if state.stopped || time_limit_reached(state) {
@@ -441,7 +459,7 @@ fn locator_for_directory(relative: &Path) -> Option<String> {
     }
 }
 
-fn excluded_name(name: &str) -> bool {
+pub(crate) fn excluded_name(name: &str) -> bool {
     let lowercase = name.to_ascii_lowercase();
     name.starts_with('.')
         || name.starts_with("~$")

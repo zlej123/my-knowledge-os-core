@@ -254,9 +254,9 @@ fn provider_scan_stops_at_entry_byte_time_and_depth_limits() {
 #[test]
 fn entry_limit_keeps_bounded_partial_pdf_results() {
     let fixture = Fixture::new();
+    fixture.provider_pdf("z.pdf", b"%PDF-1.7\nz");
     fixture.provider_pdf("a.pdf", b"%PDF-1.7\na");
-    fixture.provider_pdf("b.pdf", b"%PDF-1.7\nb");
-    fixture.provider_pdf("c.pdf", b"%PDF-1.7\nc");
+    fixture.provider_pdf("m.pdf", b"%PDF-1.7\nm");
 
     let result = scan_provider_pdfs(
         ProviderScanRequest::new(&fixture.provider).with_limits(ScanLimits {
@@ -270,6 +270,7 @@ fn entry_limit_keeps_bounded_partial_pdf_results() {
     assert!(!result.scan_complete);
     assert_eq!(result.entries_seen, 1);
     assert_eq!(result.pdfs.len(), 1);
+    assert_eq!(result.pdfs[0].provider_locator, "a.pdf");
 }
 
 #[cfg(unix)]
@@ -482,6 +483,25 @@ fn invalid_and_oversized_pdfs_fail_before_provider_mutation() {
     assert!(fs::read_dir(&fixture.provider).unwrap().next().is_none());
 }
 
+#[cfg(unix)]
+#[test]
+fn add_rejects_a_source_symlink_without_importing_its_target() {
+    let fixture = Fixture::new();
+    let target = fixture.outside_pdf("target.pdf", b"%PDF-1.7\ntarget");
+    let link = fixture.outside.join("link.pdf");
+    std::os::unix::fs::symlink(target, &link).unwrap();
+
+    let error = add_pdf(
+        AddRequest::new(fixture.context(), link),
+        &FixedAuditClock,
+        &FixedElapsedClock,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "file_unreadable");
+    assert!(fs::read_dir(&fixture.provider).unwrap().next().is_none());
+}
+
 #[test]
 fn existing_asset_and_unregistered_inbox_duplicate_converge() {
     let fixture = Fixture::new();
@@ -508,6 +528,61 @@ fn existing_asset_and_unregistered_inbox_duplicate_converge() {
     assert_eq!(second.add_outcome, AddOutcome::Existing);
     assert_eq!(second.import_outcome, ImportOutcome::ReusedInboxCopy);
     assert_eq!(second.asset_id, first.asset_id);
+}
+
+#[test]
+fn existing_registry_missing_persisted_provider_locator_requires_repair() {
+    let fixture = Fixture::new();
+    let outside = fixture.outside_pdf("Paper.pdf", b"%PDF-1.7\ncontent");
+    let first = add_pdf(
+        AddRequest::new(fixture.context(), &outside),
+        &FixedAuditClock,
+        &FixedElapsedClock,
+    )
+    .unwrap();
+    fs::rename(
+        fixture.provider.join(&first.provider_locator),
+        fixture.provider.join("Moved.pdf"),
+    )
+    .unwrap();
+
+    let error = add_pdf(
+        AddRequest::new(fixture.context(), outside),
+        &FixedAuditClock,
+        &FixedElapsedClock,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "registry_provider_missing");
+}
+
+#[test]
+fn existing_registry_changed_provider_locator_requires_repair() {
+    let fixture = Fixture::new();
+    let outside = fixture.outside_pdf("Paper.pdf", b"%PDF-1.7\ncontent");
+    let first = add_pdf(
+        AddRequest::new(fixture.context(), &outside),
+        &FixedAuditClock,
+        &FixedElapsedClock,
+    )
+    .unwrap();
+    fixture.provider_pdf("Other.pdf", b"%PDF-1.7\nother");
+    let registry = fixture.repository.join(&first.registry_path);
+    let contents = fs::read_to_string(&registry).unwrap();
+    fs::write(
+        &registry,
+        contents.replace("locator: Paper.pdf", "locator: Other.pdf"),
+    )
+    .unwrap();
+
+    let error = add_pdf(
+        AddRequest::new(fixture.context(), outside),
+        &FixedAuditClock,
+        &FixedElapsedClock,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "registry_provider_mismatch");
 }
 
 #[test]
@@ -639,11 +714,8 @@ fn concurrent_case_variant_names_cannot_create_portable_collision() {
 #[test]
 fn orphaned_import_temp_is_ignored_and_does_not_block_retry() {
     let fixture = Fixture::new();
-    fs::write(
-        fixture.provider.join(".Paper.pdf.123.0.import.tmp"),
-        b"partial",
-    )
-    .unwrap();
+    let unrelated = fixture.provider.join(".user-notes.import.tmp");
+    fs::write(&unrelated, b"user content").unwrap();
     let outside = fixture.outside_pdf("Paper.pdf", b"%PDF-1.7\ncomplete");
 
     let result = add_pdf(
@@ -658,21 +730,24 @@ fn orphaned_import_temp_is_ignored_and_does_not_block_retry() {
         fs::read(fixture.provider.join("Paper.pdf")).unwrap(),
         b"%PDF-1.7\ncomplete"
     );
+    assert_eq!(fs::read(unrelated).unwrap(), b"user content");
 }
 
 #[test]
 fn dead_import_lock_and_orphan_temp_are_recovered_on_retry() {
     let fixture = Fixture::new();
+    let lock = fixture.provider.join(".mko-import-naming.lock");
+    fs::write(&lock, "pid=4294967295\nhost=crashed-host\ntoken=crashed\n").unwrap();
+    let orphan = fixture
+        .provider
+        .join(".mko-import-tmp/crashed/Paper.import.tmp");
+    fs::create_dir_all(orphan.parent().unwrap()).unwrap();
     fs::write(
-        fixture.provider.join(".mko-import-naming.lock"),
-        "pid=4294967295\ntoken=crashed\n",
+        fixture.provider.join(".mko-import-tmp/.mko-owned"),
+        "mko-import-temp-v1\n",
     )
     .unwrap();
-    fs::write(
-        fixture.provider.join(".Paper.pdf.999.0.import.tmp"),
-        b"partial",
-    )
-    .unwrap();
+    fs::write(&orphan, b"partial").unwrap();
     let outside = fixture.outside_pdf("Paper.pdf", b"%PDF-1.7\ncomplete");
 
     let result = add_pdf(
@@ -683,13 +758,87 @@ fn dead_import_lock_and_orphan_temp_are_recovered_on_retry() {
     .unwrap();
 
     assert_eq!(result.provider_locator, "Paper.pdf");
-    assert!(!fixture.provider.join(".mko-import-naming.lock").exists());
-    assert!(
-        !fixture
-            .provider
-            .join(".Paper.pdf.999.0.import.tmp")
-            .exists()
-    );
+    assert!(lock.is_file());
+    assert!(!orphan.exists());
+}
+
+#[test]
+fn malformed_partial_import_lock_is_recovered_after_bounded_wait() {
+    let fixture = Fixture::new();
+    let lock = fixture.provider.join(".mko-import-naming.lock");
+    fs::write(&lock, b"pid=").unwrap();
+    let outside = fixture.outside_pdf("Paper.pdf", b"%PDF-1.7\ncomplete");
+
+    let result = add_pdf(
+        AddRequest::new(fixture.context(), outside),
+        &FixedAuditClock,
+        &FixedElapsedClock,
+    )
+    .unwrap();
+
+    assert_eq!(result.provider_locator, "Paper.pdf");
+    let record = fs::read_to_string(lock).unwrap();
+    assert!(record.contains("token="));
+}
+
+#[test]
+fn simultaneous_stale_lock_reclaimers_leave_live_owner_intact() {
+    let fixture = Fixture::new();
+    let lock = fixture.provider.join(".mko-import-naming.lock");
+    fs::write(&lock, "pid=4294967295\nhost=crashed-host\ntoken=crashed\n").unwrap();
+    let first = fixture.outside_pdf("one/First.pdf", b"%PDF-1.7\nfirst");
+    let second = fixture.outside_pdf("two/Second.pdf", b"%PDF-1.7\nsecond");
+    let context = fixture.context();
+    let handles = [first, second]
+        .into_iter()
+        .map(|source| {
+            let context = context.clone();
+            thread::spawn(move || {
+                add_pdf(
+                    AddRequest::new(context, source),
+                    &FixedAuditClock,
+                    &FixedElapsedClock,
+                )
+                .unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(results.len(), 2);
+    assert!(lock.is_file());
+    assert!(fs::read_to_string(lock).unwrap().contains("token="));
+}
+
+#[test]
+fn hidden_and_temporary_prefixes_map_to_visible_import_names() {
+    for name in [".Hidden.pdf", "~$Temporary.pdf"] {
+        let fixture = Fixture::new();
+        let outside = fixture.outside_pdf(name, b"%PDF-1.7\ncontent");
+
+        let result = add_pdf(
+            AddRequest::new(fixture.context(), outside),
+            &FixedAuditClock,
+            &FixedElapsedClock,
+        )
+        .unwrap();
+        let scan = scan_provider_pdfs(
+            ProviderScanRequest::new(&fixture.provider),
+            &FixedElapsedClock,
+        )
+        .unwrap();
+
+        assert!(!result.provider_locator.starts_with('.'));
+        assert!(!result.provider_locator.starts_with("~$"));
+        assert!(
+            scan.pdfs
+                .iter()
+                .any(|pdf| pdf.provider_locator == result.provider_locator)
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]

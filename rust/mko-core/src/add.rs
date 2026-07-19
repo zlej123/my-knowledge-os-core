@@ -8,7 +8,6 @@ use std::{
 };
 
 use cap_std::fs::File as CapFile;
-use sysinfo::{Pid, System};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
@@ -18,14 +17,18 @@ use crate::{
     error::MkoError,
     fingerprint::{FileSnapshot, asset_id, fingerprint_open_file, validate_pdf_content},
     json_v1::{AddOutcome, ImportOutcome},
+    model::AssetRecord,
     path_policy::validate_portable_relative_path,
-    provider_scan::{DEFAULT_SCAN_LIMITS, ElapsedClock, ProviderScanRequest, scan_provider_pdfs},
-    registry::{CaptureRequest, capture_asset},
+    provider_scan::{
+        DEFAULT_SCAN_LIMITS, ElapsedClock, ProviderScanRequest, excluded_name, scan_provider_pdfs,
+    },
+    registry::{CaptureRequest, capture_asset, read_asset},
 };
 
 static NEXT_IMPORT_TEMP: AtomicU64 = AtomicU64::new(0);
 const IMPORT_LOCK_WAIT: Duration = Duration::from_secs(1);
 const IMPORT_LOCK_RETRY: Duration = Duration::from_millis(10);
+const IMPORT_TEMP_MARKER: &str = "mko-import-temp-v1\n";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackupAttestation {
@@ -79,40 +82,27 @@ pub fn add_pdf(
 ) -> Result<AddResult, MkoError> {
     let config = CaptureConfig::from_resolved_context(&request.context)?;
     let source_path = absolute_path(&request.source)?;
-    reject_source_link(&source_path)?;
-    let canonical_source = fs::canonicalize(&source_path).map_err(|error| {
-        MkoError::new(
-            "file_unreadable",
-            format!("cannot resolve {}: {error}", source_path.display()),
-        )
-    })?;
-    ensure_pdf_extension(&canonical_source)?;
-    let source_file = fs::File::open(&canonical_source)
-        .map_err(|error| MkoError::new("file_unreadable", error.to_string()))?;
-    if !source_file
-        .metadata()
-        .map_err(|error| MkoError::new("file_unreadable", error.to_string()))?
-        .is_file()
-    {
-        return Err(MkoError::new(
-            "file_unreadable",
-            "add input must be a regular file",
-        ));
-    }
+    let (source_file, canonical_source) = open_source_nofollow(&source_path)?;
     let source_snapshot = validated_snapshot(&source_file)?;
     let id = asset_id(&source_snapshot.fingerprint)?;
     let existing_registry = config
         .repository_root
         .join("assets/registry")
         .join(format!("{id}.md"));
-    let asset_already_registered = existing_registry_is_file(&existing_registry)?;
+    let existing_asset = load_existing_asset(
+        &existing_registry,
+        &config.repository_root,
+        &id,
+        &source_snapshot,
+        &config.provider_type,
+    )?;
     let inside_provider = canonical_source.starts_with(&config.provider_root);
 
     if request.temporary_source && request.backup_attestation != BackupAttestation::UserVerified {
         return Err(backup_confirmation_required());
     }
     if inside_provider
-        && !asset_already_registered
+        && existing_asset.is_none()
         && request.backup_attestation != BackupAttestation::UserVerified
     {
         return Err(backup_confirmation_required());
@@ -134,43 +124,76 @@ pub fn add_pdf(
         ));
     }
 
-    let (provider_locator, provider_relative_path, import_outcome) = if inside_provider {
-        let relative_path = provider_relative_path(&config.provider_root, &canonical_source)?;
-        let locator = logical_provider_locator(&relative_path)?;
-        if !scan.pdfs.iter().any(|candidate| {
-            candidate.relative_path == relative_path
-                && candidate.fingerprint == source_snapshot.fingerprint
+    let (provider_locator, provider_relative_path, import_outcome) =
+        if let Some(asset) = existing_asset.as_ref() {
+            let persisted = scan
+                .pdfs
+                .iter()
+                .find(|candidate| candidate.provider_locator == asset.provider.locator)
+                .ok_or_else(|| {
+                    MkoError::new(
+                        "registry_provider_missing",
+                        "the registered provider locator is missing; inspect and repair the asset",
+                    )
+                })?;
+            if persisted.fingerprint != source_snapshot.fingerprint
+                || persisted.size_bytes != source_snapshot.size_bytes
+            {
+                return Err(MkoError::new(
+                    "registry_provider_mismatch",
+                    "the registered provider locator no longer contains the registered PDF",
+                ));
+            }
+            let import_outcome = if inside_provider
+                && provider_relative_path(&config.provider_root, &canonical_source)?
+                    == persisted.relative_path
+            {
+                ImportOutcome::AlreadyInInbox
+            } else {
+                ImportOutcome::ReusedInboxCopy
+            };
+            (
+                asset.provider.locator.clone(),
+                persisted.relative_path.clone(),
+                import_outcome,
+            )
+        } else if inside_provider {
+            let relative_path = provider_relative_path(&config.provider_root, &canonical_source)?;
+            let locator = logical_provider_locator(&relative_path)?;
+            if !scan.pdfs.iter().any(|candidate| {
+                candidate.relative_path == relative_path
+                    && candidate.fingerprint == source_snapshot.fingerprint
+                    && candidate.size_bytes == source_snapshot.size_bytes
+            }) {
+                return Err(MkoError::new(
+                    "provider_file_excluded",
+                    "the Inbox file is hidden, temporary, or changed during scanning",
+                ));
+            }
+            (locator, relative_path, ImportOutcome::AlreadyInInbox)
+        } else if let Some(existing) = scan.pdfs.iter().find(|candidate| {
+            candidate.fingerprint == source_snapshot.fingerprint
                 && candidate.size_bytes == source_snapshot.size_bytes
         }) {
-            return Err(MkoError::new(
-                "provider_file_excluded",
-                "the Inbox file is hidden, temporary, or changed during scanning",
-            ));
-        }
-        (locator, relative_path, ImportOutcome::AlreadyInInbox)
-    } else if let Some(existing) = scan.pdfs.iter().find(|candidate| {
-        candidate.fingerprint == source_snapshot.fingerprint
-            && candidate.size_bytes == source_snapshot.size_bytes
-    }) {
-        (
-            existing.provider_locator.clone(),
-            existing.relative_path.clone(),
-            ImportOutcome::ReusedInboxCopy,
-        )
-    } else {
-        let locator = import_outside_pdf(
-            &config.provider_root,
-            &canonical_source,
-            &source_file,
-            &source_snapshot,
-            request.backup_attestation,
-        )?;
-        (
-            locator.clone(),
-            PathBuf::from(&locator),
-            ImportOutcome::Copied,
-        )
-    };
+            (
+                existing.provider_locator.clone(),
+                existing.relative_path.clone(),
+                ImportOutcome::ReusedInboxCopy,
+            )
+        } else {
+            let locator = import_outside_pdf(
+                &config.provider_root,
+                &canonical_source,
+                &source_file,
+                &source_snapshot,
+                request.backup_attestation,
+            )?;
+            (
+                locator.clone(),
+                PathBuf::from(&locator),
+                ImportOutcome::Copied,
+            )
+        };
 
     let provider_file = config.provider_root.join(provider_relative_path);
     let capture = capture_asset(
@@ -216,14 +239,22 @@ fn import_outside_pdf(
         attestation,
         BackupAttestation::OutsideOriginalRetained | BackupAttestation::UserVerified
     ));
-    let source_name = canonical_source
+    let mut source_name = canonical_source
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| MkoError::new("invalid_path", "PDF filename must be valid UTF-8"))?
         .nfc()
         .collect::<String>();
+    if excluded_name(&source_name) {
+        let hash = expected
+            .fingerprint
+            .value
+            .strip_prefix("sha256:")
+            .ok_or_else(|| MkoError::new("fingerprint_invalid", "fingerprint must use sha256"))?;
+        source_name = format!("import-{}.pdf", &hash[..12]);
+    }
     validate_portable_relative_path(&source_name)?;
-    let _lock = ImportLock::acquire(provider_root)?;
+    let lock = ImportLock::acquire(provider_root)?;
     loop {
         let destination_name = available_destination_name(provider_root, &source_name, expected)?;
         let destination = provider_root.join(&destination_name);
@@ -235,12 +266,7 @@ fn import_outside_pdf(
             continue;
         }
 
-        let temporary_name = format!(
-            ".{destination_name}.{}.{}.import.tmp",
-            std::process::id(),
-            NEXT_IMPORT_TEMP.fetch_add(1, Ordering::Relaxed)
-        );
-        let temporary = provider_root.join(&temporary_name);
+        let temporary = lock.temporary_path(&destination_name);
         let result = (|| {
             let mut input = source_file
                 .try_clone()
@@ -390,8 +416,11 @@ fn validate_existing_pdf(path: &Path, expected: &FileSnapshot) -> Result<(), Mko
 }
 
 fn validate_outside_original(path: &Path, expected: &FileSnapshot) -> Result<(), MkoError> {
-    reject_source_link(path)?;
-    let reopened = fs::File::open(path).map_err(|_| backup_confirmation_required())?;
+    let (reopened, reopened_canonical) =
+        open_source_nofollow(path).map_err(|_| backup_confirmation_required())?;
+    if reopened_canonical != path {
+        return Err(backup_confirmation_required());
+    }
     let actual = validated_snapshot(&reopened)?;
     if actual.fingerprint != expected.fingerprint || actual.size_bytes != expected.size_bytes {
         return Err(backup_confirmation_required());
@@ -458,28 +487,137 @@ fn ensure_pdf_extension(path: &Path) -> Result<(), MkoError> {
     }
 }
 
-fn reject_source_link(path: &Path) -> Result<(), MkoError> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| MkoError::new("file_unreadable", error.to_string()))?;
-    if metadata.file_type().is_symlink() {
-        return Err(MkoError::new(
-            "file_unreadable",
-            "add input must not be a symbolic link or reparse-point link",
-        ));
-    }
-    Ok(())
-}
-
-fn existing_registry_is_file(path: &Path) -> Result<bool, MkoError> {
+fn load_existing_asset(
+    path: &Path,
+    repository_root: &Path,
+    asset_id: &str,
+    expected: &FileSnapshot,
+    provider_type: &str,
+) -> Result<Option<AssetRecord>, MkoError> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(true),
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
         Ok(_) => Err(MkoError::new(
             "registry_destination_invalid",
             "deterministic registry destination is not a regular file",
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(MkoError::new("registry_unreadable", error.to_string())),
+        ))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(MkoError::new("registry_unreadable", error.to_string())),
     }
+    let asset = read_asset(repository_root, asset_id)?;
+    if asset.id != asset_id
+        || asset.fingerprint != expected.fingerprint
+        || asset.size_bytes != expected.size_bytes
+        || asset.provider.r#type != provider_type
+    {
+        return Err(MkoError::new(
+            "registry_identity_conflict",
+            "the deterministic registry record does not match the requested PDF identity",
+        ));
+    }
+    Ok(Some(asset))
+}
+
+fn open_source_nofollow(path: &Path) -> Result<(fs::File, PathBuf), MkoError> {
+    ensure_pdf_extension(path)?;
+    let file = open_path_nofollow(path)
+        .map_err(|error| MkoError::new("file_unreadable", error.to_string()))?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| MkoError::new("file_unreadable", error.to_string()))?;
+    if !opened_metadata.is_file() || metadata_is_link_or_reparse(&opened_metadata) {
+        return Err(MkoError::new(
+            "file_unreadable",
+            "add input must be a regular non-link file",
+        ));
+    }
+    let canonical = fs::canonicalize(path).map_err(|error| {
+        MkoError::new(
+            "file_unreadable",
+            format!("cannot resolve {}: {error}", path.display()),
+        )
+    })?;
+    let canonical_metadata = fs::metadata(&canonical)
+        .map_err(|error| MkoError::new("file_unreadable", error.to_string()))?;
+    if !same_file_identity(&opened_metadata, &canonical_metadata) {
+        return Err(MkoError::new(
+            "file_unreadable",
+            "add input changed while it was being opened",
+        ));
+    }
+    Ok((file, canonical))
+}
+
+#[cfg(target_os = "linux")]
+fn open_path_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    const O_NOFOLLOW: i32 = 0x20_000;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(target_os = "macos")]
+fn open_path_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    const O_NOFOLLOW: i32 = 0x100;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(target_os = "windows")]
+fn open_path_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn open_path_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::other("symbolic links are not accepted"));
+    }
+    fs::File::open(path)
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(windows)]
+fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    left.volume_serial_number() == right.volume_serial_number()
+        && left.file_index() == right.file_index()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    left.len() == right.len()
+        && left.modified().ok() == right.modified().ok()
+        && left.created().ok() == right.created().ok()
+}
+
+fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 fn destination_exists(path: &Path) -> Result<bool, MkoError> {
@@ -512,122 +650,134 @@ fn collision_key(name: &str) -> String {
 }
 
 struct ImportLock {
-    path: PathBuf,
-    owner_token: String,
+    temporary_directory: PathBuf,
+    _file: fs::File,
 }
 
 impl ImportLock {
     fn acquire(provider_root: &Path) -> Result<Self, MkoError> {
         let path = provider_root.join(".mko-import-naming.lock");
+        reject_non_regular_lock_path(&path)?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|error| MkoError::new("provider_import_locked", error.to_string()))?;
         let deadline = Instant::now() + IMPORT_LOCK_WAIT;
         loop {
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut file) => {
-                    let owner_token = format!(
-                        "{}-{}",
-                        std::process::id(),
-                        NEXT_IMPORT_TEMP.fetch_add(1, Ordering::Relaxed)
-                    );
-                    let record = format!("pid={}\ntoken={owner_token}\n", std::process::id());
-                    if let Err(error) = file
-                        .write_all(record.as_bytes())
-                        .and_then(|_| file.sync_all())
-                    {
-                        let _ = fs::remove_file(&path);
-                        return Err(MkoError::new("provider_import_failed", error.to_string()));
-                    }
-                    let lock = Self {
-                        path,
-                        owner_token: owner_token.clone(),
-                    };
-                    cleanup_orphan_import_temps(provider_root)?;
-                    return Ok(lock);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if import_lock_is_stale(&path)? {
-                        match fs::remove_file(&path) {
-                            Ok(()) => {}
-                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                            Err(error) => {
-                                return Err(MkoError::new(
-                                    "provider_import_failed",
-                                    error.to_string(),
-                                ));
-                            }
-                        }
-                        continue;
-                    }
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) => {
                     if Instant::now() >= deadline {
                         return Err(MkoError::new(
                             "provider_import_locked",
-                            "PDF import lock is held or stale; inspect it before retrying",
+                            "another PDF import still owns the provider naming lock",
                         ));
                     }
                     thread::sleep(IMPORT_LOCK_RETRY);
                 }
-                Err(error) => {
-                    return Err(MkoError::new("provider_import_failed", error.to_string()));
+                Err(std::fs::TryLockError::Error(error)) => {
+                    return Err(MkoError::new("provider_import_locked", error.to_string()));
                 }
             }
         }
+        let owner_token = format!(
+            "{}-{}",
+            std::process::id(),
+            NEXT_IMPORT_TEMP.fetch_add(1, Ordering::Relaxed)
+        );
+        let record = format!(
+            "pid={}\nhost={}\ntoken={owner_token}\n",
+            std::process::id(),
+            current_hostname()?
+        );
+        file.set_len(0)
+            .and_then(|_| file.seek(SeekFrom::Start(0)))
+            .and_then(|_| file.write_all(record.as_bytes()))
+            .and_then(|_| file.sync_all())
+            .map_err(|error| MkoError::new("provider_import_failed", error.to_string()))?;
+
+        let temporary_root = provider_root.join(".mko-import-tmp");
+        reset_reserved_temp_root(&temporary_root)?;
+        let temporary_directory = temporary_root.join(&owner_token);
+        fs::create_dir(&temporary_directory)
+            .map_err(|error| MkoError::new("provider_import_failed", error.to_string()))?;
+        Ok(Self {
+            temporary_directory,
+            _file: file,
+        })
+    }
+
+    fn temporary_path(&self, destination_name: &str) -> PathBuf {
+        self.temporary_directory.join(format!(
+            "{destination_name}.{}.import.tmp",
+            NEXT_IMPORT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ))
     }
 }
 
 impl Drop for ImportLock {
     fn drop(&mut self) {
-        let owned = fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|contents| import_lock_fields(&contents).map(|(_, token)| token))
-            .is_some_and(|token| token == self.owner_token);
-        if owned {
-            let _ = fs::remove_file(&self.path);
-        }
+        let _ = fs::remove_dir_all(&self.temporary_directory);
     }
 }
 
-fn import_lock_is_stale(path: &Path) -> Result<bool, MkoError> {
-    let contents = fs::read_to_string(path)
-        .map_err(|error| MkoError::new("provider_import_locked", error.to_string()))?;
-    let Some((pid, _)) = import_lock_fields(&contents) else {
-        return Ok(false);
-    };
-    let system = System::new_all();
-    Ok(system.process(Pid::from_u32(pid)).is_none())
-}
-
-fn import_lock_fields(contents: &str) -> Option<(u32, String)> {
-    let mut pid = None;
-    let mut token = None;
-    for line in contents.lines() {
-        if let Some(value) = line.strip_prefix("pid=") {
-            pid = value.parse().ok();
-        } else if let Some(value) = line.strip_prefix("token=") {
-            token = Some(value.to_owned());
-        }
+fn reject_non_regular_lock_path(path: &Path) -> Result<(), MkoError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(()),
+        Ok(_) => Err(MkoError::new(
+            "provider_import_locked",
+            "provider import lock path must be a regular non-link file",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(MkoError::new("provider_import_locked", error.to_string())),
     }
-    Some((pid?, token?))
 }
 
-fn cleanup_orphan_import_temps(provider_root: &Path) -> Result<(), MkoError> {
-    for entry in fs::read_dir(provider_root)
-        .map_err(|error| MkoError::new("provider_import_failed", error.to_string()))?
-    {
-        let entry =
-            entry.map_err(|error| MkoError::new("provider_import_failed", error.to_string()))?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if name.starts_with('.') && name.ends_with(".import.tmp") {
-            let metadata = fs::symlink_metadata(entry.path())
-                .map_err(|error| MkoError::new("provider_import_failed", error.to_string()))?;
-            if metadata.is_file() && !metadata.file_type().is_symlink() {
-                fs::remove_file(entry.path())
-                    .map_err(|error| MkoError::new("provider_import_failed", error.to_string()))?;
+fn reset_reserved_temp_root(path: &Path) -> Result<(), MkoError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            let marker = path.join(".mko-owned");
+            let marker_metadata = fs::symlink_metadata(&marker).map_err(|_| {
+                MkoError::new(
+                    "provider_import_failed",
+                    "reserved import temp directory lacks its ownership marker",
+                )
+            })?;
+            if !marker_metadata.is_file()
+                || marker_metadata.file_type().is_symlink()
+                || fs::read_to_string(&marker)
+                    .map_err(|error| MkoError::new("provider_import_failed", error.to_string()))?
+                    != IMPORT_TEMP_MARKER
+            {
+                return Err(MkoError::new(
+                    "provider_import_failed",
+                    "reserved import temp directory has an invalid ownership marker",
+                ));
             }
+            fs::remove_dir_all(path)
+                .map_err(|error| MkoError::new("provider_import_failed", error.to_string()))?;
         }
+        Ok(_) => {
+            return Err(MkoError::new(
+                "provider_import_failed",
+                "reserved import temp path must be a non-link directory",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(MkoError::new("provider_import_failed", error.to_string())),
     }
-    Ok(())
+    fs::create_dir(path)
+        .and_then(|_| fs::write(path.join(".mko-owned"), IMPORT_TEMP_MARKER))
+        .map_err(|error| MkoError::new("provider_import_failed", error.to_string()))
+}
+
+fn current_hostname() -> Result<String, MkoError> {
+    hostname::get()
+        .map(|hostname| hostname.to_string_lossy().into_owned())
+        .map_err(|error| MkoError::new("provider_import_failed", error.to_string()))
 }
 
 #[cfg(unix)]
