@@ -19,17 +19,17 @@ use serde::Serialize;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
+    asset_validation::validate_canonical_asset,
     canonical_source::validate_canonical_source,
     error::MkoError,
     front_matter::parse_markdown,
     hooks::PRE_COMMIT_SCRIPT,
-    model::{AssetRecord, AssetStatus, Classification, ReviewStatus, SourceRecord, SourceStatus},
+    model::{AssetRecord, AssetStatus, ReviewStatus, SourceRecord, SourceStatus},
     path_policy::validate_portable_relative_path,
     pdf::{EXTRACTOR_NAME, EXTRACTOR_VERSION},
     prepare::{PROCESSOR_VERSION, PROMPT_VERSION},
     revision::calculate_source_revision,
     secret,
-    state::validate_asset_state,
     version::KNOWLEDGE_CONTRACT_VERSION,
 };
 
@@ -295,39 +295,14 @@ fn inspect_files(repository_root: &Path, files: &[RepositoryFile], issues: &mut 
 }
 
 fn validate_asset(path: &str, asset: &AssetRecord, issues: &mut Vec<CheckIssue>) {
-    let hash = valid_prefixed_hash(&asset.id, "personal-asset-");
-    let expected_path = format!("assets/registry/{}.md", asset.id);
-    if hash.is_none()
-        || path != expected_path
-        || asset.record_type != "asset"
-        || asset.schema_version != 1
-        || asset.scope != "personal"
-        || asset.classification != Classification::Personal
-        || asset.asset_class != "document"
-        || asset.media_type != "application/pdf"
-        || asset.provider.r#type != "google-drive-stream"
-        || asset.fingerprint.method != "sha256"
-        || hash.is_some_and(|hash| asset.fingerprint.value != format!("sha256:{hash}"))
-    {
+    for validation in validate_canonical_asset(path, asset) {
         issues.push(issue(
-            "registry_invalid",
+            &validation.code,
             Some(path),
             None,
-            "Asset identity, Scope, schema, path, or fingerprint is not canonical",
+            &validation.message,
             None,
         ));
-    }
-    if !portable_relative_path(&asset.provider.locator) {
-        issues.push(issue(
-            "path_not_portable",
-            Some(path),
-            None,
-            "Provider locator must be a portable relative path",
-            None,
-        ));
-    }
-    if let Err(error) = validate_asset_state(asset) {
-        issues.push(parse_issue(path, error));
     }
 }
 

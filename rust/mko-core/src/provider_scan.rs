@@ -160,6 +160,146 @@ pub(crate) struct ProviderMetadataWalk {
     pub issues: Vec<ProviderMetadataIssue>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderCatalogEntry {
+    Placeholder {
+        provider_locator: String,
+        relative_path: PathBuf,
+    },
+    Readable(ProviderPdf),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProviderCatalogScan {
+    pub scan_complete: bool,
+    pub entries: Vec<ProviderCatalogEntry>,
+    pub warnings: Vec<ProviderScanWarning>,
+}
+
+pub(crate) fn scan_provider_catalog_metadata_first(
+    request: ProviderScanRequest,
+    elapsed_clock: &dyn ElapsedClock,
+) -> Result<ProviderCatalogScan, MkoError> {
+    let provider_root = canonical_directory(&request.provider_root, "provider_root_invalid")?;
+    let walk = inspect_provider_metadata(&provider_root, request.limits, elapsed_clock)?;
+    let mut warnings = walk
+        .issues
+        .iter()
+        .map(metadata_issue_warning)
+        .collect::<Vec<_>>();
+    let mut entries = Vec::new();
+    for entry in walk.entries {
+        let relative_path = entry.relative_path.clone();
+        match materialize_metadata_entry(entry, |relative_path| {
+            fingerprint_relative_pdf(&provider_root, relative_path)
+        }) {
+            ProviderMetadataAccess::Placeholder => {
+                entries.push(ProviderCatalogEntry::Placeholder {
+                    provider_locator: logical_locator(&relative_path)?,
+                    relative_path,
+                });
+            }
+            ProviderMetadataAccess::Supported(result)
+            | ProviderMetadataAccess::Unsupported(result) => match result {
+                Ok(pdf) => entries.push(ProviderCatalogEntry::Readable(pdf)),
+                Err(error) => warnings.push(ProviderScanWarning {
+                    code: error.code().into(),
+                    message: error.message().into(),
+                    provider_locator: logical_locator(&relative_path).ok(),
+                }),
+            },
+        }
+    }
+    entries.sort_by(|left, right| catalog_locator(left).cmp(catalog_locator(right)));
+    warnings.sort_by(|left, right| {
+        left.code
+            .cmp(&right.code)
+            .then(left.provider_locator.cmp(&right.provider_locator))
+    });
+    Ok(ProviderCatalogScan {
+        scan_complete: warnings.is_empty(),
+        entries,
+        warnings,
+    })
+}
+
+fn catalog_locator(entry: &ProviderCatalogEntry) -> &str {
+    match entry {
+        ProviderCatalogEntry::Placeholder {
+            provider_locator, ..
+        } => provider_locator,
+        ProviderCatalogEntry::Readable(pdf) => &pdf.provider_locator,
+    }
+}
+
+fn materialize_metadata_entry<T>(
+    entry: ProviderMetadataEntry,
+    inspect_content: impl FnOnce(&Path) -> T,
+) -> ProviderMetadataAccess<T> {
+    let relative_path = entry.relative_path.clone();
+    entry.inspect_access(|| inspect_content(&relative_path))
+}
+
+fn fingerprint_relative_pdf(
+    provider_root: &Path,
+    relative_path: &Path,
+) -> Result<ProviderPdf, MkoError> {
+    let locator = logical_locator(relative_path)?;
+    let root = Dir::open_ambient_dir(provider_root, ambient_authority()).map_err(|error| {
+        MkoError::new(
+            "provider_scan_failed",
+            format!("cannot open provider root: {error}"),
+        )
+    })?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_nofollow(&mut options, false);
+    let mut file = root.open_with(relative_path, &options).map_err(|error| {
+        MkoError::new(
+            "scan_file_unreadable",
+            format!("cannot open PDF candidate: {error}"),
+        )
+    })?;
+    let before = fingerprint_open_file(&mut file)?;
+    validate_pdf_content(&mut file)?;
+    let after = fingerprint_open_file(&mut file)?;
+    validate_pdf_content(&mut file)?;
+    if before != after {
+        return Err(MkoError::new(
+            "fingerprint_changed",
+            "PDF changed while the provider was being scanned",
+        ));
+    }
+    Ok(ProviderPdf {
+        provider_locator: locator,
+        relative_path: relative_path.to_path_buf(),
+        size_bytes: before.size_bytes,
+        fingerprint: before.fingerprint,
+    })
+}
+
+fn metadata_issue_warning(issue: &ProviderMetadataIssue) -> ProviderScanWarning {
+    let code = if issue.message.contains("time limit") {
+        "scan_time_limit"
+    } else if issue.message.contains("entry limit") {
+        "scan_entry_limit"
+    } else if issue.message.contains("aggregate PDF byte limit") {
+        "scan_byte_limit"
+    } else if issue.message.contains("depth limit") {
+        "scan_depth_limit"
+    } else {
+        "provider_inspection_failed"
+    };
+    ProviderScanWarning {
+        code: code.into(),
+        message: issue.message.clone(),
+        provider_locator: issue
+            .relative_path
+            .as_deref()
+            .and_then(|path| logical_locator(path).ok()),
+    }
+}
+
 pub(crate) fn inspect_provider_metadata(
     provider_root: &Path,
     limits: ScanLimits,
@@ -940,6 +1080,7 @@ mod metadata_walk_tests {
     use super::{
         DEFAULT_SCAN_LIMITS, ElapsedClock, ProviderMetadataAccess, ScanLimits,
         inspect_provider_metadata_with_observer, inspect_windows_enumerated_pdf,
+        materialize_metadata_entry,
     };
 
     struct FixedElapsedClock;
@@ -1074,6 +1215,32 @@ mod metadata_walk_tests {
             assert_eq!(metadata_calls.get(), 0, "attributes {attributes:#010x}");
             assert_eq!(access_calls.get(), 0, "attributes {attributes:#010x}");
         }
+    }
+
+    #[test]
+    fn metadata_first_inbox_projection_never_opens_placeholder_content() {
+        const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+        let metadata_calls = Cell::new(0);
+        let entry = inspect_windows_enumerated_pdf(
+            PathBuf::from("offline.pdf"),
+            FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
+            42,
+            || {
+                metadata_calls.set(metadata_calls.get() + 1);
+                Ok(42)
+            },
+        )
+        .unwrap();
+        let content_open_calls = Cell::new(0);
+
+        let materialized = materialize_metadata_entry(entry, |_| {
+            content_open_calls.set(content_open_calls.get() + 1);
+            unreachable!("placeholder content must never be opened")
+        });
+
+        assert!(matches!(materialized, ProviderMetadataAccess::Placeholder));
+        assert_eq!(metadata_calls.get(), 0);
+        assert_eq!(content_open_calls.get(), 0);
     }
 
     #[test]

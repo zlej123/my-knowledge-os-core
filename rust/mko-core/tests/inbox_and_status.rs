@@ -4,14 +4,18 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use chrono::{TimeZone, Utc};
+
 use mko_core::{
     catalog::{CatalogBlocker, CatalogEvidence, SourceObservation, classify_catalog_item},
-    inbox::{InboxScanRequest, scan_inbox},
+    fingerprint::{asset_id, fingerprint_file},
+    front_matter::render_markdown,
+    inbox::{InboxScanRequest, project_catalog_items, scan_inbox},
     json_v1::{
         DiagnosticData, InboxData, JsonV1Success, NextAction, ScanLimitsData, StatusData,
         SuccessResult, UserState,
     },
-    model::AssetStatus,
+    model::{AssetRecord, AssetStatus, Classification, LastError, LastSuccessfulStep, Provider},
     provider_scan::{DEFAULT_SCAN_LIMITS, ElapsedClock, ScanLimits},
     status::status_from_inbox,
 };
@@ -182,6 +186,211 @@ fn inbox_scan_does_not_create_repository_state() {
     assert!(!repository.join("assets").exists());
     assert!(!repository.join("sources").exists());
     assert!(!repository.join(".knowledge-os").exists());
+}
+
+#[test]
+fn incomplete_provider_scan_does_not_invent_missing_or_hydrate_state() {
+    let fixture = Fixture::new();
+    let file = fixture.provider.join("known.pdf");
+    fs::write(&file, b"%PDF-1.7\nknown\n%%EOF\n").unwrap();
+    write_asset_record(
+        &fixture.repository,
+        valid_asset(&file, "known.pdf", AssetStatus::Registered),
+    );
+    fs::write(
+        fixture.provider.join("other.pdf"),
+        b"%PDF-1.7\nother\n%%EOF\n",
+    )
+    .unwrap();
+
+    let result = scan_inbox(
+        InboxScanRequest::new(&fixture.repository, &fixture.provider).with_limits(ScanLimits {
+            max_entries: 1,
+            ..DEFAULT_SCAN_LIMITS
+        }),
+        &FixedElapsedClock::new(0),
+    )
+    .unwrap();
+
+    assert!(!result.scan_complete);
+    assert!(
+        result
+            .items
+            .iter()
+            .all(|item| item.next_action != NextAction::Hydrate)
+    );
+    assert_eq!(result.state_counts[&UserState::Blocked], 0);
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "scan_limit_reached")
+    );
+}
+
+#[test]
+fn superseded_history_sharing_a_locator_is_hidden_in_favor_of_current_successor() {
+    let fixture = Fixture::new();
+    let file = fixture.provider.join("paper.pdf");
+    fs::write(&file, b"%PDF-1.7\ncurrent\n%%EOF\n").unwrap();
+    let successor = valid_asset(&file, "paper.pdf", AssetStatus::Registered);
+    let old_file = fixture._root.path().join("old.pdf");
+    fs::write(&old_file, b"%PDF-1.7\nold\n%%EOF\n").unwrap();
+    let mut old = valid_asset(&old_file, "paper.pdf", AssetStatus::Superseded);
+    old.durable_state_history = vec![AssetStatus::Registered];
+    let mut successor = successor;
+    successor.supersedes = Some(old.id.clone());
+    write_asset_record(&fixture.repository, old);
+    write_asset_record(&fixture.repository, successor.clone());
+
+    let result = scan_inbox(
+        InboxScanRequest::new(&fixture.repository, &fixture.provider),
+        &FixedElapsedClock::new(0),
+    )
+    .unwrap();
+
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(
+        result.items[0].asset_id.as_deref(),
+        Some(successor.id.as_str())
+    );
+    assert_eq!(result.items[0].user_state, UserState::Registered);
+    assert_eq!(result.state_counts[&UserState::Blocked], 0);
+}
+
+#[test]
+fn lock_scan_ignores_noise_but_fails_closed_when_sorted_lock_records_are_truncated() {
+    let fixture = Fixture::new();
+    let file = fixture.provider.join("paper.pdf");
+    fs::write(&file, b"%PDF-1.7\nlock\n%%EOF\n").unwrap();
+    let asset = valid_asset(&file, "paper.pdf", AssetStatus::Registered);
+    write_asset_record(&fixture.repository, asset.clone());
+    let locks = fixture.repository.join(".knowledge-os/runtime/locks");
+    fs::create_dir_all(&locks).unwrap();
+    fs::write(locks.join("000-noise.txt"), b"noise").unwrap();
+    fs::write(locks.join(format!("{}.lock", asset.id)), b"{}").unwrap();
+    fs::write(locks.join("zzz.lock.takeover"), b"{}").unwrap();
+    fs::write(locks.join("zzz2.lock"), b"{}").unwrap();
+
+    let result = scan_inbox(
+        InboxScanRequest::new(&fixture.repository, &fixture.provider).with_limits(ScanLimits {
+            max_entries: 2,
+            ..DEFAULT_SCAN_LIMITS
+        }),
+        &FixedElapsedClock::new(0),
+    )
+    .unwrap();
+
+    assert!(!result.scan_complete);
+    assert_eq!(result.items[0].next_action, NextAction::Retry);
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "lock_scan_incomplete")
+    );
+}
+
+#[test]
+fn invalid_registry_record_is_repair_blocked_without_exposing_unsafe_locator() {
+    let fixture = Fixture::new();
+    let outside = fixture._root.path().join("outside.pdf");
+    fs::write(&outside, b"%PDF-1.7\ninvalid registry\n%%EOF\n").unwrap();
+    let mut asset = valid_asset(&outside, "../escape.pdf", AssetStatus::Registered);
+    asset.scope = "work".into();
+    write_asset_record(&fixture.repository, asset);
+
+    let result = scan_inbox(
+        InboxScanRequest::new(&fixture.repository, &fixture.provider),
+        &FixedElapsedClock::new(0),
+    )
+    .unwrap();
+
+    assert!(
+        result
+            .items
+            .iter()
+            .all(|item| !item.provider_locator.contains(".."))
+    );
+    assert_eq!(result.state_counts[&UserState::Blocked], 1);
+    assert_eq!(result.recommended_action, NextAction::Repair);
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|error| error.code == "registry_invalid")
+    );
+}
+
+#[test]
+fn projection_prioritizes_actionable_items_before_processed_history() {
+    let mut items = (0..25)
+        .map(|index| mko_core::catalog::CatalogItem {
+            provider_locator: format!("processed-{index:02}.pdf"),
+            user_state: UserState::Processed,
+            asset_id: Some(format!("processed-{index:02}")),
+            next_action: NextAction::None,
+            diagnostic: None,
+        })
+        .collect::<Vec<_>>();
+    items.push(item_at("z-new.pdf", UserState::New, NextAction::Add));
+    items.push(item_at(
+        "z-review.pdf",
+        UserState::ReviewPending,
+        NextAction::Review,
+    ));
+
+    let projection = project_catalog_items(items, 20);
+
+    assert!(
+        projection
+            .items
+            .iter()
+            .any(|item| item.provider_locator == "z-new.pdf")
+    );
+    assert!(
+        projection
+            .items
+            .iter()
+            .any(|item| item.provider_locator == "z-review.pdf")
+    );
+    assert_eq!(projection.items.len(), 20);
+    assert_eq!(projection.remaining, 7);
+}
+
+#[test]
+fn mixed_blockers_use_one_priority_for_primary_diagnostic_and_action() {
+    let cases = [
+        ("lock_active", NextAction::Retry),
+        ("provider_missing", NextAction::Hydrate),
+        ("registry_provider_mismatch", NextAction::Repair),
+    ];
+    let mut items = Vec::new();
+    for (index, (code, action)) in cases.into_iter().enumerate() {
+        let mut catalog = item_at(&format!("{index}.pdf"), UserState::Blocked, action);
+        catalog.diagnostic = Some(DiagnosticData {
+            code: code.into(),
+            message: code.into(),
+            path: Some(format!("{index}.pdf")),
+        });
+        items.push(catalog);
+    }
+    let inbox = inbox_result_for_status(
+        items,
+        vec![DiagnosticData {
+            code: "repository_unreadable".into(),
+            message: "repo".into(),
+            path: Some("repo".into()),
+        }],
+    );
+
+    let status = status_from_inbox(&inbox);
+
+    assert_eq!(status.next_action, NextAction::Repair);
+    assert_eq!(
+        status.primary_blocker.unwrap().code,
+        "repository_unreadable"
+    );
 }
 
 #[test]
@@ -440,6 +649,92 @@ fn item(user_state: UserState, next_action: NextAction) -> mko_core::catalog::Ca
         next_action,
         diagnostic: None,
     }
+}
+
+fn item_at(
+    provider_locator: &str,
+    user_state: UserState,
+    next_action: NextAction,
+) -> mko_core::catalog::CatalogItem {
+    mko_core::catalog::CatalogItem {
+        provider_locator: provider_locator.into(),
+        user_state,
+        asset_id: None,
+        next_action,
+        diagnostic: None,
+    }
+}
+
+fn inbox_result_for_status(
+    items: Vec<mko_core::catalog::CatalogItem>,
+    errors: Vec<DiagnosticData>,
+) -> mko_core::inbox::InboxScanResult {
+    let mut counts = [
+        UserState::New,
+        UserState::Registered,
+        UserState::Incomplete,
+        UserState::ReviewPending,
+        UserState::Processed,
+        UserState::Blocked,
+    ]
+    .into_iter()
+    .map(|state| (state, 0))
+    .collect::<BTreeMap<_, _>>();
+    for item in &items {
+        *counts.entry(item.user_state.clone()).or_default() += 1;
+    }
+    mko_core::inbox::InboxScanResult {
+        scan_complete: true,
+        scan_limits: DEFAULT_SCAN_LIMITS,
+        items,
+        errors,
+        warnings: Vec::new(),
+        remaining: 0,
+        state_counts: counts,
+        primary_blocker: None,
+        recommended_action: NextAction::None,
+    }
+}
+
+fn valid_asset(file: &std::path::Path, locator: &str, status: AssetStatus) -> AssetRecord {
+    let fingerprint = fingerprint_file(file).unwrap();
+    let id = asset_id(&fingerprint).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 7, 20, 0, 0, 0).unwrap();
+    AssetRecord {
+        id,
+        record_type: "asset".into(),
+        schema_version: 1,
+        scope: "personal".into(),
+        title: "Paper".into(),
+        classification: Classification::Personal,
+        asset_class: "document".into(),
+        media_type: "application/pdf".into(),
+        provider: Provider {
+            r#type: "google-drive-stream".into(),
+            locator: locator.into(),
+            revision: None,
+        },
+        size_bytes: fs::metadata(file).unwrap().len(),
+        modified_at: now,
+        fingerprint,
+        asset_status: status,
+        durable_state_history: Vec::new(),
+        supersedes: None,
+        last_successful_step: LastSuccessfulStep::Registered,
+        last_error: LastError {
+            code: None,
+            retryable: false,
+        },
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+fn write_asset_record(repository: &std::path::Path, asset: AssetRecord) {
+    let path = repository
+        .join("assets/registry")
+        .join(format!("{}.md", asset.id));
+    fs::write(path, render_markdown(&asset, "# Asset Registry\n").unwrap()).unwrap();
 }
 
 struct Fixture {

@@ -2,6 +2,7 @@
 
 pub mod add;
 pub mod approve;
+pub mod asset_validation;
 pub mod atomic;
 pub mod canonical_source;
 pub mod catalog;

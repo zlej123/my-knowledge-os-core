@@ -1,10 +1,14 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 
+const MAX_RUNTIME_LOCK_BYTES: u64 = 16 * 1024;
+
 use crate::{
+    asset_validation::validate_canonical_asset,
     canonical_source::validate_canonical_source,
     catalog::{
         CatalogBlocker, CatalogEvidence, CatalogItem, SourceObservation, classify_catalog_item,
@@ -14,9 +18,10 @@ use crate::{
     json_v1::{DiagnosticData, InboxData, InboxItemData, NextAction, ScanLimitsData, UserState},
     model::{AssetRecord, AssetStatus, SourceRecord, SourceStatus},
     provider_scan::{
-        DEFAULT_SCAN_LIMITS, ElapsedClock, ProviderScanRequest, ProviderScanWarning, ScanLimits,
-        scan_provider_pdfs,
+        DEFAULT_SCAN_LIMITS, ElapsedClock, ProviderCatalogEntry, ProviderScanRequest,
+        ProviderScanWarning, ScanLimits, scan_provider_catalog_metadata_first,
     },
+    status::select_status_decision,
 };
 
 #[derive(Clone, Debug)]
@@ -64,6 +69,25 @@ type SourceScanResult = (
     bool,
 );
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogProjection {
+    pub items: Vec<CatalogItem>,
+    pub remaining: u64,
+}
+
+pub fn project_catalog_items(mut items: Vec<CatalogItem>, max_items: u64) -> CatalogProjection {
+    items.sort_by(|left, right| {
+        action_priority(&left.next_action)
+            .cmp(&action_priority(&right.next_action))
+            .then(left.provider_locator.cmp(&right.provider_locator))
+            .then(left.asset_id.cmp(&right.asset_id))
+    });
+    let visible_limit = usize::try_from(max_items).unwrap_or(usize::MAX);
+    let remaining = items.len().saturating_sub(visible_limit) as u64;
+    items.truncate(visible_limit);
+    CatalogProjection { items, remaining }
+}
+
 pub fn scan_inbox(
     request: InboxScanRequest,
     elapsed_clock: &dyn ElapsedClock,
@@ -73,7 +97,7 @@ pub fn scan_inbox(
         "repository_unreadable",
         "The repository is not readable.",
     )?;
-    let scan = scan_provider_pdfs(
+    let scan = scan_provider_catalog_metadata_first(
         ProviderScanRequest::new(&request.provider_root).with_limits(request.limits),
         elapsed_clock,
     )?;
@@ -93,38 +117,55 @@ pub fn scan_inbox(
         });
     }
 
-    let active_locks = read_lock_asset_ids(&repository_root, request.limits.max_entries)?;
-    let assets_by_locator = assets
-        .iter()
-        .map(|asset| (asset.provider.locator.as_str(), asset))
-        .collect::<HashMap<_, _>>();
+    let lock_scan = read_lock_asset_ids(&repository_root, request.limits.max_entries);
+    scan_complete &= lock_scan.complete;
+    if let Some(warning) = lock_scan.warning.clone() {
+        warnings.push(warning);
+    }
+    let (assets_by_locator, locator_conflicts) = current_assets_by_locator(&assets, &mut errors);
     let mut seen_assets = BTreeSet::new();
     let mut catalog = Vec::new();
-    for pdf in &scan.pdfs {
-        let Some(asset) = assets_by_locator
-            .get(pdf.provider_locator.as_str())
-            .copied()
-        else {
+    for provider_entry in &scan.entries {
+        let (provider_locator, readable_pdf) = match provider_entry {
+            ProviderCatalogEntry::Placeholder {
+                provider_locator, ..
+            } => (provider_locator.as_str(), None),
+            ProviderCatalogEntry::Readable(pdf) => (pdf.provider_locator.as_str(), Some(pdf)),
+        };
+        let Some(asset) = assets_by_locator.get(provider_locator).copied() else {
             catalog.push(classify_catalog_item(
-                &pdf.provider_locator,
+                provider_locator,
                 None,
                 CatalogEvidence {
                     asset_status: None,
                     source: SourceObservation::Absent,
-                    blocker: CatalogBlocker::None,
+                    blocker: if readable_pdf.is_some() && lock_scan.complete {
+                        CatalogBlocker::None
+                    } else {
+                        CatalogBlocker::ProviderMissing
+                    },
                 },
             ));
             continue;
         };
         seen_assets.insert(asset.id.clone());
-        let blocker = blocker_for(
-            asset,
-            &sources,
-            active_locks.contains(&asset.id),
-            pdf.size_bytes == asset.size_bytes && pdf.fingerprint == asset.fingerprint,
-        );
+        let blocker = if !lock_scan.complete {
+            CatalogBlocker::ActiveLock
+        } else if locator_conflicts.contains(provider_locator) {
+            CatalogBlocker::StateMismatch
+        } else {
+            match readable_pdf {
+                None => CatalogBlocker::ProviderMissing,
+                Some(pdf) => blocker_for(
+                    asset,
+                    &sources,
+                    lock_scan.asset_ids.contains(&asset.id),
+                    pdf.size_bytes == asset.size_bytes && pdf.fingerprint == asset.fingerprint,
+                ),
+            }
+        };
         catalog.push(classify_catalog_item(
-            &pdf.provider_locator,
+            provider_locator,
             Some(asset.id.clone()),
             CatalogEvidence {
                 asset_status: Some(asset.asset_status.clone()),
@@ -133,31 +174,41 @@ pub fn scan_inbox(
             },
         ));
     }
-    for asset in assets
-        .iter()
-        .filter(|asset| !seen_assets.contains(&asset.id))
-    {
-        catalog.push(classify_catalog_item(
-            &asset.provider.locator,
-            Some(asset.id.clone()),
-            CatalogEvidence {
-                asset_status: Some(asset.asset_status.clone()),
-                source: source_for(asset, &sources),
-                blocker: CatalogBlocker::ProviderMissing,
-            },
-        ));
+    if scan.scan_complete {
+        for asset in assets.iter().filter(|asset| {
+            asset.asset_status != AssetStatus::Superseded && !seen_assets.contains(&asset.id)
+        }) {
+            catalog.push(classify_catalog_item(
+                &asset.provider.locator,
+                Some(asset.id.clone()),
+                CatalogEvidence {
+                    asset_status: Some(asset.asset_status.clone()),
+                    source: source_for(asset, &sources),
+                    blocker: if lock_scan.complete {
+                        CatalogBlocker::ProviderMissing
+                    } else {
+                        CatalogBlocker::ActiveLock
+                    },
+                },
+            ));
+        }
     }
-    catalog.sort_by(|left, right| left.provider_locator.cmp(&right.provider_locator));
-    let state_counts = count_states(&catalog);
-    let primary_blocker = errors.first().cloned().or_else(|| {
-        catalog
-            .iter()
-            .find(|item| item.user_state == UserState::Blocked)
-            .and_then(|item| item.diagnostic.clone())
-    });
-    let recommended_action = recommended_action(&catalog);
-    let visible_limit = usize::try_from(request.limits.max_batch_items).unwrap_or(usize::MAX);
-    let remaining = catalog.len().saturating_sub(visible_limit) as u64;
+    let mut state_counts = count_states(&catalog);
+    let invalid_registry_records = errors
+        .iter()
+        .filter(|error| {
+            matches!(
+                error.code.as_str(),
+                "registry_invalid" | "path_not_portable" | "invalid_state_transition"
+            )
+        })
+        .filter_map(|error| error.path.as_deref())
+        .collect::<BTreeSet<_>>()
+        .len() as u64;
+    *state_counts.entry(UserState::Blocked).or_default() += invalid_registry_records;
+    let projection = project_catalog_items(catalog, request.limits.max_batch_items);
+    let remaining = projection.remaining;
+    let catalog = projection.items;
     if remaining > 0 {
         scan_complete = false;
         warnings.push(DiagnosticData {
@@ -168,12 +219,13 @@ pub fn scan_inbox(
             ),
             path: None,
         });
-        catalog.truncate(visible_limit);
     }
     warnings.sort_by(|left, right| left.code.cmp(&right.code).then(left.path.cmp(&right.path)));
     warnings.dedup();
     errors.sort_by(|left, right| left.code.cmp(&right.code).then(left.path.cmp(&right.path)));
     errors.dedup();
+    let (primary_blocker, recommended_action) =
+        select_status_decision(scan_complete, &catalog, &errors, &warnings);
     Ok(InboxScanResult {
         scan_complete,
         scan_limits: request.limits,
@@ -185,6 +237,28 @@ pub fn scan_inbox(
         primary_blocker,
         recommended_action,
     })
+}
+
+fn current_assets_by_locator<'a>(
+    assets: &'a [AssetRecord],
+    errors: &mut Vec<DiagnosticData>,
+) -> (HashMap<&'a str, &'a AssetRecord>, BTreeSet<&'a str>) {
+    let mut by_locator = HashMap::new();
+    let mut conflicts = BTreeSet::new();
+    for asset in assets
+        .iter()
+        .filter(|asset| asset.asset_status != AssetStatus::Superseded)
+    {
+        if let Some(previous) = by_locator.insert(asset.provider.locator.as_str(), asset) {
+            conflicts.insert(asset.provider.locator.as_str());
+            errors.push(DiagnosticData {
+                code: "duplicate_conflict".into(),
+                message: "Multiple current Asset records share one provider locator.".into(),
+                path: Some(format!("{};{}", previous.id, asset.id)),
+            });
+        }
+    }
+    (by_locator, conflicts)
 }
 
 fn blocker_for(
@@ -239,6 +313,13 @@ fn read_assets(
                 "registry_conflict",
                 "Registry filename and Asset ID disagree.",
             ));
+        }
+        let canonical_path = format!("assets/registry/{relative}");
+        if let Some(issue) = validate_canonical_asset(&canonical_path, &document.metadata)
+            .into_iter()
+            .next()
+        {
+            return Err(MkoError::new(issue.code, issue.message));
         }
         Ok(document.metadata)
     })
@@ -369,39 +450,105 @@ fn read_flat_markdown<T>(
     Ok((output, errors, complete))
 }
 
-fn read_lock_asset_ids(
-    repository_root: &Path,
-    max_entries: u64,
-) -> Result<BTreeSet<String>, MkoError> {
+#[derive(Clone, Debug, Default)]
+struct LockScan {
+    asset_ids: BTreeSet<String>,
+    complete: bool,
+    warning: Option<DiagnosticData>,
+}
+
+fn read_lock_asset_ids(repository_root: &Path, max_entries: u64) -> LockScan {
     let directory = repository_root.join(".knowledge-os/runtime/locks");
     match fs::symlink_metadata(&directory) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-        Ok(_) => {
-            return Err(MkoError::new(
-                "lock_read_failed",
-                "lock path is not a directory",
-            ));
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return LockScan {
+                complete: true,
+                ..LockScan::default()
+            };
         }
-        Err(error) => return Err(MkoError::new("lock_read_failed", error.to_string())),
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return incomplete_lock_scan("lock path is not a directory"),
+        Err(error) => return incomplete_lock_scan(&error.to_string()),
     }
-    let entries = match fs::read_dir(directory) {
+    let entries = match fs::read_dir(&directory) {
         Ok(entries) => entries,
-        Err(error) => return Err(MkoError::new("lock_read_failed", error.to_string())),
+        Err(error) => return incomplete_lock_scan(&error.to_string()),
     };
-    let mut ids = BTreeSet::new();
-    for entry in entries.take(usize::try_from(max_entries).unwrap_or(usize::MAX)) {
-        let entry = entry.map_err(|error| MkoError::new("lock_read_failed", error.to_string()))?;
+    let mut names = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return incomplete_lock_scan("cannot enumerate every runtime lock");
+        };
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
+        if name.ends_with(".lock") || name.ends_with(".lock.takeover") {
+            names.push(name);
+        }
+    }
+    names.sort();
+    let limit = usize::try_from(max_entries).unwrap_or(usize::MAX);
+    let complete = names.len() <= limit;
+    let mut ids = BTreeSet::new();
+    for name in names.into_iter().take(limit) {
+        let path = directory.join(&name);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata)
+                if metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && metadata.len() <= MAX_RUNTIME_LOCK_BYTES =>
+            {
+                metadata
+            }
+            _ => return incomplete_lock_scan("a runtime lock record is not safely readable"),
+        };
+        let mut contents = Vec::new();
+        let mut file = match fs::File::open(&path) {
+            Ok(file) => file,
+            Err(_) => return incomplete_lock_scan("a runtime lock record is not readable"),
+        };
+        let read_ok = file
+            .by_ref()
+            .take(MAX_RUNTIME_LOCK_BYTES + 1)
+            .read_to_end(&mut contents)
+            .is_ok();
+        let same_size_after_read =
+            fs::symlink_metadata(&path).is_ok_and(|after| after.len() == metadata.len());
+        if !read_ok
+            || contents.len() as u64 > MAX_RUNTIME_LOCK_BYTES
+            || metadata.len() != contents.len() as u64
+            || !same_size_after_read
+        {
+            return incomplete_lock_scan("a runtime lock record changed while it was read");
+        }
         if let Some(id) = name.strip_suffix(".lock") {
             ids.insert(id.to_owned());
         } else if let Some(id) = name.strip_suffix(".lock.takeover") {
             ids.insert(id.to_owned());
         }
     }
-    Ok(ids)
+    LockScan {
+        asset_ids: ids,
+        complete,
+        warning: (!complete)
+            .then(|| lock_scan_warning("The runtime lock scan reached its fixed record limit.")),
+    }
+}
+
+fn incomplete_lock_scan(message: &str) -> LockScan {
+    LockScan {
+        complete: false,
+        warning: Some(lock_scan_warning(message)),
+        ..LockScan::default()
+    }
+}
+
+fn lock_scan_warning(message: &str) -> DiagnosticData {
+    DiagnosticData {
+        code: "lock_scan_incomplete".into(),
+        message: message.into(),
+        path: None,
+    }
 }
 
 fn canonical_readable_directory(
@@ -453,21 +600,18 @@ fn count_states(items: &[CatalogItem]) -> BTreeMap<UserState, u64> {
     counts
 }
 
-fn recommended_action(items: &[CatalogItem]) -> NextAction {
-    const PRIORITY: [NextAction; 8] = [
-        NextAction::Configure,
-        NextAction::Repair,
-        NextAction::Hydrate,
-        NextAction::Retry,
-        NextAction::Review,
-        NextAction::WriteDraft,
-        NextAction::Prepare,
-        NextAction::Add,
-    ];
-    PRIORITY
-        .into_iter()
-        .find(|action| items.iter().any(|item| &item.next_action == action))
-        .unwrap_or(NextAction::None)
+fn action_priority(action: &NextAction) -> u8 {
+    match action {
+        NextAction::Configure => 0,
+        NextAction::Repair => 1,
+        NextAction::Hydrate => 2,
+        NextAction::Retry => 3,
+        NextAction::Review => 4,
+        NextAction::WriteDraft => 5,
+        NextAction::Prepare => 6,
+        NextAction::Add => 7,
+        NextAction::None => 8,
+    }
 }
 
 impl From<InboxScanResult> for InboxData {
