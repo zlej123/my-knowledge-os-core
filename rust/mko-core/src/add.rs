@@ -29,6 +29,7 @@ static NEXT_IMPORT_TEMP: AtomicU64 = AtomicU64::new(0);
 const IMPORT_LOCK_WAIT: Duration = Duration::from_secs(1);
 const IMPORT_LOCK_RETRY: Duration = Duration::from_millis(10);
 const IMPORT_TEMP_MARKER: &str = "mko-import-temp-v1\n";
+const IMPORT_TEMP_OWNER_CLAIM: &str = "mko-import-temp-owner-v1\n";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackupAttestation {
@@ -657,14 +658,7 @@ struct ImportLock {
 impl ImportLock {
     fn acquire(provider_root: &Path) -> Result<Self, MkoError> {
         let path = provider_root.join(".mko-import-naming.lock");
-        reject_non_regular_lock_path(&path)?;
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|error| MkoError::new("provider_import_locked", error.to_string()))?;
+        let mut file = open_import_lock(&path)?;
         let deadline = Instant::now() + IMPORT_LOCK_WAIT;
         loop {
             match file.try_lock() {
@@ -683,6 +677,7 @@ impl ImportLock {
                 }
             }
         }
+        validate_retained_import_lock(&path, &file)?;
         let owner_token = format!(
             "{}-{}",
             std::process::id(),
@@ -724,54 +719,200 @@ impl Drop for ImportLock {
     }
 }
 
-fn reject_non_regular_lock_path(path: &Path) -> Result<(), MkoError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(()),
-        Ok(_) => Err(MkoError::new(
+fn open_import_lock(path: &Path) -> Result<fs::File, MkoError> {
+    open_import_lock_with_before_validate(path, || {})
+}
+
+fn open_import_lock_with_before_validate<F>(
+    path: &Path,
+    before_validate: F,
+) -> Result<fs::File, MkoError>
+where
+    F: FnOnce(),
+{
+    let file = open_import_lock_path_nofollow(path)
+        .map_err(|error| MkoError::new("provider_import_locked", error.to_string()))?;
+    before_validate();
+    validate_retained_import_lock(path, &file)?;
+    Ok(file)
+}
+
+fn validate_retained_import_lock(path: &Path, file: &fs::File) -> Result<(), MkoError> {
+    let retained = file
+        .metadata()
+        .map_err(|error| MkoError::new("provider_import_locked", error.to_string()))?;
+    let current = fs::symlink_metadata(path)
+        .map_err(|error| MkoError::new("provider_import_locked", error.to_string()))?;
+    if !retained.is_file()
+        || metadata_is_link_or_reparse(&retained)
+        || !current.is_file()
+        || metadata_is_link_or_reparse(&current)
+        || !same_file_identity(&retained, &current)
+    {
+        return Err(MkoError::new(
             "provider_import_locked",
-            "provider import lock path must be a regular non-link file",
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(MkoError::new("provider_import_locked", error.to_string())),
+            "provider import lock must remain the intended regular non-link file",
+        ));
     }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn open_import_lock_path_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    const O_NOFOLLOW: i32 = 0x20_000;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(target_os = "macos")]
+fn open_import_lock_path_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    const O_NOFOLLOW: i32 = 0x100;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(target_os = "windows")]
+fn open_import_lock_path_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn open_import_lock_path_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(std::io::Error::other("symbolic links are not accepted"));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
 }
 
 fn reset_reserved_temp_root(path: &Path) -> Result<(), MkoError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-            let marker = path.join(".mko-owned");
-            let marker_metadata = fs::symlink_metadata(&marker).map_err(|_| {
-                MkoError::new(
-                    "provider_import_failed",
-                    "reserved import temp directory lacks its ownership marker",
-                )
-            })?;
-            if !marker_metadata.is_file()
-                || marker_metadata.file_type().is_symlink()
-                || fs::read_to_string(&marker)
-                    .map_err(|error| MkoError::new("provider_import_failed", error.to_string()))?
-                    != IMPORT_TEMP_MARKER
-            {
-                return Err(MkoError::new(
-                    "provider_import_failed",
-                    "reserved import temp directory has an invalid ownership marker",
-                ));
-            }
-            fs::remove_dir_all(path)
-                .map_err(|error| MkoError::new("provider_import_failed", error.to_string()))?;
-        }
+    let owner_claim = path.with_file_name(".mko-import-tmp.owner");
+    let root_exists = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => true,
         Ok(_) => {
             return Err(MkoError::new(
                 "provider_import_failed",
                 "reserved import temp path must be a non-link directory",
             ));
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(MkoError::new("provider_import_failed", error.to_string())),
+    };
+    let claim_valid = ownership_marker_matches(&owner_claim, IMPORT_TEMP_OWNER_CLAIM)?;
+    let root_marker_valid = if root_exists {
+        ownership_marker_matches(&path.join(".mko-owned"), IMPORT_TEMP_MARKER)?
+    } else {
+        false
+    };
+    if root_exists && !claim_valid && !root_marker_valid {
+        return Err(MkoError::new(
+            "provider_import_failed",
+            "reserved import temp directory is not attributable to Core",
+        ));
+    }
+    if !claim_valid {
+        publish_owner_claim(&owner_claim, root_marker_valid)?;
+    }
+    if root_exists {
+        fs::remove_dir_all(path)
+            .map_err(|error| MkoError::new("provider_import_failed", error.to_string()))?;
+    }
+    fs::create_dir(path)
+        .and_then(|_| {
+            let mut marker = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path.join(".mko-owned"))?;
+            marker.write_all(IMPORT_TEMP_MARKER.as_bytes())?;
+            marker.sync_all()
+        })
+        .map_err(|error| MkoError::new("provider_import_failed", error.to_string()))
+}
+
+fn ownership_marker_matches(path: &Path, expected: &str) -> Result<bool, MkoError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            fs::read_to_string(path)
+                .map(|contents| contents == expected)
+                .map_err(|error| MkoError::new("provider_import_failed", error.to_string()))
+        }
+        Ok(_) => Err(MkoError::new(
+            "provider_import_failed",
+            "import temp ownership marker must be a regular non-link file",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(MkoError::new("provider_import_failed", error.to_string())),
+    }
+}
+
+fn publish_owner_claim(path: &Path, replace_invalid_legacy_claim: bool) -> Result<(), MkoError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata)
+            if replace_invalid_legacy_claim
+                && metadata.is_file()
+                && !metadata.file_type().is_symlink() =>
+        {
+            fs::remove_file(path)
+                .map_err(|error| MkoError::new("provider_import_failed", error.to_string()))?;
+        }
+        Ok(_) => {
+            return Err(MkoError::new(
+                "provider_import_failed",
+                "import temp owner claim must be a regular non-link file",
+            ));
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(MkoError::new("provider_import_failed", error.to_string())),
     }
-    fs::create_dir(path)
-        .and_then(|_| fs::write(path.join(".mko-owned"), IMPORT_TEMP_MARKER))
-        .map_err(|error| MkoError::new("provider_import_failed", error.to_string()))
+    let temporary = path.with_file_name(format!(
+        ".mko-import-tmp.owner.{}.{}.tmp",
+        std::process::id(),
+        NEXT_IMPORT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut claim = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| MkoError::new("provider_import_failed", error.to_string()))?;
+    let publish = claim
+        .write_all(IMPORT_TEMP_OWNER_CLAIM.as_bytes())
+        .and_then(|_| claim.sync_all())
+        .and_then(|_| fs::hard_link(&temporary, path));
+    let _ = fs::remove_file(&temporary);
+    publish.map_err(|error| MkoError::new("provider_import_failed", error.to_string()))?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(())
 }
 
 fn current_hostname() -> Result<String, MkoError> {
@@ -790,4 +931,26 @@ fn sync_directory(path: &Path) -> Result<(), MkoError> {
 #[cfg(not(unix))]
 fn sync_directory(_path: &Path) -> Result<(), MkoError> {
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retained_lock_open_rejects_a_path_swapped_to_a_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let lock = root.path().join("lock");
+        let target = root.path().join("target");
+        fs::write(&lock, b"old lock").unwrap();
+        fs::write(&target, b"sentinel").unwrap();
+
+        let result = open_import_lock_with_before_validate(&lock, || {
+            fs::remove_file(&lock).unwrap();
+            std::os::unix::fs::symlink(&target, &lock).unwrap();
+        });
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(target).unwrap(), b"sentinel");
+    }
 }

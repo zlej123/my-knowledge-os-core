@@ -169,7 +169,7 @@ fn walk_directory(
     if state.stopped || time_limit_reached(state) {
         return Ok(());
     }
-    let read_dir = match directory.entries() {
+    let mut read_dir = match directory.entries() {
         Ok(entries) => entries,
         Err(error) => {
             mark_incomplete(
@@ -190,30 +190,21 @@ fn walk_directory(
         );
         return Ok(());
     }
-    let retained_limit = usize::try_from(remaining).unwrap_or(usize::MAX);
     let mut entries = Vec::new();
-    let mut overflowed = false;
-    for entry in read_dir {
+    let mut inspected = 0;
+    let mut exhausted = false;
+    while inspected < remaining {
         if time_limit_reached(state) {
+            state.entries_seen = state.entries_seen.saturating_add(inspected);
             return Ok(());
         }
+        let Some(entry) = read_dir.next() else {
+            exhausted = true;
+            break;
+        };
+        inspected += 1;
         match entry {
-            Ok(entry) if entries.len() < retained_limit => entries.push(entry),
-            Ok(entry) => {
-                overflowed = true;
-                let candidate_name = entry.file_name();
-                let Some((largest_index, largest_name)) = entries
-                    .iter()
-                    .enumerate()
-                    .map(|(index, retained)| (index, retained.file_name()))
-                    .max_by(|left, right| left.1.cmp(&right.1))
-                else {
-                    continue;
-                };
-                if candidate_name < largest_name {
-                    entries[largest_index] = entry;
-                }
-            }
+            Ok(entry) => entries.push(entry),
             Err(error) => mark_incomplete(
                 state,
                 "scan_entry_unreadable",
@@ -222,30 +213,24 @@ fn walk_directory(
             ),
         }
     }
-    entries.sort_by_key(|entry| entry.file_name());
-    reject_directory_collisions(&entries)?;
-    if overflowed {
+    state.entries_seen = state.entries_seen.saturating_add(inspected);
+    if !exhausted {
         mark_incomplete(
             state,
             "scan_entry_limit",
-            "provider scan reached the entry limit".into(),
+            "provider scan reached the entry limit before deterministic ordering was established"
+                .into(),
             None,
         );
+        return Ok(());
     }
+    entries.sort_by_key(|entry| entry.file_name());
+    reject_directory_collisions(&entries)?;
 
     for entry in entries {
         if state.stopped || time_limit_reached(state) {
             break;
         }
-        if state.entries_seen >= state.limits.max_entries {
-            mark_limit(
-                state,
-                "scan_entry_limit",
-                "provider scan reached the entry limit",
-            );
-            break;
-        }
-        state.entries_seen += 1;
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             mark_incomplete(

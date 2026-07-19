@@ -54,6 +54,24 @@ struct AdvancingClock {
     step: u64,
 }
 
+#[derive(Default)]
+struct CountingElapsedClock {
+    calls: AtomicU64,
+}
+
+impl CountingElapsedClock {
+    fn calls(&self) -> u64 {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl ElapsedClock for CountingElapsedClock {
+    fn elapsed_ms(&self) -> u64 {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        0
+    }
+}
+
 impl AdvancingClock {
     fn new(step: u64) -> Self {
         Self {
@@ -108,7 +126,7 @@ impl ElapsedClock for SwapToLinkClock {
 
 impl ElapsedClock for MutatingClock {
     fn elapsed_ms(&self) -> u64 {
-        if self.calls.fetch_add(1, Ordering::SeqCst) == 5 {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 6 {
             fs::write(&self.path, b"%PDF-1.7\nmutated while scanning").unwrap();
         }
         0
@@ -252,25 +270,32 @@ fn provider_scan_stops_at_entry_byte_time_and_depth_limits() {
 }
 
 #[test]
-fn entry_limit_keeps_bounded_partial_pdf_results() {
+fn entry_limit_returns_an_empty_deterministic_partial_without_over_enumeration() {
     let fixture = Fixture::new();
     fixture.provider_pdf("z.pdf", b"%PDF-1.7\nz");
     fixture.provider_pdf("a.pdf", b"%PDF-1.7\na");
     fixture.provider_pdf("m.pdf", b"%PDF-1.7\nm");
 
+    let clock = CountingElapsedClock::default();
     let result = scan_provider_pdfs(
         ProviderScanRequest::new(&fixture.provider).with_limits(ScanLimits {
             max_entries: 1,
             ..limits()
         }),
-        &FixedElapsedClock,
+        &clock,
     )
     .unwrap();
 
     assert!(!result.scan_complete);
     assert_eq!(result.entries_seen, 1);
-    assert_eq!(result.pdfs.len(), 1);
-    assert_eq!(result.pdfs[0].provider_locator, "a.pdf");
+    assert!(result.pdfs.is_empty());
+    assert!(clock.calls() <= 4, "elapsed checks: {}", clock.calls());
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "scan_entry_limit")
+    );
 }
 
 #[cfg(unix)]
@@ -760,6 +785,92 @@ fn dead_import_lock_and_orphan_temp_are_recovered_on_retry() {
     assert_eq!(result.provider_locator, "Paper.pdf");
     assert!(lock.is_file());
     assert!(!orphan.exists());
+}
+
+#[test]
+fn core_owned_temp_root_recovers_a_crash_after_directory_creation() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.provider.join(".mko-import-tmp.owner"),
+        "mko-import-temp-owner-v1\n",
+    )
+    .unwrap();
+    fs::create_dir(fixture.provider.join(".mko-import-tmp")).unwrap();
+    let outside = fixture.outside_pdf("Paper.pdf", b"%PDF-1.7\ncomplete");
+
+    let result = add_pdf(
+        AddRequest::new(fixture.context(), outside),
+        &FixedAuditClock,
+        &FixedElapsedClock,
+    )
+    .unwrap();
+
+    assert_eq!(result.provider_locator, "Paper.pdf");
+}
+
+#[test]
+fn core_owned_temp_root_recovers_a_partial_marker_publication() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.provider.join(".mko-import-tmp.owner"),
+        "mko-import-temp-owner-v1\n",
+    )
+    .unwrap();
+    fs::create_dir(fixture.provider.join(".mko-import-tmp")).unwrap();
+    fs::write(
+        fixture.provider.join(".mko-import-tmp/.mko-owned"),
+        "mko-import-",
+    )
+    .unwrap();
+    let outside = fixture.outside_pdf("Paper.pdf", b"%PDF-1.7\ncomplete");
+
+    let result = add_pdf(
+        AddRequest::new(fixture.context(), outside),
+        &FixedAuditClock,
+        &FixedElapsedClock,
+    )
+    .unwrap();
+
+    assert_eq!(result.provider_locator, "Paper.pdf");
+}
+
+#[test]
+fn unrelated_reserved_name_directory_is_preserved_without_an_owner_claim() {
+    let fixture = Fixture::new();
+    let user_file = fixture.provider.join(".mko-import-tmp/user-notes.txt");
+    fs::create_dir(fixture.provider.join(".mko-import-tmp")).unwrap();
+    fs::write(&user_file, b"user content").unwrap();
+    let outside = fixture.outside_pdf("Paper.pdf", b"%PDF-1.7\ncomplete");
+
+    let error = add_pdf(
+        AddRequest::new(fixture.context(), outside),
+        &FixedAuditClock,
+        &FixedElapsedClock,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "provider_import_failed");
+    assert_eq!(fs::read(user_file).unwrap(), b"user content");
+}
+
+#[cfg(unix)]
+#[test]
+fn static_import_lock_symlink_is_rejected_without_touching_its_target() {
+    let fixture = Fixture::new();
+    let target = fixture.outside.join("lock-target");
+    fs::write(&target, b"sentinel").unwrap();
+    std::os::unix::fs::symlink(&target, fixture.provider.join(".mko-import-naming.lock")).unwrap();
+    let outside = fixture.outside_pdf("Paper.pdf", b"%PDF-1.7\ncomplete");
+
+    let error = add_pdf(
+        AddRequest::new(fixture.context(), outside),
+        &FixedAuditClock,
+        &FixedElapsedClock,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "provider_import_locked");
+    assert_eq!(fs::read(target).unwrap(), b"sentinel");
 }
 
 #[test]
