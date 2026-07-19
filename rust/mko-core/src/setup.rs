@@ -9,7 +9,7 @@ use crate::{
     config::KnowledgeConfig,
     context::{ContextSource, PlatformEnvironment, ResolvedPersonalContext, Scope},
     error::MkoError,
-    hooks::{HookState, inspect_hook, install_hooks},
+    hooks::{HookState, configured_hook_path, inspect_hook, install_hooks},
     path_policy::canonical_directory,
     profile::{MachineProfileFile, PROFILE_SCHEMA_VERSION, PersonalProfile, ProfileStore},
 };
@@ -71,14 +71,48 @@ impl SetupOutcome {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct SetupPreflight {
     context: ResolvedPersonalContext,
     store: ProfileStore,
     profile: MachineProfileFile,
+    selected_account_root: PathBuf,
+    canonical_account_root: PathBuf,
+    original_profile: Option<MachineProfileFile>,
     inbox_needs_create: bool,
     profile_needs_write: bool,
     hook_needs_install: bool,
+    inbox_observation: Vec<EntryObservation>,
+    profile_observation: ProfileObservation,
+    hook_observation: HookObservation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum EntryObservation {
+    Missing,
+    Directory,
+    File { bytes: Vec<u8>, executable: bool },
+    Symlink(PathBuf),
+    Other,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProfileObservation {
+    parent: EntryObservation,
+    destination: EntryObservation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HookObservation {
+    directory: EntryObservation,
+    destination: EntryObservation,
+    configured_path: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StepStatus {
+    changed: bool,
+    completed: bool,
 }
 
 impl SetupPreflight {
@@ -196,6 +230,7 @@ pub fn preflight_setup(
     let inbox_exists = inspect_inbox_path(&account_root, &selected.path, &inbox)?;
 
     let store = ProfileStore::from_platform(platform)?;
+    validate_profile_destination(&store, &repository_root, &account_root)?;
     let current_profile = store.read()?;
     inspect_profile_parent(&store)?;
     let profile = desired_profile(current_profile.as_ref(), &repository_root, &inbox);
@@ -210,14 +245,23 @@ pub fn preflight_setup(
         scope: Scope::Personal,
         source: ContextSource::Profile,
     };
+    let inbox_observation = observe_inbox(&context.provider_root)?;
+    let profile_observation = observe_profile(&store)?;
+    let hook_observation = observe_hook(&hook.repository_root)?;
 
     Ok(SetupPreflight {
         context,
         store,
         profile,
+        selected_account_root: selected.path,
+        canonical_account_root: account_root,
+        original_profile: current_profile,
         inbox_needs_create: !inbox_exists,
         profile_needs_write,
         hook_needs_install: hook.state != HookState::Managed,
+        inbox_observation,
+        profile_observation,
+        hook_observation,
     })
 }
 
@@ -225,6 +269,7 @@ pub fn apply_setup(
     preflight: SetupPreflight,
     writer: &dyn SetupWriter,
 ) -> Result<SetupOutcome, MkoError> {
+    let preflight = refresh_preflight(preflight)?;
     let mut completed_steps = Vec::new();
     let mut changed_steps = Vec::new();
     let needs_change = [
@@ -239,7 +284,18 @@ pub fn apply_setup(
     }
 
     if preflight.inbox_needs_create {
-        if let Err(error) = writer.create_inbox(&preflight.context.provider_root) {
+        let result = writer.create_inbox(&preflight.context.provider_root);
+        let status = inspect_step_status(&preflight, SetupStep::Inbox).unwrap_or(StepStatus {
+            changed: false,
+            completed: false,
+        });
+        record_step_status(
+            SetupStep::Inbox,
+            status,
+            &mut completed_steps,
+            &mut changed_steps,
+        );
+        if let Err(error) = result {
             return Ok(failed_outcome(
                 SetupStep::Inbox,
                 error,
@@ -247,11 +303,31 @@ pub fn apply_setup(
                 changed_steps,
             ));
         }
-        completed_steps.push(SetupStep::Inbox);
-        changed_steps.push(SetupStep::Inbox);
+        if !status.completed {
+            return Ok(failed_outcome(
+                SetupStep::Inbox,
+                MkoError::new(
+                    "setup_step_incomplete",
+                    "Inbox writer returned success without completing the Inbox",
+                ),
+                completed_steps,
+                changed_steps,
+            ));
+        }
     }
     if preflight.profile_needs_write {
-        if let Err(error) = writer.write_profile(&preflight.store, &preflight.profile) {
+        let result = writer.write_profile(&preflight.store, &preflight.profile);
+        let status = inspect_step_status(&preflight, SetupStep::Profile).unwrap_or(StepStatus {
+            changed: false,
+            completed: false,
+        });
+        record_step_status(
+            SetupStep::Profile,
+            status,
+            &mut completed_steps,
+            &mut changed_steps,
+        );
+        if let Err(error) = result {
             return Ok(failed_outcome(
                 SetupStep::Profile,
                 error,
@@ -259,11 +335,31 @@ pub fn apply_setup(
                 changed_steps,
             ));
         }
-        completed_steps.push(SetupStep::Profile);
-        changed_steps.push(SetupStep::Profile);
+        if !status.completed {
+            return Ok(failed_outcome(
+                SetupStep::Profile,
+                MkoError::new(
+                    "setup_step_incomplete",
+                    "profile writer returned success without committing the profile",
+                ),
+                completed_steps,
+                changed_steps,
+            ));
+        }
     }
     if preflight.hook_needs_install {
-        if let Err(error) = writer.install_hook(&preflight.context.repository_root) {
+        let result = writer.install_hook(&preflight.context.repository_root);
+        let status = inspect_step_status(&preflight, SetupStep::Hook).unwrap_or(StepStatus {
+            changed: false,
+            completed: false,
+        });
+        record_step_status(
+            SetupStep::Hook,
+            status,
+            &mut completed_steps,
+            &mut changed_steps,
+        );
+        if let Err(error) = result {
             return Ok(failed_outcome(
                 SetupStep::Hook,
                 error,
@@ -271,8 +367,17 @@ pub fn apply_setup(
                 changed_steps,
             ));
         }
-        completed_steps.push(SetupStep::Hook);
-        changed_steps.push(SetupStep::Hook);
+        if !status.completed {
+            return Ok(failed_outcome(
+                SetupStep::Hook,
+                MkoError::new(
+                    "setup_step_incomplete",
+                    "hook writer returned success without installing the managed hook",
+                ),
+                completed_steps,
+                changed_steps,
+            ));
+        }
     }
 
     completed_steps.sort();
@@ -289,9 +394,12 @@ fn failed_outcome(
     step: SetupStep,
     error: MkoError,
     mut completed_steps: Vec<SetupStep>,
-    changed_steps: Vec<SetupStep>,
+    mut changed_steps: Vec<SetupStep>,
 ) -> SetupOutcome {
     completed_steps.sort();
+    completed_steps.dedup();
+    changed_steps.sort();
+    changed_steps.dedup();
     let incomplete_steps = [SetupStep::Inbox, SetupStep::Profile, SetupStep::Hook]
         .into_iter()
         .filter(|candidate| !completed_steps.contains(candidate))
@@ -305,6 +413,140 @@ fn failed_outcome(
             code: error.code().into(),
             message: error.message().into(),
         }),
+    }
+}
+
+fn refresh_preflight(mut preflight: SetupPreflight) -> Result<SetupPreflight, MkoError> {
+    let repository_root = canonical_directory(
+        &preflight.context.repository_root,
+        "repository_root_invalid",
+    )?;
+    if repository_root != preflight.context.repository_root {
+        return Err(MkoError::new(
+            "setup_stale",
+            "repository identity changed after setup preflight",
+        ));
+    }
+    let knowledge = KnowledgeConfig::read(&repository_root)?;
+    if knowledge.scope != Scope::Personal.as_str() {
+        return Err(MkoError::new(
+            "scope_conflict",
+            "setup supports only a Personal knowledge base",
+        ));
+    }
+    if knowledge.provider.r#type != preflight.context.provider_type {
+        return Err(MkoError::new(
+            "setup_stale",
+            "repository provider changed after setup preflight",
+        ));
+    }
+
+    let canonical_account_root =
+        canonical_directory(&preflight.selected_account_root, "provider_root_invalid")?;
+    if canonical_account_root != preflight.canonical_account_root {
+        return Err(MkoError::new(
+            "setup_stale",
+            "selected Google Drive account changed after setup preflight",
+        ));
+    }
+    ensure_writable_directory(&canonical_account_root)?;
+    let inbox_exists = inspect_inbox_path(
+        &canonical_account_root,
+        &preflight.selected_account_root,
+        &preflight.context.provider_root,
+    )?;
+
+    validate_profile_destination(&preflight.store, &repository_root, &canonical_account_root)?;
+    let current_profile = preflight.store.read()?;
+    inspect_profile_parent(&preflight.store)?;
+    let current_profile_observation = observe_profile(&preflight.store)?;
+    if current_profile != preflight.original_profile
+        && current_profile.as_ref() != Some(&preflight.profile)
+    {
+        return Err(MkoError::new(
+            "setup_stale",
+            "machine profile changed after setup preflight; rerun setup",
+        ));
+    }
+    if preflight.profile_needs_write
+        && current_profile == preflight.original_profile
+        && current_profile_observation != preflight.profile_observation
+    {
+        return Err(MkoError::new(
+            "setup_stale",
+            "machine profile bytes changed after setup preflight; rerun setup",
+        ));
+    }
+    let profile = desired_profile(
+        current_profile.as_ref(),
+        &repository_root,
+        &preflight.context.provider_root,
+    );
+    if profile != preflight.profile {
+        return Err(MkoError::new(
+            "setup_stale",
+            "desired machine profile changed after setup preflight; rerun setup",
+        ));
+    }
+
+    let hook = inspect_hook(&repository_root)?;
+    preflight.inbox_needs_create = !inbox_exists;
+    preflight.profile_needs_write = current_profile.as_ref() != Some(&profile);
+    preflight.hook_needs_install = hook.state != HookState::Managed;
+    preflight.inbox_observation = observe_inbox(&preflight.context.provider_root)?;
+    preflight.profile_observation = current_profile_observation;
+    preflight.hook_observation = observe_hook(&repository_root)?;
+    Ok(preflight)
+}
+
+fn record_step_status(
+    step: SetupStep,
+    status: StepStatus,
+    completed_steps: &mut Vec<SetupStep>,
+    changed_steps: &mut Vec<SetupStep>,
+) {
+    if status.completed {
+        completed_steps.push(step);
+    }
+    if status.changed {
+        changed_steps.push(step);
+    }
+}
+
+fn inspect_step_status(
+    preflight: &SetupPreflight,
+    step: SetupStep,
+) -> Result<StepStatus, MkoError> {
+    match step {
+        SetupStep::Inbox => {
+            let observation = observe_inbox(&preflight.context.provider_root)?;
+            let completed = inspect_inbox_path(
+                &preflight.canonical_account_root,
+                &preflight.selected_account_root,
+                &preflight.context.provider_root,
+            )?;
+            Ok(StepStatus {
+                changed: observation != preflight.inbox_observation,
+                completed,
+            })
+        }
+        SetupStep::Profile => {
+            let observation = observe_profile(&preflight.store)?;
+            let completed = preflight.store.read()?.as_ref() == Some(&preflight.profile);
+            Ok(StepStatus {
+                changed: observation != preflight.profile_observation,
+                completed,
+            })
+        }
+        SetupStep::Hook => {
+            let observation = observe_hook(&preflight.context.repository_root)?;
+            let completed = inspect_hook(&preflight.context.repository_root)
+                .is_ok_and(|hook| hook.state == HookState::Managed);
+            Ok(StepStatus {
+                changed: observation != preflight.hook_observation,
+                completed,
+            })
+        }
     }
 }
 
@@ -410,7 +652,7 @@ fn inspect_inbox_path(
                 let parent = current.parent().ok_or_else(|| {
                     MkoError::new("provider_root_invalid", "Inbox path has no parent")
                 })?;
-                let existing_parent = nearest_existing_directory(parent)?;
+                let existing_parent = nearest_existing_directory(parent, canonical_account_root)?;
                 ensure_writable_directory(&existing_parent)?;
                 return Ok(false);
             }
@@ -426,12 +668,24 @@ fn inspect_inbox_path(
     Ok(true)
 }
 
-fn nearest_existing_directory(path: &Path) -> Result<PathBuf, MkoError> {
+fn nearest_existing_directory(path: &Path, canonical_boundary: &Path) -> Result<PathBuf, MkoError> {
     let mut candidate = path;
     loop {
         match fs::symlink_metadata(candidate) {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-                return Ok(candidate.to_path_buf());
+            Ok(metadata) if metadata.is_dir() || metadata.file_type().is_symlink() => {
+                let resolved = fs::canonicalize(candidate).map_err(|error| {
+                    MkoError::new(
+                        "provider_root_invalid",
+                        format!("cannot resolve {}: {error}", candidate.display()),
+                    )
+                })?;
+                if !resolved.is_dir() || !resolved.starts_with(canonical_boundary) {
+                    return Err(MkoError::new(
+                        "provider_root_invalid",
+                        "Personal Inbox path escapes the selected Google Drive account",
+                    ));
+                }
+                return Ok(resolved);
             }
             Ok(_) => {
                 return Err(MkoError::new(
@@ -452,6 +706,145 @@ fn nearest_existing_directory(path: &Path) -> Result<PathBuf, MkoError> {
             }
         }
     }
+}
+
+fn validate_profile_destination(
+    store: &ProfileStore,
+    canonical_repository_root: &Path,
+    canonical_account_root: &Path,
+) -> Result<(), MkoError> {
+    if !store.path().is_absolute() {
+        return Err(MkoError::new(
+            "profile_path_invalid",
+            "machine profile path must be absolute and machine-local",
+        ));
+    }
+    let projected = projected_canonical_path(store.path())?;
+    if projected.starts_with(canonical_repository_root)
+        || projected.starts_with(canonical_account_root)
+    {
+        return Err(MkoError::new(
+            "profile_path_invalid",
+            "machine profile path must be outside the knowledge base and synchronized provider",
+        ));
+    }
+    Ok(())
+}
+
+fn projected_canonical_path(path: &Path) -> Result<PathBuf, MkoError> {
+    let mut candidate = path;
+    let mut missing = Vec::new();
+    loop {
+        match fs::symlink_metadata(candidate) {
+            Ok(_) => {
+                let mut projected = fs::canonicalize(candidate).map_err(|error| {
+                    MkoError::new(
+                        "profile_path_invalid",
+                        format!("cannot resolve machine profile destination: {error}"),
+                    )
+                })?;
+                for component in missing.iter().rev() {
+                    projected.push(component);
+                }
+                return Ok(projected);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = candidate.file_name().ok_or_else(|| {
+                    MkoError::new(
+                        "profile_path_invalid",
+                        "machine profile destination has no existing absolute ancestor",
+                    )
+                })?;
+                missing.push(name.to_os_string());
+                candidate = candidate.parent().ok_or_else(|| {
+                    MkoError::new(
+                        "profile_path_invalid",
+                        "machine profile destination has no parent",
+                    )
+                })?;
+            }
+            Err(error) => {
+                return Err(MkoError::new(
+                    "profile_path_invalid",
+                    format!("cannot inspect machine profile destination: {error}"),
+                ));
+            }
+        }
+    }
+}
+
+fn observe_inbox(inbox: &Path) -> Result<Vec<EntryObservation>, MkoError> {
+    let account_root = inbox
+        .ancestors()
+        .nth(INBOX_COMPONENTS.len())
+        .ok_or_else(|| MkoError::new("provider_root_invalid", "Inbox path has no account root"))?;
+    let mut current = account_root.to_path_buf();
+    let mut observations = Vec::new();
+    for component in INBOX_COMPONENTS {
+        current.push(component);
+        observations.push(observe_entry(&current, "provider_root_invalid")?);
+    }
+    Ok(observations)
+}
+
+fn observe_profile(store: &ProfileStore) -> Result<ProfileObservation, MkoError> {
+    let parent = store.path().parent().ok_or_else(|| {
+        MkoError::new(
+            "profile_path_invalid",
+            "machine profile path has no parent directory",
+        )
+    })?;
+    Ok(ProfileObservation {
+        parent: observe_entry(parent, "profile_write_failed")?,
+        destination: observe_entry(store.path(), "profile_write_failed")?,
+    })
+}
+
+fn observe_hook(repository_root: &Path) -> Result<HookObservation, MkoError> {
+    let directory = repository_root.join(".githooks");
+    Ok(HookObservation {
+        directory: observe_entry(&directory, "hook_inspection_failed")?,
+        destination: observe_entry(&directory.join("pre-commit"), "hook_inspection_failed")?,
+        configured_path: configured_hook_path(repository_root)?,
+    })
+}
+
+fn observe_entry(path: &Path, code: &'static str) -> Result<EntryObservation, MkoError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(EntryObservation::Missing);
+        }
+        Err(error) => return Err(MkoError::new(code, error.to_string())),
+    };
+    if metadata.file_type().is_symlink() {
+        return fs::read_link(path)
+            .map(EntryObservation::Symlink)
+            .map_err(|error| MkoError::new(code, error.to_string()));
+    }
+    if metadata.is_dir() {
+        return Ok(EntryObservation::Directory);
+    }
+    if metadata.is_file() {
+        let bytes = fs::read(path).map_err(|error| MkoError::new(code, error.to_string()))?;
+        return Ok(EntryObservation::File {
+            bytes,
+            executable: observation_is_executable(&metadata),
+        });
+    }
+    Ok(EntryObservation::Other)
+}
+
+#[cfg(unix)]
+fn observation_is_executable(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn observation_is_executable(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 fn ensure_writable_directory(path: &Path) -> Result<(), MkoError> {

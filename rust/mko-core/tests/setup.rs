@@ -202,6 +202,64 @@ fn custom_hook_path_conflict_causes_zero_setup_mutations() {
 }
 
 #[test]
+fn included_effective_hook_path_conflict_causes_zero_setup_mutations() {
+    let fixture = Fixture::new(false);
+    let drive = fixture.mac_drive("alice@example.com");
+    let isolated_config = fixture.root.join("isolated-global.gitconfig");
+    fs::write(&isolated_config, "[core]\n\thooksPath = inherited-hooks\n").unwrap();
+    git(
+        &fixture.repository,
+        &[
+            "config",
+            "--local",
+            "include.path",
+            isolated_config.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        git_output(
+            &fixture.repository,
+            &["config", "--local", "--get", "core.hooksPath"]
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        git_output(&fixture.repository, &["config", "--get", "core.hooksPath"]),
+        "inherited-hooks"
+    );
+    let before = snapshot_tree(&fixture.root);
+
+    let error = preflight_setup(fixture.request(&drive), &fixture.platform).unwrap_err();
+
+    assert_eq!(error.code(), "hook_conflict");
+    assert_eq!(snapshot_tree(&fixture.root), before);
+    assert!(!fixture.inbox(&drive).exists());
+    assert!(!fixture.store().path().exists());
+}
+
+#[test]
+fn worktree_hook_path_conflict_causes_zero_setup_mutations() {
+    let fixture = Fixture::new(false);
+    let drive = fixture.mac_drive("alice@example.com");
+    git(
+        &fixture.repository,
+        &["config", "extensions.worktreeConfig", "true"],
+    );
+    git(
+        &fixture.repository,
+        &["config", "--worktree", "core.hooksPath", "worktree-hooks"],
+    );
+    let before = snapshot_tree(&fixture.root);
+
+    let error = preflight_setup(fixture.request(&drive), &fixture.platform).unwrap_err();
+
+    assert_eq!(error.code(), "hook_conflict");
+    assert_eq!(snapshot_tree(&fixture.root), before);
+    assert!(!fixture.inbox(&drive).exists());
+    assert!(!fixture.store().path().exists());
+}
+
+#[test]
 fn unmanaged_hook_conflict_causes_zero_setup_mutations() {
     let fixture = Fixture::new(false);
     let drive = fixture.mac_drive("alice@example.com");
@@ -219,6 +277,93 @@ fn unmanaged_hook_conflict_causes_zero_setup_mutations() {
     assert_eq!(snapshot_tree(&fixture.root), before);
     assert!(!fixture.inbox(&drive).exists());
     assert!(!fixture.store().path().exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_hook_directory_conflict_causes_zero_setup_mutations() {
+    let fixture = Fixture::new(false);
+    let drive = fixture.mac_drive("alice@example.com");
+    let outside = fixture.root.join("outside-hooks");
+    fs::create_dir(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, fixture.repository.join(".githooks")).unwrap();
+    let before = snapshot_tree(&fixture.root);
+
+    let error = preflight_setup(fixture.request(&drive), &fixture.platform).unwrap_err();
+
+    assert_eq!(error.code(), "hook_path_invalid");
+    assert_eq!(snapshot_tree(&fixture.root), before);
+    assert!(!fixture.inbox(&drive).exists());
+    assert!(!fixture.store().path().exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_hook_file_conflict_causes_zero_setup_mutations() {
+    let fixture = Fixture::new(false);
+    let drive = fixture.mac_drive("alice@example.com");
+    let outside = fixture.root.join("outside-pre-commit");
+    fs::write(&outside, PRE_COMMIT_SCRIPT).unwrap();
+    fs::create_dir(fixture.repository.join(".githooks")).unwrap();
+    std::os::unix::fs::symlink(&outside, fixture.repository.join(".githooks/pre-commit")).unwrap();
+    let before = snapshot_tree(&fixture.root);
+
+    let error = preflight_setup(fixture.request(&drive), &fixture.platform).unwrap_err();
+
+    assert_eq!(error.code(), "hook_path_invalid");
+    assert_eq!(snapshot_tree(&fixture.root), before);
+    assert!(!fixture.inbox(&drive).exists());
+    assert!(!fixture.store().path().exists());
+}
+
+#[test]
+fn non_regular_hook_file_conflict_causes_zero_setup_mutations() {
+    let fixture = Fixture::new(false);
+    let drive = fixture.mac_drive("alice@example.com");
+    fs::create_dir_all(fixture.repository.join(".githooks/pre-commit")).unwrap();
+    let before = snapshot_tree(&fixture.root);
+
+    let error = preflight_setup(fixture.request(&drive), &fixture.platform).unwrap_err();
+
+    assert_eq!(error.code(), "hook_path_invalid");
+    assert_eq!(snapshot_tree(&fixture.root), before);
+    assert!(!fixture.inbox(&drive).exists());
+    assert!(!fixture.store().path().exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_hook_with_non_executable_mode_is_repaired() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new(false);
+    let drive = fixture.mac_drive("alice@example.com");
+    let hook = fixture.repository.join(".githooks/pre-commit");
+    fs::create_dir(hook.parent().unwrap()).unwrap();
+    fs::write(&hook, PRE_COMMIT_SCRIPT).unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o644)).unwrap();
+    git(
+        &fixture.repository,
+        &["config", "--local", "core.hooksPath", ".githooks"],
+    );
+
+    assert_eq!(
+        inspect_hook(&fixture.repository).unwrap().state,
+        HookState::Missing
+    );
+    let outcome = apply_setup(
+        preflight_setup(fixture.request(&drive), &fixture.platform).unwrap(),
+        &SystemSetupWriter,
+    )
+    .unwrap();
+
+    assert!(outcome.is_complete());
+    assert!(outcome.changed_steps.contains(&SetupStep::Hook));
+    assert_ne!(fs::metadata(&hook).unwrap().permissions().mode() & 0o111, 0);
+    assert_eq!(
+        inspect_hook(&fixture.repository).unwrap().state,
+        HookState::Managed
+    );
 }
 
 #[cfg(unix)]
@@ -303,6 +448,221 @@ fn inbox_symlink_escaping_selected_account_is_rejected_before_mutation() {
     assert!(!fixture.store().path().exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn fresh_inbox_can_be_created_through_selected_account_symlink_alias() {
+    let fixture = Fixture::new(false);
+    let account_parent = fixture
+        .platform
+        .home
+        .join("Library/CloudStorage/GoogleDrive-alice@example.com");
+    let selected_alias = account_parent.join("My Drive");
+    let actual_account = fixture.root.join("actual-drive-account");
+    fs::create_dir_all(&account_parent).unwrap();
+    fs::create_dir(&actual_account).unwrap();
+    std::os::unix::fs::symlink(&actual_account, &selected_alias).unwrap();
+
+    let preflight = preflight_setup(fixture.request(&selected_alias), &fixture.platform).unwrap();
+    assert_eq!(
+        preflight.context().provider_root,
+        fixture.inbox(&selected_alias)
+    );
+    let outcome = apply_setup(preflight, &SystemSetupWriter).unwrap();
+
+    assert!(outcome.is_complete());
+    assert!(actual_account.join(INBOX_SUFFIX).is_dir());
+    assert_eq!(
+        fixture.store().read().unwrap().unwrap().profiles["personal"].provider_root,
+        fixture.inbox(&selected_alias)
+    );
+}
+
+#[test]
+fn relative_profile_destination_is_rejected_before_mutation() {
+    let fixture = Fixture::new(false);
+    let drive = fixture.mac_drive("alice@example.com");
+    let mut platform = fixture.platform.clone();
+    platform.config_home = PathBuf::from("relative-config-home");
+    let before = snapshot_tree(&fixture.root);
+
+    let error = preflight_setup(fixture.request(&drive), &platform).unwrap_err();
+
+    assert_eq!(error.code(), "profile_path_invalid");
+    assert_eq!(snapshot_tree(&fixture.root), before);
+    assert!(!fixture.inbox(&drive).exists());
+}
+
+#[test]
+fn profile_destination_inside_repository_is_rejected_before_mutation() {
+    let fixture = Fixture::new(false);
+    let drive = fixture.mac_drive("alice@example.com");
+    let mut platform = fixture.platform.clone();
+    platform.config_home = fixture.repository.join("machine-config");
+    let before = snapshot_tree(&fixture.root);
+
+    let error = preflight_setup(fixture.request(&drive), &platform).unwrap_err();
+
+    assert_eq!(error.code(), "profile_path_invalid");
+    assert_eq!(snapshot_tree(&fixture.root), before);
+    assert!(!fixture.inbox(&drive).exists());
+}
+
+#[test]
+fn profile_destination_inside_synchronized_provider_is_rejected_before_mutation() {
+    let fixture = Fixture::new(false);
+    let drive = fixture.mac_drive("alice@example.com");
+    let mut platform = fixture.platform.clone();
+    platform.config_home = drive.join("machine-config");
+    let before = snapshot_tree(&fixture.root);
+
+    let error = preflight_setup(fixture.request(&drive), &platform).unwrap_err();
+
+    assert_eq!(error.code(), "profile_path_invalid");
+    assert_eq!(snapshot_tree(&fixture.root), before);
+    assert!(!fixture.inbox(&drive).exists());
+}
+
+#[test]
+fn profile_destination_below_a_non_directory_is_rejected_before_mutation() {
+    let fixture = Fixture::new(false);
+    let drive = fixture.mac_drive("alice@example.com");
+    let config_file = fixture.root.join("not-a-config-directory");
+    fs::write(&config_file, "preserve me").unwrap();
+    let mut platform = fixture.platform.clone();
+    platform.config_home = config_file;
+    let before = snapshot_tree(&fixture.root);
+
+    let error = preflight_setup(fixture.request(&drive), &platform).unwrap_err();
+
+    assert_eq!(error.code(), "profile_path_invalid");
+    assert_eq!(snapshot_tree(&fixture.root), before);
+    assert!(!fixture.inbox(&drive).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn profile_destination_symlinked_into_repository_is_rejected_before_mutation() {
+    let fixture = Fixture::new(false);
+    let drive = fixture.mac_drive("alice@example.com");
+    let config_alias = fixture.root.join("machine-config-alias");
+    std::os::unix::fs::symlink(&fixture.repository, &config_alias).unwrap();
+    let mut platform = fixture.platform.clone();
+    platform.config_home = config_alias;
+    let before = snapshot_tree(&fixture.root);
+
+    let error = preflight_setup(fixture.request(&drive), &platform).unwrap_err();
+
+    assert_eq!(error.code(), "profile_path_invalid");
+    assert_eq!(snapshot_tree(&fixture.root), before);
+    assert!(!fixture.inbox(&drive).exists());
+}
+
+#[test]
+fn stale_hook_conflict_is_detected_before_first_setup_mutation() {
+    let fixture = Fixture::new(false);
+    let drive = fixture.mac_drive("alice@example.com");
+    let preflight = preflight_setup(fixture.request(&drive), &fixture.platform).unwrap();
+    fs::create_dir(fixture.repository.join(".githooks")).unwrap();
+    fs::write(
+        fixture.repository.join(".githooks/pre-commit"),
+        "#!/bin/sh\necho newly-owned\n",
+    )
+    .unwrap();
+    let before_apply = snapshot_tree(&fixture.root);
+
+    let error = apply_setup(preflight, &SystemSetupWriter).unwrap_err();
+
+    assert_eq!(error.code(), "hook_conflict");
+    assert_eq!(snapshot_tree(&fixture.root), before_apply);
+    assert!(!fixture.inbox(&drive).exists());
+    assert!(!fixture.store().path().exists());
+}
+
+#[test]
+fn stale_profile_drift_is_detected_before_first_setup_mutation() {
+    let fixture = Fixture::new(false);
+    let drive = fixture.mac_drive("alice@example.com");
+    let preflight = preflight_setup(fixture.request(&drive), &fixture.platform).unwrap();
+    let other_provider = fixture.root.join("other-provider");
+    fs::create_dir(&other_provider).unwrap();
+    fixture
+        .store()
+        .write(&profile(&fixture.repository, &other_provider))
+        .unwrap();
+    let before_apply = snapshot_tree(&fixture.root);
+
+    let error = apply_setup(preflight, &SystemSetupWriter).unwrap_err();
+
+    assert_eq!(error.code(), "setup_stale");
+    assert_eq!(snapshot_tree(&fixture.root), before_apply);
+    assert!(!fixture.inbox(&drive).exists());
+}
+
+#[test]
+fn stale_profile_byte_drift_is_detected_before_first_setup_mutation() {
+    let fixture = Fixture::new(false);
+    let drive = fixture.mac_drive("alice@example.com");
+    let other_provider = fixture.root.join("other-provider");
+    fs::create_dir(&other_provider).unwrap();
+    fixture
+        .store()
+        .write(&profile(&fixture.repository, &other_provider))
+        .unwrap();
+    let preflight = preflight_setup(fixture.request(&drive), &fixture.platform).unwrap();
+    let original = fs::read_to_string(fixture.store().path()).unwrap();
+    fs::write(
+        fixture.store().path(),
+        format!("# concurrent semantic-preserving rewrite\n{original}"),
+    )
+    .unwrap();
+    let before_apply = snapshot_tree(&fixture.root);
+
+    let error = apply_setup(preflight, &SystemSetupWriter).unwrap_err();
+
+    assert_eq!(error.code(), "setup_stale");
+    assert_eq!(snapshot_tree(&fixture.root), before_apply);
+    assert!(!fixture.inbox(&drive).exists());
+}
+
+#[test]
+fn stale_repository_drift_is_detected_before_first_setup_mutation() {
+    let fixture = Fixture::new(false);
+    let drive = fixture.mac_drive("alice@example.com");
+    let preflight = preflight_setup(fixture.request(&drive), &fixture.platform).unwrap();
+    fs::write(
+        fixture.repository.join("knowledge-os.yaml"),
+        KNOWLEDGE_CONFIG.replace("scope: personal", "scope: team"),
+    )
+    .unwrap();
+    let before_apply = snapshot_tree(&fixture.root);
+
+    let error = apply_setup(preflight, &SystemSetupWriter).unwrap_err();
+
+    assert_eq!(error.code(), "config_invalid");
+    assert_eq!(snapshot_tree(&fixture.root), before_apply);
+    assert!(!fixture.inbox(&drive).exists());
+    assert!(!fixture.store().path().exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn stale_provider_escape_is_detected_before_first_setup_mutation() {
+    let fixture = Fixture::new(false);
+    let drive = fixture.mac_drive("alice@example.com");
+    let preflight = preflight_setup(fixture.request(&drive), &fixture.platform).unwrap();
+    let outside = fixture.root.join("late-outside-inbox");
+    fs::create_dir(&outside).unwrap();
+    fs::create_dir_all(drive.join("My-Knowledge-OS-Assets/personal")).unwrap();
+    std::os::unix::fs::symlink(&outside, fixture.inbox(&drive)).unwrap();
+    let before_apply = snapshot_tree(&fixture.root);
+
+    let error = apply_setup(preflight, &SystemSetupWriter).unwrap_err();
+
+    assert_eq!(error.code(), "provider_root_invalid");
+    assert_eq!(snapshot_tree(&fixture.root), before_apply);
+    assert!(!fixture.store().path().exists());
+}
+
 #[test]
 fn inbox_creation_survives_an_injected_profile_write_failure() {
     let fixture = Fixture::new(false);
@@ -358,6 +718,93 @@ fn profile_success_survives_an_injected_hook_failure() {
         inspect_hook(&fixture.repository).unwrap().state,
         HookState::Missing
     );
+}
+
+#[test]
+fn outcome_reports_partial_and_postcommit_mutations_and_rerun_converges() {
+    for point in [
+        MutationPoint::InboxParentCreated,
+        MutationPoint::InboxCreated,
+        MutationPoint::ProfileDirectoryCreated,
+        MutationPoint::ProfileCommitted,
+        MutationPoint::HookDirectoryCreated,
+        MutationPoint::HookFileWritten,
+        MutationPoint::HookMadeExecutable,
+        MutationPoint::HookConfigured,
+    ] {
+        let fixture = Fixture::new(false);
+        let drive = fixture.mac_drive("alice@example.com");
+        let preflight = preflight_setup(fixture.request(&drive), &fixture.platform).unwrap();
+        let outcome = apply_setup(preflight, &MutatingThenFailingWriter::at(point)).unwrap();
+
+        let expected_failure_step = match point {
+            MutationPoint::InboxParentCreated | MutationPoint::InboxCreated => SetupStep::Inbox,
+            MutationPoint::ProfileDirectoryCreated | MutationPoint::ProfileCommitted => {
+                SetupStep::Profile
+            }
+            MutationPoint::HookDirectoryCreated
+            | MutationPoint::HookFileWritten
+            | MutationPoint::HookMadeExecutable
+            | MutationPoint::HookConfigured => SetupStep::Hook,
+        };
+        assert_eq!(
+            outcome.failure.as_ref().map(|failure| failure.step),
+            Some(expected_failure_step),
+            "{point:?}"
+        );
+        assert!(
+            outcome.changed_steps.contains(&expected_failure_step),
+            "{point:?}: changed_steps={:?}",
+            outcome.changed_steps
+        );
+
+        match point {
+            MutationPoint::InboxParentCreated => {
+                assert!(!outcome.completed_steps.contains(&SetupStep::Inbox));
+                assert!(outcome.incomplete_steps.contains(&SetupStep::Inbox));
+            }
+            MutationPoint::InboxCreated => {
+                assert!(outcome.completed_steps.contains(&SetupStep::Inbox));
+                assert!(!outcome.incomplete_steps.contains(&SetupStep::Inbox));
+            }
+            MutationPoint::ProfileDirectoryCreated => {
+                assert!(!outcome.completed_steps.contains(&SetupStep::Profile));
+                assert!(outcome.incomplete_steps.contains(&SetupStep::Profile));
+            }
+            MutationPoint::ProfileCommitted => {
+                assert!(outcome.completed_steps.contains(&SetupStep::Profile));
+                assert!(!outcome.incomplete_steps.contains(&SetupStep::Profile));
+            }
+            MutationPoint::HookDirectoryCreated
+            | MutationPoint::HookFileWritten
+            | MutationPoint::HookMadeExecutable => {
+                assert!(!outcome.completed_steps.contains(&SetupStep::Hook));
+                assert!(outcome.incomplete_steps.contains(&SetupStep::Hook));
+            }
+            MutationPoint::HookConfigured => {
+                assert!(outcome.completed_steps.contains(&SetupStep::Hook));
+                assert!(!outcome.incomplete_steps.contains(&SetupStep::Hook));
+            }
+        }
+
+        let rerun = apply_setup(
+            preflight_setup(fixture.request(&drive), &fixture.platform).unwrap(),
+            &SystemSetupWriter,
+        )
+        .unwrap();
+        assert!(rerun.is_complete(), "{point:?}: {rerun:?}");
+        assert!(fixture.inbox(&drive).is_dir(), "{point:?}");
+        assert_eq!(
+            fixture.store().read().unwrap().unwrap().profiles["personal"].provider_root,
+            fixture.inbox(&drive),
+            "{point:?}"
+        );
+        assert_eq!(
+            inspect_hook(&fixture.repository).unwrap().state,
+            HookState::Managed,
+            "{point:?}"
+        );
+    }
 }
 
 #[test]
@@ -450,6 +897,99 @@ impl SetupWriter for FailingWriter {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum MutationPoint {
+    InboxParentCreated,
+    InboxCreated,
+    ProfileDirectoryCreated,
+    ProfileCommitted,
+    HookDirectoryCreated,
+    HookFileWritten,
+    HookMadeExecutable,
+    HookConfigured,
+}
+
+struct MutatingThenFailingWriter {
+    point: MutationPoint,
+    system: SystemSetupWriter,
+}
+
+impl MutatingThenFailingWriter {
+    fn at(point: MutationPoint) -> Self {
+        Self {
+            point,
+            system: SystemSetupWriter,
+        }
+    }
+
+    fn failure(&self) -> MkoError {
+        MkoError::new("injected_postmutation_failure", format!("{:?}", self.point))
+    }
+}
+
+impl SetupWriter for MutatingThenFailingWriter {
+    fn create_inbox(&self, path: &Path) -> Result<(), MkoError> {
+        match self.point {
+            MutationPoint::InboxParentCreated => {
+                fs::create_dir_all(path.parent().unwrap().parent().unwrap()).unwrap();
+                Err(self.failure())
+            }
+            MutationPoint::InboxCreated => {
+                fs::create_dir_all(path).unwrap();
+                Err(self.failure())
+            }
+            _ => self.system.create_inbox(path),
+        }
+    }
+
+    fn write_profile(
+        &self,
+        store: &ProfileStore,
+        profile: &MachineProfileFile,
+    ) -> Result<(), MkoError> {
+        match self.point {
+            MutationPoint::ProfileDirectoryCreated => {
+                let parent = store.path().parent().unwrap();
+                fs::create_dir_all(parent).unwrap();
+                set_private_directory(parent);
+                Err(self.failure())
+            }
+            MutationPoint::ProfileCommitted => {
+                self.system.write_profile(store, profile)?;
+                Err(self.failure())
+            }
+            _ => self.system.write_profile(store, profile),
+        }
+    }
+
+    fn install_hook(&self, repository_root: &Path) -> Result<(), MkoError> {
+        let directory = repository_root.join(".githooks");
+        let hook = directory.join("pre-commit");
+        match self.point {
+            MutationPoint::HookDirectoryCreated => {
+                fs::create_dir(&directory).unwrap();
+                Err(self.failure())
+            }
+            MutationPoint::HookFileWritten => {
+                fs::create_dir(&directory).unwrap();
+                fs::write(&hook, PRE_COMMIT_SCRIPT).unwrap();
+                Err(self.failure())
+            }
+            MutationPoint::HookMadeExecutable => {
+                fs::create_dir(&directory).unwrap();
+                fs::write(&hook, PRE_COMMIT_SCRIPT).unwrap();
+                set_executable(&hook);
+                Err(self.failure())
+            }
+            MutationPoint::HookConfigured => {
+                self.system.install_hook(repository_root)?;
+                Err(self.failure())
+            }
+            _ => self.system.install_hook(repository_root),
+        }
+    }
+}
+
 #[derive(Default)]
 struct CountingWriter {
     calls: Mutex<Vec<SetupStep>>,
@@ -538,6 +1078,40 @@ fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut output = BTreeMap::new();
     visit(root, root, &mut output);
     output
+}
+
+#[cfg(unix)]
+fn set_private_directory(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[cfg(not(unix))]
+fn set_private_directory(_path: &Path) {}
+
+#[cfg(unix)]
+fn set_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path) {}
+
+fn git_output(repository: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .output()
+        .unwrap();
+    if output.status.code() == Some(1) {
+        return String::new();
+    }
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 fn git(repository: &Path, arguments: &[&str]) {

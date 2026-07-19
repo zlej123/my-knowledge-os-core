@@ -69,7 +69,7 @@ pub fn inspect_hook(repository_root: &Path) -> Result<HookInspection, MkoError> 
                     "existing pre-commit hook is materially different; preserve or integrate it explicitly",
                 ));
             }
-            true
+            hook_is_executable(&metadata)
         }
         Ok(_) => {
             return Err(MkoError::new(
@@ -161,11 +161,35 @@ fn canonical_repository_root(repository_root: &Path) -> Result<PathBuf, MkoError
     })
 }
 
-fn configured_hook_path(repository_root: &Path) -> Result<Option<String>, MkoError> {
-    let output = Command::new("git")
+pub(crate) fn configured_hook_path(repository_root: &Path) -> Result<Option<String>, MkoError> {
+    configured_hook_path_with_overrides(repository_root, None)
+}
+
+#[cfg(test)]
+fn configured_hook_path_with_files(
+    repository_root: &Path,
+    global: &Path,
+    system: &Path,
+) -> Result<Option<String>, MkoError> {
+    configured_hook_path_with_overrides(repository_root, Some((global, system)))
+}
+
+fn configured_hook_path_with_overrides(
+    repository_root: &Path,
+    isolated_files: Option<(&Path, &Path)>,
+) -> Result<Option<String>, MkoError> {
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(repository_root)
-        .args(["config", "--local", "--get", "core.hooksPath"])
+        .args(["config", "--get", "core.hooksPath"]);
+    if let Some((global, system)) = isolated_files {
+        command
+            .env("GIT_CONFIG_GLOBAL", global)
+            .env("GIT_CONFIG_SYSTEM", system)
+            .env_remove("GIT_CONFIG_NOSYSTEM");
+    }
+    let output = command
         .output()
         .map_err(|error| MkoError::new("git_unavailable", error.to_string()))?;
     if output.status.success() {
@@ -178,8 +202,20 @@ fn configured_hook_path(repository_root: &Path) -> Result<Option<String>, MkoErr
     }
     Err(MkoError::new(
         "hook_inspection_failed",
-        "cannot inspect local core.hooksPath",
+        "cannot inspect effective core.hooksPath",
     ))
+}
+
+#[cfg(unix)]
+fn hook_is_executable(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn hook_is_executable(_metadata: &fs::Metadata) -> bool {
+    true
 }
 
 fn validate_git_root(repository_root: &Path) -> Result<(), MkoError> {
@@ -222,4 +258,71 @@ fn make_executable(path: &Path) -> Result<(), MkoError> {
 #[cfg(not(unix))]
 fn make_executable(_path: &Path) -> Result<(), MkoError> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::PathBuf, process::Command};
+
+    use tempfile::TempDir;
+
+    use super::configured_hook_path_with_files;
+
+    #[test]
+    fn effective_global_hook_path_is_read_from_isolated_config() {
+        let fixture = GitConfigFixture::new();
+        fs::write(&fixture.global, "[core]\n\thooksPath = global-hooks\n").unwrap();
+
+        assert_eq!(
+            configured_hook_path_with_files(&fixture.repository, &fixture.global, &fixture.system,)
+                .unwrap()
+                .as_deref(),
+            Some("global-hooks")
+        );
+    }
+
+    #[test]
+    fn effective_system_hook_path_is_read_from_isolated_config() {
+        let fixture = GitConfigFixture::new();
+        fs::write(&fixture.system, "[core]\n\thooksPath = system-hooks\n").unwrap();
+
+        assert_eq!(
+            configured_hook_path_with_files(&fixture.repository, &fixture.global, &fixture.system,)
+                .unwrap()
+                .as_deref(),
+            Some("system-hooks")
+        );
+    }
+
+    struct GitConfigFixture {
+        _root: TempDir,
+        repository: PathBuf,
+        global: PathBuf,
+        system: PathBuf,
+    }
+
+    impl GitConfigFixture {
+        fn new() -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let repository = root.path().join("repository");
+            let global = root.path().join("global.gitconfig");
+            let system = root.path().join("system.gitconfig");
+            fs::create_dir(&repository).unwrap();
+            fs::write(&global, "").unwrap();
+            fs::write(&system, "").unwrap();
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["init", "--quiet"])
+                .status()
+                .unwrap();
+            assert!(status.success());
+            Self {
+                _root: root,
+                repository,
+                global,
+                system,
+            }
+        }
+    }
 }
