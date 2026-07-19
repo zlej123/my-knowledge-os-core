@@ -1,3 +1,4 @@
 /rust/target/
 /.superpowers/
+/.worktrees/
 .DS_Store
