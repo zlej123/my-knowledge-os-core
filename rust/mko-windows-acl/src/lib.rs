@@ -6,7 +6,7 @@ use std::{
     error,
     ffi::c_void,
     fmt, fs, iter,
-    mem::size_of,
+    mem::{MaybeUninit, size_of},
     os::windows::{
         ffi::{OsStrExt, OsStringExt},
         io::AsRawHandle,
@@ -32,10 +32,10 @@ use windows_sys::Win32::{
         TOKEN_QUERY, TOKEN_USER, TokenUser,
     },
     Storage::FileSystem::{
-        CreateFileW, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_DATA, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, GetFinalPathNameByHandleW, OPEN_EXISTING,
-        VOLUME_NAME_DOS,
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_DATA,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+        GetFinalPathNameByHandleW, OPEN_EXISTING, VOLUME_NAME_DOS,
     },
     System::Threading::{GetCurrentProcess, OpenProcessToken},
 };
@@ -66,6 +66,30 @@ pub enum EffectiveAccess {
     ReadDirectory,
     WriteDirectory,
     ReadFile,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileIdentity {
+    volume_serial_number: u32,
+    file_index: u64,
+}
+
+pub fn file_identity(file: &fs::File) -> std::io::Result<FileIdentity> {
+    let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    // SAFETY: The file handle remains borrowed and valid for the call, and the output pointer
+    // references writable storage for one BY_HANDLE_FILE_INFORMATION value.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), information.as_mut_ptr()) }
+        == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: A successful GetFileInformationByHandle call initialized the complete structure.
+    let information = unsafe { information.assume_init() };
+    Ok(FileIdentity {
+        volume_serial_number: information.dwVolumeSerialNumber,
+        file_index: (u64::from(information.nFileIndexHigh) << 32)
+            | u64::from(information.nFileIndexLow),
+    })
 }
 
 #[derive(Debug)]
@@ -424,8 +448,9 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::{
-        AclInspection, EffectiveAccess, Error, ErrorKind, FULL_CONTROL_MASK, Inheritance,
-        apply_owner_only_to_file, apply_owner_only_to_path, check_effective_access, inspect_path,
+        AclInspection, EffectiveAccess, Error, ErrorKind, FULL_CONTROL_MASK, FileIdentity,
+        Inheritance, apply_owner_only_to_file, apply_owner_only_to_path, check_effective_access,
+        file_identity, inspect_path,
     };
 
     #[test]
@@ -433,6 +458,19 @@ mod tests {
         let _: fn(&Path, Inheritance) -> Result<(), Error> = apply_owner_only_to_path;
         let _: fn(&fs::File) -> Result<AclInspection, Error> = apply_owner_only_to_file;
         let _: fn(&Path) -> Result<AclInspection, Error> = inspect_path;
+        let _: fn(&fs::File) -> std::io::Result<FileIdentity> = file_identity;
+    }
+
+    #[test]
+    fn cloned_handles_have_the_same_stable_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let file = fs::File::create(root.path().join("identity.txt")).unwrap();
+        let cloned = file.try_clone().unwrap();
+
+        assert_eq!(
+            file_identity(&file).unwrap(),
+            file_identity(&cloned).unwrap()
+        );
     }
 
     #[test]

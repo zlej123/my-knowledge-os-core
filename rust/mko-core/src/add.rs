@@ -947,7 +947,9 @@ fn open_source_nofollow(path: &Path) -> Result<(fs::File, PathBuf), MkoError> {
     })?;
     let canonical_metadata = fs::metadata(&canonical)
         .map_err(|error| MkoError::new("file_unreadable", error.to_string()))?;
-    if !same_file_identity(&opened_metadata, &canonical_metadata) {
+    if !same_open_file_identity(&file, &canonical, &canonical_metadata)
+        .map_err(|error| MkoError::new("file_unreadable", error.to_string()))?
+    {
         return Err(MkoError::new(
             "file_unreadable",
             "add input changed while it was being opened",
@@ -996,23 +998,36 @@ fn open_path_nofollow(path: &Path) -> std::io::Result<fs::File> {
 }
 
 #[cfg(unix)]
-fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+fn same_open_file_identity(
+    left: &fs::File,
+    _right_path: &Path,
+    right: &fs::Metadata,
+) -> std::io::Result<bool> {
     use std::os::unix::fs::MetadataExt;
-    left.dev() == right.dev() && left.ino() == right.ino()
+    let left = left.metadata()?;
+    Ok(left.dev() == right.dev() && left.ino() == right.ino())
 }
 
 #[cfg(windows)]
-fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    left.volume_serial_number() == right.volume_serial_number()
-        && left.file_index() == right.file_index()
+fn same_open_file_identity(
+    left: &fs::File,
+    right_path: &Path,
+    _right: &fs::Metadata,
+) -> std::io::Result<bool> {
+    let right = open_path_nofollow(right_path)?;
+    Ok(mko_windows_acl::file_identity(left)? == mko_windows_acl::file_identity(&right)?)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    left.len() == right.len()
+fn same_open_file_identity(
+    left: &fs::File,
+    _right_path: &Path,
+    right: &fs::Metadata,
+) -> std::io::Result<bool> {
+    let left = left.metadata()?;
+    Ok(left.len() == right.len()
         && left.modified().ok() == right.modified().ok()
-        && left.created().ok() == right.created().ok()
+        && left.created().ok() == right.created().ok())
 }
 
 fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
@@ -1155,7 +1170,8 @@ fn validate_retained_import_lock(path: &Path, file: &fs::File) -> Result<(), Mko
         || metadata_is_link_or_reparse(&retained)
         || !current.is_file()
         || metadata_is_link_or_reparse(&current)
-        || !same_file_identity(&retained, &current)
+        || !same_open_file_identity(file, path, &current)
+            .map_err(|error| MkoError::new("provider_import_locked", error.to_string()))?
     {
         return Err(MkoError::new(
             "provider_import_locked",

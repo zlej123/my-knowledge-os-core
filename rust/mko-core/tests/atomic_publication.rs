@@ -152,5 +152,6 @@ fn publication_lock_cleanup_never_removes_a_copied_owner_replacement() {
 
     assert_eq!(error.code(), "hook_failed");
     assert_eq!(fs::read(&path).unwrap(), b"original\n");
-    assert!(fs::read_to_string(lock).unwrap().starts_with("owner="));
+    let replacement: serde_json::Value = serde_json::from_slice(&fs::read(lock).unwrap()).unwrap();
+    assert!(replacement["owner_token"].as_str().is_some());
 }

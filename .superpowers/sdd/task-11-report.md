@@ -77,15 +77,50 @@ Full verification run from the repository-defined locations:
   removal is followed by a directory sync on Unix. Observer seams emit only
   after the corresponding sync succeeds; tests cover both the complete
   quarantine/restore/remove sequence and the restore-failure sequence.
-- Stable identity on Unix and Windows now comes from metadata on a cloned
-  standard file handle. Windows volume serial values are widened from `u32` to
-  `u64`; file indices remain `u64`. Native Windows CI is still the release gate
-  because this development machine has no Windows Rust target installed.
+- Stable identity on Unix comes from metadata on a cloned standard file handle.
+  Windows identity is now confined to the safe private `mko-windows-acl` API,
+  which uses stable `GetFileInformationByHandle` data and exposes only an opaque,
+  equality-comparable identity to Core. Native Windows CI is still the release
+  gate because this development machine has no Windows Rust target installed.
 - Second-follow-up focused verification: lock unit tests 10 passed, atomic unit
   tests 5 passed, atomic publication 5 passed, state/lock 19 passed, review
   transaction 17 passed, and legacy approval 31 passed. Full formatting,
   workspace Clippy with warnings denied, and workspace tests all passed.
 - Third independent post-commit code/spec review: pending after the second
+  follow-up commit.
+- The third independent review was not approved. It found that prefix-based,
+  unbounded quarantine discovery could be forged or could permanently brick a
+  record after a cleanup crash; quarantine records were not visible to Asset
+  lock inspection, and publication cleanup had no safe stale recovery.
+- Authoritative quarantine names now require an exact 32-character lowercase
+  hexadecimal token. Asset cleanup names authenticate that token against the
+  secure suffix in the bounded, parseable owner record. Publication records are
+  structured JSON containing PID, hostname, start time, and a secure owner token;
+  the exact filename token must match that owner token.
+- Both Asset and publication directory scans have a 64-entry and 100-ms hard
+  work bound. Near-prefix noise is ignored; work-limit overflow fails closed
+  with stable `lock_scan_limit` or `registry_scan_limit` errors.
+- Asset inspection reports exact quarantine entries as active, stale, or
+  unreadable. Active entries block even an explicit clear. A stale or malformed
+  Asset quarantine is recoverable only through explicit `--clear-stale-lock`:
+  it is first renamed to a non-authoritative private reap name, directory-synced,
+  then identity/owner revalidated before deletion. A replacement injected after
+  the private rename is preserved.
+- Valid active publication quarantines block and are retried within the existing
+  bounded acquisition wait. Valid stale publication quarantines are recovered on
+  the next acquisition. Malformed or token-mismatched entries are moved through
+  the same identity-bound private reap path, removed, and return a stable error
+  instructing the caller to retry; they cannot become invisible permanent locks.
+- Windows parent-directory crash durability is explicitly not claimed: files are
+  flushed before atomic rename, but the safe Windows layer has no supported
+  POSIX-equivalent parent-directory fsync. Unix continues to sync every durable
+  quarantine, restore, and removal transition.
+- Third-follow-up focused verification covered 17 Asset-lock unit tests, 11
+  publication unit tests, the safe Windows API policy surface, concurrent
+  capture, and all prior Task 11 integration suites. Full verification results
+  were green: repository formatting, workspace Clippy with warnings denied, and
+  the complete workspace test suite all passed.
+- Fourth independent post-commit code/spec review: pending after the third
   follow-up commit.
 
 ## Commit

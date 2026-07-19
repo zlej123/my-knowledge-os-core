@@ -35,6 +35,34 @@ fn windows_acl_ffi_is_isolated_behind_a_safe_private_crate() {
         !helper_lib.contains("pub unsafe fn"),
         "the helper must not expose unsafe functions"
     );
+    assert!(
+        helper_lib.contains("pub struct FileIdentity")
+            && helper_lib.contains("pub fn file_identity(file: &fs::File)"),
+        "stable Windows file identity must be exposed through the safe helper"
+    );
+    assert!(
+        helper_lib.contains("GetFileInformationByHandle")
+            && helper_lib.contains("BY_HANDLE_FILE_INFORMATION"),
+        "the safe helper must use stable by-handle Windows APIs"
+    );
+
+    for source in ["src/atomic.rs", "src/lock.rs"] {
+        let source = fs::read_to_string(core_root.join(source)).unwrap();
+        assert!(
+            !source.contains("std::os::windows::fs::MetadataExt")
+                && !source.contains("volume_serial_number()")
+                && !source.contains("file_index()"),
+            "mko-core must not use unstable Windows MetadataExt APIs"
+        );
+        assert!(
+            source.contains("mko_windows_acl::file_identity"),
+            "mko-core must route Windows identity through the safe helper"
+        );
+        assert!(
+            source.contains("Windows has no supported POSIX-equivalent parent-directory fsync"),
+            "the Windows parent-directory crash-durability limitation must remain explicit"
+        );
+    }
 }
 
 fn assert_source_tree_has_no_unsafe_code(directory: &Path) {

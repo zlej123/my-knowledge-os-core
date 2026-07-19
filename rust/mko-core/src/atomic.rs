@@ -8,11 +8,17 @@ use std::{
 
 use atomic_write_file::AtomicWriteFile;
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use serde::{Deserialize, Serialize};
+use sysinfo::{Pid, System};
 
 use crate::error::MkoError;
 
 const LOCK_WAIT: Duration = Duration::from_secs(1);
 const LOCK_RETRY: Duration = Duration::from_millis(10);
+const PUBLICATION_STALE_TTL: ChronoDuration = ChronoDuration::minutes(15);
+const PUBLICATION_SCAN_ENTRY_LIMIT: usize = 64;
+const PUBLICATION_SCAN_TIME_LIMIT: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AtomicWriteResult {
@@ -273,7 +279,7 @@ fn capability_filename(path: &Path) -> Result<&str, MkoError> {
 struct CapabilityPublicationLock<'a> {
     directory: &'a Dir,
     filename: String,
-    owner_token: String,
+    expected_contents: String,
     identity: StableCapabilityIdentity,
 }
 
@@ -282,8 +288,12 @@ impl<'a> CapabilityPublicationLock<'a> {
         let lock_filename = format!(".{filename}.publish.lock");
         let deadline = Instant::now() + LOCK_WAIT;
         loop {
-            if authoritative_quarantine_exists(directory, &lock_filename)? {
-                return Err(publication_locked_error());
+            if let Err(error) = resolve_publication_quarantines(directory, &lock_filename) {
+                if error.code() == "registry_locked" && Instant::now() < deadline {
+                    thread::sleep(LOCK_RETRY);
+                    continue;
+                }
+                return Err(error);
             }
             match directory.open_with(
                 &lock_filename,
@@ -291,24 +301,33 @@ impl<'a> CapabilityPublicationLock<'a> {
             ) {
                 Ok(mut file) => {
                     let owner_token = secure_cleanup_token()?;
-                    writeln!(file, "owner={owner_token}").map_err(lock_error)?;
+                    let record = PublicationLockRecord::new(owner_token.clone())?;
+                    let expected_contents = serde_json::to_string(&record)
+                        .map_err(|error| lock_error(std::io::Error::other(error.to_string())))?;
+                    file.write_all(expected_contents.as_bytes())
+                        .map_err(lock_error)?;
                     file.sync_all().map_err(lock_error)?;
                     sync_capability_directory(directory)?;
                     let identity = stable_capability_identity(&file)?;
-                    if authoritative_quarantine_exists(directory, &lock_filename)? {
+                    if let Err(error) = ensure_no_publication_quarantine(directory, &lock_filename)
+                    {
                         drop(file);
                         cleanup_capability_entry(
                             directory,
                             &lock_filename,
                             identity,
-                            Some(&format!("owner={owner_token}\n")),
+                            Some(&expected_contents),
                         );
-                        return Err(publication_locked_error());
+                        if error.code() == "registry_locked" && Instant::now() < deadline {
+                            thread::sleep(LOCK_RETRY);
+                            continue;
+                        }
+                        return Err(error);
                     }
                     return Ok(Self {
                         directory,
                         filename: lock_filename,
-                        owner_token,
+                        expected_contents,
                         identity,
                     });
                 }
@@ -330,7 +349,7 @@ impl Drop for CapabilityPublicationLock<'_> {
             self.directory,
             &self.filename,
             self.identity,
-            Some(&format!("owner={}\n", self.owner_token)),
+            Some(&self.expected_contents),
         );
     }
 }
@@ -369,7 +388,11 @@ fn cleanup_capability_entry_with_observer<A, O>(
     A: FnOnce(),
     O: FnMut(CleanupDurabilityEvent),
 {
-    let Ok(token) = secure_cleanup_token() else {
+    let Ok(token) = expected_contents
+        .and_then(|contents| serde_json::from_str::<PublicationLockRecord>(contents).ok())
+        .map(|record| record.owner_token)
+        .map_or_else(secure_cleanup_token, Ok)
+    else {
         return;
     };
     let quarantine = format!(".{filename}.cleanup-{token}");
@@ -419,19 +442,178 @@ fn cleanup_capability_entry_with_observer<A, O>(
     }
 }
 
-fn authoritative_quarantine_exists(directory: &Dir, filename: &str) -> Result<bool, MkoError> {
-    let prefix = format!(".{filename}.cleanup-");
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PublicationLockRecord {
+    pid: u32,
+    hostname: String,
+    started_at: DateTime<Utc>,
+    owner_token: String,
+}
+
+impl PublicationLockRecord {
+    fn new(owner_token: String) -> Result<Self, MkoError> {
+        Ok(Self {
+            pid: std::process::id(),
+            hostname: hostname::get()
+                .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?
+                .to_string_lossy()
+                .into_owned(),
+            started_at: Utc::now(),
+            owner_token,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct PublicationQuarantine {
+    filename: String,
+    record: Option<PublicationLockRecord>,
+    authenticated: bool,
+    identity: StableCapabilityIdentity,
+}
+
+fn publication_quarantine_target(name: &str) -> Option<(&str, &str)> {
+    let (target, token) = name.strip_prefix('.')?.rsplit_once(".cleanup-")?;
+    (token.len() == 32
+        && token
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')))
+    .then_some((target, token))
+}
+
+fn scan_publication_quarantines(
+    directory: &Dir,
+    filename: &str,
+) -> Result<Vec<PublicationQuarantine>, MkoError> {
     let entries = directory
         .read_dir(".")
         .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
-    for entry in entries {
+    let deadline = Instant::now() + PUBLICATION_SCAN_TIME_LIMIT;
+    let mut quarantines = Vec::new();
+    for (index, entry) in entries.enumerate() {
+        if index >= PUBLICATION_SCAN_ENTRY_LIMIT || Instant::now() >= deadline {
+            return Err(registry_scan_limit_error());
+        }
         let entry =
             entry.map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
-        if entry.file_name().to_string_lossy().starts_with(&prefix) {
-            return Ok(true);
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some((target, name_token)) = publication_quarantine_target(&name) else {
+            continue;
+        };
+        if target != filename {
+            continue;
+        }
+        let mut file = match directory.open(&name) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(lock_error(error)),
+        };
+        let identity = stable_capability_identity(&file)?;
+        let mut input = Vec::new();
+        let record = Read::by_ref(&mut file)
+            .take(4096)
+            .read_to_end(&mut input)
+            .ok()
+            .and_then(|_| serde_json::from_slice::<PublicationLockRecord>(&input).ok());
+        let authenticated = record
+            .as_ref()
+            .is_some_and(|record| record.owner_token == name_token);
+        quarantines.push(PublicationQuarantine {
+            filename: name,
+            record,
+            authenticated,
+            identity,
+        });
+    }
+    Ok(quarantines)
+}
+
+fn ensure_no_publication_quarantine(directory: &Dir, filename: &str) -> Result<(), MkoError> {
+    if scan_publication_quarantines(directory, filename)?.is_empty() {
+        Ok(())
+    } else {
+        Err(publication_locked_error())
+    }
+}
+
+fn resolve_publication_quarantines(directory: &Dir, filename: &str) -> Result<(), MkoError> {
+    let quarantines = scan_publication_quarantines(directory, filename)?;
+    for quarantine in quarantines {
+        let valid = quarantine.authenticated && quarantine.record.is_some();
+        if valid && !publication_record_is_stale(quarantine.record.as_ref().unwrap())? {
+            return Err(publication_locked_error());
+        }
+        reap_publication_quarantine(directory, &quarantine)?;
+        if !valid {
+            return Err(registry_quarantine_invalid_error());
         }
     }
-    Ok(false)
+    Ok(())
+}
+
+fn reap_publication_quarantine(
+    directory: &Dir,
+    quarantine: &PublicationQuarantine,
+) -> Result<(), MkoError> {
+    let private = format!("{}.reap-{}", quarantine.filename, secure_cleanup_token()?);
+    directory
+        .rename(&quarantine.filename, directory, &private)
+        .map_err(lock_error)?;
+    sync_capability_directory(directory)?;
+    let mut file = directory.open(&private).map_err(lock_error)?;
+    if stable_capability_identity(&file)? != quarantine.identity {
+        return Err(MkoError::new(
+            "registry_quarantine_invalid",
+            "publication quarantine changed during recovery",
+        ));
+    }
+    if let Some(expected) = &quarantine.record {
+        let mut input = Vec::new();
+        Read::by_ref(&mut file)
+            .take(4096)
+            .read_to_end(&mut input)
+            .map_err(lock_error)?;
+        let current = serde_json::from_slice::<PublicationLockRecord>(&input)
+            .map_err(|_| registry_quarantine_invalid_error())?;
+        if &current != expected {
+            return Err(MkoError::new(
+                "registry_quarantine_invalid",
+                "publication quarantine owner changed during recovery",
+            ));
+        }
+    }
+    directory.remove_file(&private).map_err(lock_error)?;
+    sync_capability_directory(directory)
+}
+
+fn publication_record_is_stale(record: &PublicationLockRecord) -> Result<bool, MkoError> {
+    let hostname = hostname::get()
+        .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?
+        .to_string_lossy()
+        .into_owned();
+    if record.hostname != hostname {
+        return Ok(false);
+    }
+    let age = Utc::now().signed_duration_since(record.started_at);
+    Ok(age > PUBLICATION_STALE_TTL
+        && System::new_all()
+            .process(Pid::from_u32(record.pid))
+            .is_none())
+}
+
+fn registry_scan_limit_error() -> MkoError {
+    MkoError::new(
+        "registry_scan_limit",
+        "publication lock scan exceeded its bounded work limit; reduce unexpected entries and retry",
+    )
+}
+
+fn registry_quarantine_invalid_error() -> MkoError {
+    MkoError::new(
+        "registry_quarantine_invalid",
+        "invalid publication quarantine was safely removed; retry the operation",
+    )
 }
 
 fn publication_locked_error() -> MkoError {
@@ -460,11 +642,7 @@ struct StableCapabilityIdentity {
 }
 
 #[cfg(windows)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct StableCapabilityIdentity {
-    volume_serial_number: u64,
-    file_index: u64,
-}
+type StableCapabilityIdentity = mko_windows_acl::FileIdentity;
 
 #[cfg(not(any(unix, windows)))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -489,22 +667,12 @@ fn stable_capability_identity(
 fn stable_capability_identity(
     file: &cap_std::fs::File,
 ) -> Result<StableCapabilityIdentity, MkoError> {
-    use std::os::windows::fs::MetadataExt;
-    let metadata = file
+    let file = file
         .try_clone()
-        .and_then(|file| file.into_std().metadata())
+        .map(cap_std::fs::File::into_std)
         .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
-    Ok(StableCapabilityIdentity {
-        volume_serial_number: u64::from(metadata.volume_serial_number().ok_or_else(|| {
-            MkoError::new(
-                "registry_write_failed",
-                "file has no stable volume identity",
-            )
-        })?),
-        file_index: metadata.file_index().ok_or_else(|| {
-            MkoError::new("registry_write_failed", "file has no stable file identity")
-        })?,
-    })
+    mko_windows_acl::file_identity(&file)
+        .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -523,7 +691,14 @@ fn sync_capability_directory(directory: &Dir) -> Result<(), MkoError> {
         .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn sync_capability_directory(_directory: &Dir) -> Result<(), MkoError> {
+    // Windows has no supported POSIX-equivalent parent-directory fsync in this safe API layer.
+    // File content is flushed before atomic rename, but parent-entry crash durability is not claimed.
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn sync_capability_directory(_directory: &Dir) -> Result<(), MkoError> {
     Ok(())
 }
@@ -531,7 +706,7 @@ fn sync_capability_directory(_directory: &Dir) -> Result<(), MkoError> {
 struct PublicationLock {
     directory: Dir,
     filename: String,
-    owner_token: String,
+    expected_contents: String,
     identity: StableCapabilityIdentity,
 }
 
@@ -540,35 +715,48 @@ impl PublicationLock {
         let directory =
             Dir::open_ambient_dir(parent, cap_std::ambient_authority()).map_err(lock_error)?;
         let lock_filename = format!(".{filename}.publish.lock");
-        let owner_token = secure_cleanup_token()?;
         let deadline = Instant::now() + LOCK_WAIT;
         loop {
-            if authoritative_quarantine_exists(&directory, &lock_filename)? {
-                return Err(publication_locked_error());
+            if let Err(error) = resolve_publication_quarantines(&directory, &lock_filename) {
+                if error.code() == "registry_locked" && Instant::now() < deadline {
+                    thread::sleep(LOCK_RETRY);
+                    continue;
+                }
+                return Err(error);
             }
             match directory.open_with(
                 &lock_filename,
                 CapOpenOptions::new().write(true).create_new(true),
             ) {
                 Ok(mut file) => {
-                    writeln!(file, "owner={owner_token}").map_err(lock_error)?;
+                    let owner_token = secure_cleanup_token()?;
+                    let record = PublicationLockRecord::new(owner_token.clone())?;
+                    let expected_contents = serde_json::to_string(&record)
+                        .map_err(|error| lock_error(std::io::Error::other(error.to_string())))?;
+                    file.write_all(expected_contents.as_bytes())
+                        .map_err(lock_error)?;
                     file.sync_all().map_err(lock_error)?;
                     sync_capability_directory(&directory)?;
                     let identity = stable_capability_identity(&file)?;
-                    if authoritative_quarantine_exists(&directory, &lock_filename)? {
+                    if let Err(error) = ensure_no_publication_quarantine(&directory, &lock_filename)
+                    {
                         drop(file);
                         cleanup_capability_entry(
                             &directory,
                             &lock_filename,
                             identity,
-                            Some(&format!("owner={owner_token}\n")),
+                            Some(&expected_contents),
                         );
-                        return Err(publication_locked_error());
+                        if error.code() == "registry_locked" && Instant::now() < deadline {
+                            thread::sleep(LOCK_RETRY);
+                            continue;
+                        }
+                        return Err(error);
                     }
                     return Ok(Self {
                         directory,
                         filename: lock_filename,
-                        owner_token,
+                        expected_contents,
                         identity,
                     });
                 }
@@ -590,7 +778,7 @@ impl Drop for PublicationLock {
             &self.directory,
             &self.filename,
             self.identity,
-            Some(&format!("owner={}\n", self.owner_token)),
+            Some(&self.expected_contents),
         );
     }
 }
@@ -606,7 +794,14 @@ fn sync_directory(path: &Path) -> Result<(), MkoError> {
         .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn sync_directory(_path: &Path) -> Result<(), MkoError> {
+    // Windows has no supported POSIX-equivalent parent-directory fsync in this safe API layer.
+    // File content is flushed before atomic rename, but parent-entry crash durability is not claimed.
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn sync_directory(_path: &Path) -> Result<(), MkoError> {
     Ok(())
 }
@@ -617,13 +812,15 @@ mod tests {
         fs,
         io::Write,
         sync::atomic::{AtomicU64, Ordering},
+        time::{Duration, Instant},
     };
 
     use cap_std::{ambient_authority, fs::Dir};
 
     use super::{
         AtomicWriteResult, CapabilityPublicationLock, CleanupDurabilityEvent,
-        cleanup_capability_entry_with_observer, stable_capability_identity, write_new,
+        PublicationLockRecord, cleanup_capability_entry_with_observer, stable_capability_identity,
+        write_new,
     };
 
     static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
@@ -686,20 +883,24 @@ mod tests {
         let directory_path = test_directory();
         let directory = Dir::open_ambient_dir(&directory_path, ambient_authority()).unwrap();
         let filename = ".record.md.publish.lock";
+        let original_record = PublicationLockRecord::new("a".repeat(32)).unwrap();
+        let original_contents = serde_json::to_string(&original_record).unwrap();
         let mut original = directory.create(filename).unwrap();
-        original.write_all(b"owner=original\n").unwrap();
+        original.write_all(original_contents.as_bytes()).unwrap();
         original.sync_all().unwrap();
         let original_identity = stable_capability_identity(&original).unwrap();
         drop(original);
         directory.remove_file(filename).unwrap();
-        directory.write(filename, b"owner=original\n").unwrap();
+        directory
+            .write(filename, original_contents.as_bytes())
+            .unwrap();
 
         let mut durability = Vec::new();
         cleanup_capability_entry_with_observer(
             &directory,
             filename,
             original_identity,
-            Some("owner=original\n"),
+            Some(&original_contents),
             || {
                 let error = match CapabilityPublicationLock::acquire(&directory, "record.md") {
                     Ok(_) => panic!("quarantine must be authoritative"),
@@ -728,8 +929,10 @@ mod tests {
         let directory_path = test_directory();
         let directory = Dir::open_ambient_dir(&directory_path, ambient_authority()).unwrap();
         let filename = ".record.md.publish.lock";
+        let original_record = PublicationLockRecord::new("b".repeat(32)).unwrap();
+        let original_contents = serde_json::to_string(&original_record).unwrap();
         let mut original = directory.create(filename).unwrap();
-        original.write_all(b"owner=original\n").unwrap();
+        original.write_all(original_contents.as_bytes()).unwrap();
         original.sync_all().unwrap();
         let original_identity = stable_capability_identity(&original).unwrap();
         drop(original);
@@ -741,7 +944,7 @@ mod tests {
             &directory,
             filename,
             original_identity,
-            Some("owner=original\n"),
+            Some(&original_contents),
             || {},
             |event| durability.push(event),
         );
@@ -758,6 +961,128 @@ mod tests {
                 CleanupDurabilityEvent::Removed,
             ]
         );
+        let _ = fs::remove_dir_all(directory_path);
+    }
+
+    #[test]
+    fn publication_cleanup_like_name_with_invalid_token_is_ignored() {
+        let directory_path = test_directory();
+        let directory = Dir::open_ambient_dir(&directory_path, ambient_authority()).unwrap();
+        directory
+            .write("..record.md.publish.lock.cleanup-not-a-token", b"forged")
+            .unwrap();
+
+        let lock = CapabilityPublicationLock::acquire(&directory, "record.md").unwrap();
+
+        drop(lock);
+        let _ = fs::remove_dir_all(directory_path);
+    }
+
+    #[test]
+    fn stale_publication_quarantine_is_recovered_on_next_acquire() {
+        let directory_path = test_directory();
+        let directory = Dir::open_ambient_dir(&directory_path, ambient_authority()).unwrap();
+        let quarantine = format!("..record.md.publish.lock.cleanup-{}", "d".repeat(32));
+        let stale = serde_json::json!({
+            "pid": u32::MAX,
+            "hostname": hostname::get().unwrap().to_string_lossy(),
+            "started_at": "2000-01-01T00:00:00Z",
+            "owner_token": "d".repeat(32),
+        });
+        directory
+            .write(&quarantine, serde_json::to_vec(&stale).unwrap())
+            .unwrap();
+
+        let lock = CapabilityPublicationLock::acquire(&directory, "record.md").unwrap();
+
+        assert!(directory.metadata(&quarantine).is_err());
+        drop(lock);
+        let _ = fs::remove_dir_all(directory_path);
+    }
+
+    #[test]
+    fn active_publication_quarantine_blocks_the_next_acquirer() {
+        let directory_path = test_directory();
+        let directory = Dir::open_ambient_dir(&directory_path, ambient_authority()).unwrap();
+        let secret = "e".repeat(32);
+        let quarantine = format!("..record.md.publish.lock.cleanup-{secret}");
+        let active = PublicationLockRecord::new(secret).unwrap();
+        directory
+            .write(&quarantine, serde_json::to_vec(&active).unwrap())
+            .unwrap();
+
+        let error = match CapabilityPublicationLock::acquire(&directory, "record.md") {
+            Ok(_) => panic!("active publication quarantine must block"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "registry_locked");
+        assert!(directory.metadata(&quarantine).is_ok());
+        let _ = fs::remove_dir_all(directory_path);
+    }
+
+    #[test]
+    fn malformed_publication_quarantine_fails_with_a_stable_error() {
+        let directory_path = test_directory();
+        let directory = Dir::open_ambient_dir(&directory_path, ambient_authority()).unwrap();
+        directory
+            .write(
+                format!("..record.md.publish.lock.cleanup-{}", "f".repeat(32)),
+                b"",
+            )
+            .unwrap();
+
+        let error = match CapabilityPublicationLock::acquire(&directory, "record.md") {
+            Ok(_) => panic!("malformed quarantine must fail closed"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "registry_quarantine_invalid");
+        let recovered = CapabilityPublicationLock::acquire(&directory, "record.md").unwrap();
+        drop(recovered);
+        let _ = fs::remove_dir_all(directory_path);
+    }
+
+    #[test]
+    fn publication_quarantine_scan_has_a_hard_entry_bound() {
+        let directory_path = test_directory();
+        let directory = Dir::open_ambient_dir(&directory_path, ambient_authority()).unwrap();
+        for index in 0..80 {
+            directory
+                .write(format!("noise-{index:03}"), b"noise")
+                .unwrap();
+        }
+
+        let started = Instant::now();
+        let error = match CapabilityPublicationLock::acquire(&directory, "record.md") {
+            Ok(_) => panic!("scan over the hard bound must fail closed"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "registry_scan_limit");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let _ = fs::remove_dir_all(directory_path);
+    }
+
+    #[test]
+    fn matching_publication_quarantines_have_the_same_hard_scan_bound() {
+        let directory_path = test_directory();
+        let directory = Dir::open_ambient_dir(&directory_path, ambient_authority()).unwrap();
+        for index in 0..80 {
+            directory
+                .write(
+                    format!("..record.md.publish.lock.cleanup-{index:032x}"),
+                    b"",
+                )
+                .unwrap();
+        }
+
+        let error = match CapabilityPublicationLock::acquire(&directory, "record.md") {
+            Ok(_) => panic!("matching quarantine scan must remain bounded"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "registry_scan_limit");
         let _ = fs::remove_dir_all(directory_path);
     }
 

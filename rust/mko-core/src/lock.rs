@@ -3,6 +3,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
+    time::{Duration as StdDuration, Instant},
 };
 
 use cap_std::{ambient_authority, fs::Dir};
@@ -16,6 +17,8 @@ use crate::{
 };
 
 const STALE_LOCK_TTL: Duration = Duration::minutes(15);
+const LOCK_SCAN_ENTRY_LIMIT: usize = 64;
+const LOCK_SCAN_TIME_LIMIT: StdDuration = StdDuration::from_millis(100);
 static NEXT_OWNER_TOKEN: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -53,13 +56,19 @@ pub fn inspect_locks(
         Err(error) => return Err(MkoError::new("lock_read_failed", error.to_string())),
     };
     let mut inspections = Vec::new();
-    for entry in entries {
+    let deadline = Instant::now() + LOCK_SCAN_TIME_LIMIT;
+    for (index, entry) in entries.enumerate() {
+        if index >= LOCK_SCAN_ENTRY_LIMIT || Instant::now() >= deadline {
+            return Err(lock_scan_limit_error());
+        }
         let entry = entry.map_err(|error| MkoError::new("lock_read_failed", error.to_string()))?;
         let path = entry.path();
         let Some(name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
             continue;
         };
-        if !name.ends_with(".lock") && !name.ends_with(".lock.takeover") {
+        let is_canonical = name.ends_with(".lock") || name.ends_with(".lock.takeover");
+        let is_quarantine = authoritative_quarantine_target(name).is_some();
+        if !is_canonical && !is_quarantine {
             continue;
         }
         let state = match fs::read(&path)
@@ -131,11 +140,20 @@ impl AssetLock {
         let directory = secure_lock_directory(&repository_root)?;
         after_directory_open()?;
         let filename = format!("{asset_id}.lock");
-        if authoritative_quarantine_exists(&directory, &filename)?
-            || authoritative_quarantine_exists(&directory, &format!("{filename}.takeover"))?
-        {
-            return Err(lock_held_error());
-        }
+        resolve_authoritative_quarantines(
+            &directory,
+            &filename,
+            asset_id,
+            clock,
+            clear_stale_lock,
+        )?;
+        resolve_authoritative_quarantines(
+            &directory,
+            &format!("{filename}.takeover"),
+            asset_id,
+            clock,
+            clear_stale_lock,
+        )?;
         clear_stale_takeover_if_requested(
             &directory,
             &filename,
@@ -315,9 +333,7 @@ impl<'a> TakeoverGuard<'a> {
             asset_id: asset_id.into(),
             owner_token: owner_token.clone(),
         };
-        if authoritative_quarantine_exists(directory, &filename)? {
-            return Err(lock_held_error());
-        }
+        ensure_no_authoritative_quarantine(directory, &filename, asset_id, clock)?;
         let mut file = match directory.open_with(
             &filename,
             cap_std::fs::OpenOptions::new().write(true).create_new(true),
@@ -343,10 +359,12 @@ impl<'a> TakeoverGuard<'a> {
             return Err(MkoError::new("lock_write_failed", error.to_string()));
         }
         sync_lock_directory(directory)?;
-        if authoritative_quarantine_exists(directory, &filename)? {
+        if let Err(error) =
+            ensure_no_authoritative_quarantine(directory, &filename, asset_id, clock)
+        {
             drop(file);
             remove_if_owned(directory, &filename, &owner_token, identity);
-            return Err(lock_held_error());
+            return Err(error);
         }
         Ok(Self {
             directory,
@@ -404,9 +422,7 @@ where
 {
     let hostname = current_hostname()?;
     let owner_token = next_owner_token()?;
-    if authoritative_quarantine_exists(directory, filename)? {
-        return Err(lock_held_error());
-    }
+    ensure_no_authoritative_quarantine(directory, filename, asset_id, clock)?;
     let mut file = match directory.open_with(
         filename,
         cap_std::fs::OpenOptions::new().write(true).create_new(true),
@@ -434,10 +450,10 @@ where
         return Err(MkoError::new("lock_write_failed", error.to_string()));
     }
     sync_lock_directory(directory)?;
-    if authoritative_quarantine_exists(directory, filename)? {
+    if let Err(error) = ensure_no_authoritative_quarantine(directory, filename, asset_id, clock) {
         drop(file);
         remove_if_owned(directory, filename, &owner_token, identity);
-        return Err(lock_held_error());
+        return Err(error);
     }
     Ok(AssetLock {
         directory: directory
@@ -522,7 +538,11 @@ fn cleanup_lock_entry_with_observer<A, O>(
     A: FnOnce(),
     O: FnMut(CleanupDurabilityEvent),
 {
-    let Ok(cleanup_token) = secure_token() else {
+    let Ok(cleanup_token) = expected_owner
+        .and_then(owner_token_secret)
+        .map(str::to_owned)
+        .map_or_else(secure_token, Ok)
+    else {
         return;
     };
     let quarantine = format!(".{filename}.cleanup-{cleanup_token}");
@@ -573,18 +593,207 @@ fn cleanup_lock_entry_with_observer<A, O>(
     }
 }
 
-fn authoritative_quarantine_exists(directory: &Dir, filename: &str) -> Result<bool, MkoError> {
-    let prefix = format!(".{filename}.cleanup-");
+fn authoritative_quarantine_target(name: &str) -> Option<(&str, &str)> {
+    let (target, token) = name.strip_prefix('.')?.rsplit_once(".cleanup-")?;
+    (token.len() == 32
+        && token
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')))
+    .then_some((target, token))
+}
+
+#[derive(Debug)]
+struct AssetQuarantine {
+    filename: String,
+    record: Option<LockRecord>,
+    authenticated: bool,
+    identity: StableFileIdentity,
+}
+
+fn scan_authoritative_quarantines(
+    directory: &Dir,
+    filename: &str,
+) -> Result<Vec<AssetQuarantine>, MkoError> {
     let entries = directory
         .read_dir(".")
         .map_err(|error| MkoError::new("lock_read_failed", error.to_string()))?;
-    for entry in entries {
+    let deadline = Instant::now() + LOCK_SCAN_TIME_LIMIT;
+    let mut quarantines = Vec::new();
+    for (index, entry) in entries.enumerate() {
+        if index >= LOCK_SCAN_ENTRY_LIMIT || Instant::now() >= deadline {
+            return Err(lock_scan_limit_error());
+        }
         let entry = entry.map_err(|error| MkoError::new("lock_read_failed", error.to_string()))?;
-        if entry.file_name().to_string_lossy().starts_with(&prefix) {
-            return Ok(true);
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some((target, name_token)) = authoritative_quarantine_target(&name) else {
+            continue;
+        };
+        if target != filename {
+            continue;
+        }
+        let mut file = match directory.open(&name) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(MkoError::new("lock_read_failed", error.to_string())),
+        };
+        let identity = stable_file_identity(&file)?;
+        let mut input = Vec::new();
+        let record = Read::by_ref(&mut file)
+            .take(64 * 1024)
+            .read_to_end(&mut input)
+            .ok()
+            .and_then(|_| serde_json::from_slice::<LockRecord>(&input).ok());
+        let authenticated = record
+            .as_ref()
+            .is_some_and(|record| owner_token_secret(&record.owner_token) == Some(name_token));
+        quarantines.push(AssetQuarantine {
+            filename: name,
+            record,
+            authenticated,
+            identity,
+        });
+    }
+    Ok(quarantines)
+}
+
+fn ensure_no_authoritative_quarantine(
+    directory: &Dir,
+    filename: &str,
+    asset_id: &str,
+    clock: &dyn Clock,
+) -> Result<(), MkoError> {
+    let quarantines = scan_authoritative_quarantines(directory, filename)?;
+    if quarantines.is_empty() {
+        return Ok(());
+    }
+    for quarantine in quarantines {
+        let Some(record) = quarantine.record else {
+            return Err(lock_quarantine_invalid_error());
+        };
+        if record.asset_id != asset_id
+            || !owner_token_is_valid(&record.owner_token)
+            || !quarantine.authenticated
+        {
+            return Err(lock_quarantine_invalid_error());
+        }
+        let _ = record_is_stale(&record, clock)?;
+    }
+    Err(lock_held_error())
+}
+
+fn resolve_authoritative_quarantines(
+    directory: &Dir,
+    filename: &str,
+    asset_id: &str,
+    clock: &dyn Clock,
+    clear_stale: bool,
+) -> Result<(), MkoError> {
+    let quarantines = scan_authoritative_quarantines(directory, filename)?;
+    for quarantine in &quarantines {
+        match &quarantine.record {
+            Some(record)
+                if record.asset_id == asset_id
+                    && owner_token_is_valid(&record.owner_token)
+                    && quarantine.authenticated =>
+            {
+                if !record_is_stale(record, clock)? || !clear_stale {
+                    return Err(lock_held_error());
+                }
+            }
+            _ if !clear_stale => return Err(lock_quarantine_invalid_error()),
+            _ => {}
         }
     }
-    Ok(false)
+    for quarantine in quarantines {
+        reap_authoritative_quarantine(directory, &quarantine)?;
+    }
+    Ok(())
+}
+
+fn reap_authoritative_quarantine(
+    directory: &Dir,
+    quarantine: &AssetQuarantine,
+) -> Result<(), MkoError> {
+    reap_authoritative_quarantine_with_observer(directory, quarantine, |_| {})
+}
+
+fn reap_authoritative_quarantine_with_observer<O>(
+    directory: &Dir,
+    quarantine: &AssetQuarantine,
+    after_private_rename: O,
+) -> Result<(), MkoError>
+where
+    O: FnOnce(&str),
+{
+    let private = format!("{}.reap-{}", quarantine.filename, secure_token()?);
+    directory
+        .rename(&quarantine.filename, directory, &private)
+        .map_err(|error| MkoError::new("lock_clear_failed", error.to_string()))?;
+    sync_lock_directory(directory)?;
+    after_private_rename(&private);
+    let mut file = directory
+        .open(&private)
+        .map_err(|error| MkoError::new("lock_clear_failed", error.to_string()))?;
+    if stable_file_identity(&file)? != quarantine.identity {
+        return Err(MkoError::new(
+            "lock_clear_failed",
+            "quarantined lock changed during recovery",
+        ));
+    }
+    if let Some(expected) = &quarantine.record {
+        let mut input = Vec::new();
+        Read::by_ref(&mut file)
+            .take(64 * 1024)
+            .read_to_end(&mut input)
+            .map_err(|error| MkoError::new("lock_clear_failed", error.to_string()))?;
+        let current = serde_json::from_slice::<LockRecord>(&input)
+            .map_err(|error| MkoError::new("lock_clear_failed", error.to_string()))?;
+        if &current != expected {
+            return Err(MkoError::new(
+                "lock_clear_failed",
+                "quarantined lock owner changed during recovery",
+            ));
+        }
+    }
+    directory
+        .remove_file(&private)
+        .map_err(|error| MkoError::new("lock_clear_failed", error.to_string()))?;
+    sync_lock_directory(directory)
+}
+
+fn owner_token_is_valid(token: &str) -> bool {
+    let Some(secret) = owner_token_secret(token) else {
+        return false;
+    };
+    let prefix = &token[..token.len() - secret.len() - 1];
+    prefix.split_once('-').is_some()
+        && secret.len() == 32
+        && secret
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn owner_token_secret(token: &str) -> Option<&str> {
+    let (_, secret) = token.rsplit_once('-')?;
+    (secret.len() == 32
+        && secret
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')))
+    .then_some(secret)
+}
+
+fn lock_scan_limit_error() -> MkoError {
+    MkoError::new(
+        "lock_scan_limit",
+        "lock directory scan exceeded its bounded work limit; reduce unexpected entries and retry",
+    )
+}
+
+fn lock_quarantine_invalid_error() -> MkoError {
+    MkoError::new(
+        "lock_quarantine_invalid",
+        "quarantined lock metadata is invalid; inspect it or retry with --clear-stale-lock",
+    )
 }
 
 fn remove_stale_entry(
@@ -606,12 +815,23 @@ fn remove_stale_entry_with_observer<O>(
 where
     O: FnOnce(),
 {
-    let quarantine = format!(".{filename}.cleanup-{}", secure_token()?);
+    let (captured_record, captured_identity) = read_lock_record(directory, filename)?;
+    let quarantine_token = owner_token_secret(&captured_record.owner_token)
+        .map(str::to_owned)
+        .unwrap_or(secure_token()?);
+    let quarantine = format!(".{filename}.cleanup-{quarantine_token}");
     directory
         .rename(filename, directory, &quarantine)
         .map_err(|error| MkoError::new("lock_clear_failed", error.to_string()))?;
     sync_lock_directory(directory)?;
-    let stale = stale_lock(directory, &quarantine, asset_id, clock)?;
+    let (current_record, current_identity) = read_lock_record(directory, &quarantine)?;
+    if current_identity != captured_identity || current_record != captured_record {
+        return Err(MkoError::new(
+            "lock_clear_failed",
+            "lock changed during stale recovery",
+        ));
+    }
+    let stale = current_record.asset_id == asset_id && record_is_stale(&current_record, clock)?;
     after_validation();
     if stale {
         directory
@@ -642,7 +862,14 @@ fn sync_lock_directory(directory: &Dir) -> Result<(), MkoError> {
         .map_err(|error| MkoError::new("lock_write_failed", error.to_string()))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn sync_lock_directory(_: &Dir) -> Result<(), MkoError> {
+    // Windows has no supported POSIX-equivalent parent-directory fsync in this safe API layer.
+    // Lock file content is flushed, but parent-entry crash durability is not claimed.
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn sync_lock_directory(_: &Dir) -> Result<(), MkoError> {
     Ok(())
 }
@@ -694,19 +921,6 @@ fn lock_held_error() -> MkoError {
     )
 }
 
-fn stale_lock(
-    directory: &Dir,
-    filename: &str,
-    expected_asset_id: &str,
-    clock: &dyn Clock,
-) -> Result<bool, MkoError> {
-    let (record, _) = read_lock_record(directory, filename)?;
-    if record.asset_id != expected_asset_id {
-        return Ok(false);
-    }
-    record_is_stale(&record, clock)
-}
-
 fn read_lock_record(
     directory: &Dir,
     filename: &str,
@@ -737,11 +951,7 @@ struct StableFileIdentity {
 }
 
 #[cfg(windows)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct StableFileIdentity {
-    volume_serial_number: u64,
-    file_index: u64,
-}
+type StableFileIdentity = mko_windows_acl::FileIdentity;
 
 #[cfg(not(any(unix, windows)))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -762,22 +972,12 @@ fn stable_file_identity(file: &cap_std::fs::File) -> Result<StableFileIdentity, 
 
 #[cfg(windows)]
 fn stable_file_identity(file: &cap_std::fs::File) -> Result<StableFileIdentity, MkoError> {
-    use std::os::windows::fs::MetadataExt;
-    let metadata = file
+    let file = file
         .try_clone()
-        .and_then(|file| file.into_std().metadata())
+        .map(cap_std::fs::File::into_std)
         .map_err(|error| MkoError::new("lock_read_failed", error.to_string()))?;
-    Ok(StableFileIdentity {
-        volume_serial_number: u64::from(metadata.volume_serial_number().ok_or_else(|| {
-            MkoError::new(
-                "lock_write_failed",
-                "lock file has no stable volume identity",
-            )
-        })?),
-        file_index: metadata.file_index().ok_or_else(|| {
-            MkoError::new("lock_write_failed", "lock file has no stable file identity")
-        })?,
-    })
+    mko_windows_acl::file_identity(&file)
+        .map_err(|error| MkoError::new("lock_read_failed", error.to_string()))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -819,8 +1019,10 @@ mod tests {
     use chrono::{DateTime, Utc};
 
     use super::{
-        AssetLock, CleanupDurabilityEvent, LockRecord, TakeoverGuard, create_lock_with_writer,
-        read_lock_record, remove_if_owned_with_observer, remove_stale_entry_with_observer,
+        AssetLock, CleanupDurabilityEvent, LockRecord, LockState, TakeoverGuard,
+        create_lock_with_writer, inspect_locks, read_lock_record,
+        reap_authoritative_quarantine_with_observer, remove_if_owned_with_observer,
+        remove_stale_entry_with_observer, scan_authoritative_quarantines,
     };
     use crate::clock::Clock;
 
@@ -1076,7 +1278,7 @@ mod tests {
             started_at: time("2026-07-18T00:00:00Z").now_utc(),
             command: "original".into(),
             asset_id: asset_id.clone(),
-            owner_token: "original-owner".into(),
+            owner_token: format!("1-1-{}", "1".repeat(32)),
         };
         directory
             .write(&filename, serde_json::to_vec(&original).unwrap())
@@ -1231,6 +1433,229 @@ mod tests {
         .unwrap();
 
         assert_eq!(fs::read(replacement_path).unwrap(), b"replacement");
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[test]
+    fn cleanup_like_name_with_an_invalid_token_is_not_an_authoritative_lock() {
+        let repository = test_directory();
+        let asset_id = asset_id();
+        let locks = repository.join(".knowledge-os/runtime/locks");
+        fs::create_dir_all(&locks).unwrap();
+        fs::write(
+            locks.join(format!(".{asset_id}.lock.cleanup-not-a-token")),
+            b"forged",
+        )
+        .unwrap();
+
+        let lock = AssetLock::acquire(
+            &repository,
+            &asset_id,
+            "acquire",
+            &time("2026-07-18T00:00:00Z"),
+            false,
+        )
+        .unwrap();
+
+        drop(lock);
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[test]
+    fn malformed_authoritative_quarantine_is_visible_and_fails_with_a_stable_error() {
+        let repository = test_directory();
+        let asset_id = asset_id();
+        let locks = repository.join(".knowledge-os/runtime/locks");
+        fs::create_dir_all(&locks).unwrap();
+        let quarantine = locks.join(format!(".{asset_id}.lock.cleanup-{}", "a".repeat(32)));
+        fs::write(&quarantine, b"").unwrap();
+
+        let error = AssetLock::acquire(
+            &repository,
+            &asset_id,
+            "acquire",
+            &time("2026-07-18T00:16:00Z"),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "lock_quarantine_invalid");
+
+        let inspections = inspect_locks(&repository, &time("2026-07-18T00:16:00Z")).unwrap();
+        assert_eq!(inspections.len(), 1);
+        assert_eq!(inspections[0].path, quarantine);
+        assert_eq!(inspections[0].state, LockState::Unreadable);
+
+        let recovered = AssetLock::acquire(
+            &repository,
+            &asset_id,
+            "recover malformed quarantine",
+            &time("2026-07-18T00:16:00Z"),
+            true,
+        )
+        .unwrap();
+        assert!(!quarantine.exists());
+        drop(recovered);
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[test]
+    fn explicit_clear_recovers_a_stale_authoritative_quarantine() {
+        let repository = test_directory();
+        let asset_id = asset_id();
+        let locks = repository.join(".knowledge-os/runtime/locks");
+        fs::create_dir_all(&locks).unwrap();
+        let quarantine = locks.join(format!(".{asset_id}.lock.cleanup-{}", "b".repeat(32)));
+        let stale = LockRecord {
+            pid: u32::MAX,
+            hostname: hostname::get().unwrap().to_string_lossy().into_owned(),
+            started_at: time("2026-07-18T00:00:00Z").now_utc(),
+            command: "crashed cleanup".into(),
+            asset_id: asset_id.clone(),
+            owner_token: format!("1-1-{}", "b".repeat(32)),
+        };
+        fs::write(&quarantine, serde_json::to_vec(&stale).unwrap()).unwrap();
+
+        let inspections = inspect_locks(&repository, &time("2026-07-18T00:16:00Z")).unwrap();
+        assert_eq!(inspections.len(), 1);
+        assert_eq!(inspections[0].state, LockState::Stale);
+
+        let lock = AssetLock::acquire(
+            &repository,
+            &asset_id,
+            "recover",
+            &time("2026-07-18T00:16:00Z"),
+            true,
+        )
+        .unwrap();
+
+        assert!(!quarantine.exists());
+        drop(lock);
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[test]
+    fn active_authoritative_quarantine_blocks_even_an_explicit_stale_clear() {
+        let repository = test_directory();
+        let asset_id = asset_id();
+        let locks = repository.join(".knowledge-os/runtime/locks");
+        fs::create_dir_all(&locks).unwrap();
+        let secret = "c".repeat(32);
+        let quarantine = locks.join(format!(".{asset_id}.lock.cleanup-{secret}"));
+        let active = LockRecord {
+            pid: std::process::id(),
+            hostname: hostname::get().unwrap().to_string_lossy().into_owned(),
+            started_at: time("2026-07-18T00:16:00Z").now_utc(),
+            command: "active cleanup".into(),
+            asset_id: asset_id.clone(),
+            owner_token: format!("1-1-{secret}"),
+        };
+        fs::write(&quarantine, serde_json::to_vec(&active).unwrap()).unwrap();
+
+        let error = AssetLock::acquire(
+            &repository,
+            &asset_id,
+            "must block",
+            &time("2026-07-18T00:16:00Z"),
+            true,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "lock_held");
+        assert!(quarantine.exists());
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[test]
+    fn authoritative_quarantine_scan_has_a_hard_entry_bound() {
+        let repository = test_directory();
+        let asset_id = asset_id();
+        let locks = repository.join(".knowledge-os/runtime/locks");
+        fs::create_dir_all(&locks).unwrap();
+        for index in 0..80 {
+            fs::write(locks.join(format!("noise-{index:03}")), b"noise").unwrap();
+        }
+
+        let started = std::time::Instant::now();
+        let error = AssetLock::acquire(
+            &repository,
+            &asset_id,
+            "bounded",
+            &time("2026-07-18T00:00:00Z"),
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "lock_scan_limit");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[test]
+    fn matching_quarantine_scan_has_the_same_hard_entry_bound() {
+        let repository = test_directory();
+        let asset_id = asset_id();
+        let locks = repository.join(".knowledge-os/runtime/locks");
+        fs::create_dir_all(&locks).unwrap();
+        for index in 0..80 {
+            fs::write(
+                locks.join(format!(".{asset_id}.lock.cleanup-{index:032x}")),
+                b"",
+            )
+            .unwrap();
+        }
+
+        let error = AssetLock::acquire(
+            &repository,
+            &asset_id,
+            "bounded",
+            &time("2026-07-18T00:00:00Z"),
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "lock_scan_limit");
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[test]
+    fn quarantine_clear_never_deletes_a_replacement_after_private_rename() {
+        let repository = test_directory();
+        let asset_id = asset_id();
+        let directory = Dir::open_ambient_dir(&repository, ambient_authority()).unwrap();
+        let secret = "d".repeat(32);
+        let filename = format!("{asset_id}.lock");
+        let quarantine = format!(".{filename}.cleanup-{secret}");
+        let stale = LockRecord {
+            pid: u32::MAX,
+            hostname: hostname::get().unwrap().to_string_lossy().into_owned(),
+            started_at: time("2026-07-18T00:00:00Z").now_utc(),
+            command: "stale".into(),
+            asset_id,
+            owner_token: format!("1-1-{secret}"),
+        };
+        directory
+            .write(&quarantine, serde_json::to_vec(&stale).unwrap())
+            .unwrap();
+        let quarantine = scan_authoritative_quarantines(&directory, &filename)
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        let error =
+            reap_authoritative_quarantine_with_observer(&directory, &quarantine, |private| {
+                directory.remove_file(private).unwrap();
+                directory.write(private, b"replacement").unwrap();
+            })
+            .unwrap_err();
+
+        assert_eq!(error.code(), "lock_clear_failed");
+        assert!(directory.read_dir(".").unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".reap-")
+        }));
         let _ = fs::remove_dir_all(repository);
     }
 }
