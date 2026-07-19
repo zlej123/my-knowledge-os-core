@@ -210,7 +210,7 @@ fn configured_hook_path_with_overrides(
 fn hook_is_executable(metadata: &fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt;
 
-    metadata.permissions().mode() & 0o111 != 0
+    metadata.permissions().mode() & 0o100 != 0
 }
 
 #[cfg(not(unix))]

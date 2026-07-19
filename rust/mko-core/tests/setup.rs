@@ -368,6 +368,41 @@ fn managed_hook_with_non_executable_mode_is_repaired() {
 
 #[cfg(unix)]
 #[test]
+fn managed_hook_without_owner_execute_permission_is_repaired_on_rerun() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new(false);
+    let drive = fixture.mac_drive("alice@example.com");
+    let hook = fixture.repository.join(".githooks/pre-commit");
+    let first = apply_setup(
+        preflight_setup(fixture.request(&drive), &fixture.platform).unwrap(),
+        &SystemSetupWriter,
+    )
+    .unwrap();
+    assert!(first.is_complete());
+
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o601)).unwrap();
+    assert_eq!(
+        inspect_hook(&fixture.repository).unwrap().state,
+        HookState::Missing
+    );
+
+    let rerun = apply_setup(
+        preflight_setup(fixture.request(&drive), &fixture.platform).unwrap(),
+        &SystemSetupWriter,
+    )
+    .unwrap();
+
+    assert!(rerun.is_complete());
+    assert_ne!(fs::metadata(&hook).unwrap().permissions().mode() & 0o100, 0);
+    assert_eq!(
+        inspect_hook(&fixture.repository).unwrap().state,
+        HookState::Managed
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn symlinked_profile_path_causes_zero_setup_mutations() {
     let fixture = Fixture::new(false);
     let drive = fixture.mac_drive("alice@example.com");
