@@ -44,9 +44,11 @@ pub fn recovery_for_error_code(code: &str) -> Option<RecoveryKind> {
             Some(RecoveryKind::FixPermissions)
         }
         "hook_conflict" | "hook_path_conflict" => Some(RecoveryKind::ResolveHookConflict),
-        "extraction_timeout" | "provider_scan_incomplete" | "registry_locked" | "lock_held" => {
-            Some(RecoveryKind::Retry)
-        }
+        "extraction_timeout"
+        | "provider_scan_incomplete"
+        | "provider_import_locked"
+        | "registry_locked"
+        | "lock_held" => Some(RecoveryKind::Retry),
         "registry_provider_missing"
         | "registry_provider_mismatch"
         | "source_state_mismatch"

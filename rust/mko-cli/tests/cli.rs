@@ -86,16 +86,16 @@ fn asset_capture_emits_complete_json_for_runtime_errors() {
         .stdout
         .clone();
 
-    assert_eq!(
-        parse_json(&output),
-        json!({
-            "result": "error",
-            "error": {
-                "code": "invalid_pdf",
-                "message": "file does not have a PDF signature",
-            }
-        })
-    );
+    let expected = json!({
+        "result": "error",
+        "error": {
+            "code": "invalid_pdf",
+            "message": "file does not have a PDF signature",
+        }
+    });
+    let mut expected_bytes = serde_json::to_vec(&expected).unwrap();
+    expected_bytes.push(b'\n');
+    assert_eq!(output, expected_bytes);
 }
 
 #[test]
@@ -228,7 +228,7 @@ fn source_prepare_uses_the_hidden_worker_and_publishes_a_runtime_bundle() {
         .join(".knowledge-os/runtime/prepared")
         .join(format!("{asset_id}.json"));
 
-    Command::cargo_bin("mko")
+    let stdout = Command::cargo_bin("mko")
         .unwrap()
         .args([
             "source",
@@ -244,7 +244,17 @@ fn source_prepare_uses_the_hidden_worker_and_publishes_a_runtime_bundle() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("prepared"));
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        stdout,
+        format!(
+            "prepared {asset_id} {}\n",
+            asset_id.replacen("asset", "source", 1)
+        )
+        .into_bytes()
+    );
 
     let bundle: Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
     assert_eq!(bundle["asset_id"], asset_id);
@@ -341,6 +351,7 @@ fn source_write_draft_consumes_typed_json_and_emits_complete_json() {
         .stdout
         .clone();
 
+    let raw_output = output.clone();
     let output = parse_json(&output);
     assert_eq!(output["result"], "created");
     assert_eq!(output["source_id"], asset_id.replacen("asset", "source", 1));
@@ -356,6 +367,15 @@ fn source_write_draft_consumes_typed_json_and_emits_complete_json() {
             .unwrap()
             .starts_with("sha256:")
     );
+    let mut expected_bytes = serde_json::to_vec(&json!({
+        "result": output["result"],
+        "source_id": output["source_id"],
+        "source_path": output["source_path"],
+        "content_revision": output["content_revision"],
+    }))
+    .unwrap();
+    expected_bytes.push(b'\n');
+    assert_eq!(raw_output, expected_bytes);
 }
 
 #[test]

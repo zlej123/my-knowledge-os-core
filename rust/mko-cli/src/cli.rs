@@ -113,8 +113,6 @@ struct AddArgs {
     temporary_source: bool,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
-    #[arg(long, conflicts_with = "format")]
-    json: bool,
 }
 #[derive(Args)]
 struct CaptureArgs {
@@ -148,14 +146,18 @@ struct AssetOperationArgs {
 }
 #[derive(Args)]
 struct CheckArgs {
-    #[arg(long)]
+    #[arg(
+        long,
+        required_unless_present = "format",
+        required_if_eq("format", "human")
+    )]
     repo: Option<PathBuf>,
     #[arg(long, conflicts_with = "format")]
     json: bool,
     #[arg(long)]
     staged: bool,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
-    format: OutputFormat,
+    #[arg(long, value_enum)]
+    format: Option<OutputFormat>,
 }
 #[derive(Args)]
 struct ApproveSourceArgs {
@@ -175,7 +177,11 @@ struct HookInstallArgs {
 }
 #[derive(Args)]
 struct PrepareArgs {
-    #[arg(long)]
+    #[arg(
+        long,
+        required_unless_present = "format",
+        required_if_eq("format", "human")
+    )]
     repo: Option<PathBuf>,
     #[arg(long)]
     local_config: Option<PathBuf>,
@@ -185,12 +191,16 @@ struct PrepareArgs {
     output: PathBuf,
     #[arg(long)]
     clear_stale_lock: bool,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
-    format: OutputFormat,
+    #[arg(long, value_enum)]
+    format: Option<OutputFormat>,
 }
 #[derive(Args)]
 struct WriteDraftArgs {
-    #[arg(long)]
+    #[arg(
+        long,
+        required_unless_present = "format",
+        required_if_eq("format", "human")
+    )]
     repo: Option<PathBuf>,
     #[arg(long)]
     bundle: PathBuf,
@@ -204,8 +214,8 @@ struct WriteDraftArgs {
     clear_stale_lock: bool,
     #[arg(long, conflicts_with = "format")]
     json: bool,
-    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
-    format: OutputFormat,
+    #[arg(long, value_enum)]
+    format: Option<OutputFormat>,
 }
 #[derive(Args)]
 struct RepairStateArgs {
@@ -223,10 +233,11 @@ pub fn entry() {
     let args = std::env::args_os().collect::<Vec<_>>();
     match Cli::try_parse_from(&args) {
         Ok(cli) => {
+            let json_v1_command = json_v1_command(&cli);
             let legacy_check_requested = matches!(
                 &cli.command,
                 Command::Check(CheckArgs {
-                    format: OutputFormat::Human,
+                    format: None | Some(OutputFormat::Human),
                     ..
                 })
             );
@@ -234,8 +245,8 @@ pub fn entry() {
                 Ok(Exit::Success) => {}
                 Ok(Exit::ValidationFailed) => std::process::exit(1),
                 Err(error) => {
-                    if let Some(command) = json_v1_command(&args) {
-                        let _ = emit_json_v1_failure(command, &error);
+                    if let Some(command) = json_v1_command {
+                        emit_json_v1_failure_or_stderr(command, &error);
                     } else {
                         emit_legacy_error(
                             error.code(),
@@ -257,13 +268,13 @@ pub fn entry() {
         }
         Err(error) => {
             let usage = MkoError::new("usage", error.to_string());
-            if let Some(command) = json_v1_command(&args) {
-                let _ = emit_json_v1_failure(command, &usage);
+            if let Some(command) = json_v1_command_from_invalid_arguments(&args) {
+                emit_json_v1_failure_or_stderr(command, &usage);
             } else {
                 emit_legacy_error(
                     usage.code(),
                     usage.message(),
-                    args.iter().any(|arg| arg == "--json"),
+                    legacy_json_requested_from_invalid_arguments(&args),
                 );
             }
             std::process::exit(2);
@@ -342,11 +353,15 @@ fn add(arguments: AddArgs) -> Result<(), MkoError> {
 }
 
 fn prepare(arguments: PrepareArgs) -> Result<(), MkoError> {
-    if arguments.format == OutputFormat::Human && arguments.repo.is_some() {
+    if !format_is_json_v1(arguments.format) {
         return prepare_legacy(arguments);
     }
     let context = resolve_context(arguments.repo)?;
-    let runtime_output = normalized_runtime_output(&context.repository_root, &arguments.output)?;
+    let runtime_output = normalized_runtime_output(
+        &context.repository_root,
+        &arguments.asset_id,
+        &arguments.output,
+    )?;
     let request = PrepareRequest::new(
         &context.repository_root,
         &arguments.asset_id,
@@ -355,7 +370,7 @@ fn prepare(arguments: PrepareArgs) -> Result<(), MkoError> {
     .with_resolved_context(context)
     .with_clear_stale_lock(arguments.clear_stale_lock);
     let bundle = prepare_source(request, &worker_executable()?)?;
-    if arguments.format == OutputFormat::JsonV1 {
+    if format_is_json_v1(arguments.format) {
         emit_json_v1(JsonV1Success::SourcePrepare {
             schema_version: 1,
             result: SuccessResult::Ok,
@@ -391,8 +406,8 @@ fn prepare_legacy(arguments: PrepareArgs) -> Result<(), MkoError> {
 }
 
 fn write_draft(arguments: WriteDraftArgs) -> Result<(), MkoError> {
-    let json_v1 = arguments.format == OutputFormat::JsonV1;
-    let repository = if json_v1 || arguments.repo.is_none() {
+    let json_v1 = format_is_json_v1(arguments.format);
+    let repository = if json_v1 {
         resolve_context(arguments.repo.clone())?.repository_root
     } else {
         arguments.repo.clone().unwrap()
@@ -436,8 +451,8 @@ fn write_draft(arguments: WriteDraftArgs) -> Result<(), MkoError> {
 }
 
 fn check(arguments: CheckArgs) -> Result<Exit, MkoError> {
-    let json_v1 = arguments.format == OutputFormat::JsonV1;
-    let repository = if json_v1 || arguments.repo.is_none() {
+    let json_v1 = format_is_json_v1(arguments.format);
+    let repository = if json_v1 {
         resolve_context(arguments.repo.clone())?.repository_root
     } else {
         arguments.repo.clone().unwrap()
@@ -574,28 +589,44 @@ fn resolve_context(repository: Option<PathBuf>) -> Result<ResolvedPersonalContex
     resolve_personal_context(request, &SystemPlatformEnvironment)
 }
 
-fn normalized_runtime_output(repository: &Path, output: &Path) -> Result<PathBuf, MkoError> {
-    let relative = if output.is_absolute() {
-        output
-            .components()
-            .collect::<Vec<_>>()
-            .windows(4)
-            .find(|components| {
-                components[0].as_os_str() == ".knowledge-os"
-                    && components[1].as_os_str() == "runtime"
-                    && components[2].as_os_str() == "prepared"
-            })
-            .map(|components| components.iter().collect::<PathBuf>())
-            .ok_or_else(|| {
-                MkoError::new(
-                    "runtime_output_invalid",
-                    "output must be beneath .knowledge-os/runtime/prepared",
-                )
-            })?
-    } else {
-        output.to_path_buf()
-    };
-    Ok(repository.join(relative))
+fn normalized_runtime_output(
+    repository: &Path,
+    asset_id: &str,
+    output: &Path,
+) -> Result<PathBuf, MkoError> {
+    let expected = PathBuf::from(".knowledge-os")
+        .join("runtime")
+        .join("prepared")
+        .join(format!("{asset_id}.json"));
+    if output.is_absolute() {
+        let mut selected_repository = output.to_path_buf();
+        for component in expected.components().rev() {
+            if selected_repository.file_name() != Some(component.as_os_str())
+                || !selected_repository.pop()
+            {
+                return Err(runtime_output_error());
+            }
+        }
+        let selected_repository =
+            std::fs::canonicalize(selected_repository).map_err(|_| runtime_output_error())?;
+        if selected_repository != repository {
+            return Err(runtime_output_error());
+        }
+    } else if output != expected {
+        return Err(runtime_output_error());
+    }
+    Ok(repository.join(expected))
+}
+
+fn runtime_output_error() -> MkoError {
+    MkoError::new(
+        "runtime_output_invalid",
+        "output must be .knowledge-os/runtime/prepared/<asset-id>.json beneath the selected repository",
+    )
+}
+
+fn format_is_json_v1(format: Option<OutputFormat>) -> bool {
+    format == Some(OutputFormat::JsonV1)
 }
 
 fn repair_source(arguments: RepairStateArgs) -> Result<(), MkoError> {
@@ -763,27 +794,76 @@ fn emit_legacy_error(code: &str, message: &str, json: bool) {
         eprintln!("{code}: {message}");
     }
 }
-fn json_v1_command(args: &[std::ffi::OsString]) -> Option<JsonV1Command> {
-    if !args
-        .iter()
-        .any(|arg| arg == "--format" || arg == "--format=json-v1")
-        || !args
-            .iter()
-            .any(|arg| arg == "json-v1" || arg == "--format=json-v1")
-    {
-        return None;
+fn emit_json_v1_failure_or_stderr(command: JsonV1Command, error: &MkoError) {
+    if let Err(output_error) = emit_json_v1_failure(command, error) {
+        eprintln!("{}: {}", output_error.code(), output_error.message());
     }
-    let words = args
-        .iter()
-        .filter_map(|arg| arg.to_str())
-        .collect::<Vec<_>>();
-    match words.get(1..)? {
-        ["add", ..] => Some(JsonV1Command::Add),
-        ["check", ..] => Some(JsonV1Command::Check),
-        ["source", "prepare", ..] => Some(JsonV1Command::SourcePrepare),
-        ["source", "write-draft", ..] => Some(JsonV1Command::SourceWriteDraft),
+}
+
+fn json_v1_command(cli: &Cli) -> Option<JsonV1Command> {
+    match &cli.command {
+        Command::Add(AddArgs {
+            format: OutputFormat::JsonV1,
+            ..
+        }) => Some(JsonV1Command::Add),
+        Command::Check(CheckArgs {
+            format: Some(OutputFormat::JsonV1),
+            ..
+        }) => Some(JsonV1Command::Check),
+        Command::Source {
+            command:
+                SourceCommand::Prepare(PrepareArgs {
+                    format: Some(OutputFormat::JsonV1),
+                    ..
+                }),
+        } => Some(JsonV1Command::SourcePrepare),
+        Command::Source {
+            command:
+                SourceCommand::WriteDraft(WriteDraftArgs {
+                    format: Some(OutputFormat::JsonV1),
+                    ..
+                }),
+        } => Some(JsonV1Command::SourceWriteDraft),
         _ => None,
     }
+}
+
+fn json_v1_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option<JsonV1Command> {
+    let json_v1 = args
+        .windows(2)
+        .any(|pair| pair[0] == "--format" && pair[1] == "json-v1")
+        || args.iter().any(|argument| argument == "--format=json-v1");
+    if !json_v1 {
+        return None;
+    }
+    match (
+        args.get(1)?.to_str()?,
+        args.get(2).and_then(|argument| argument.to_str()),
+    ) {
+        ("add", _) => Some(JsonV1Command::Add),
+        ("check", _) => Some(JsonV1Command::Check),
+        ("source", Some("prepare")) => Some(JsonV1Command::SourcePrepare),
+        ("source", Some("write-draft")) => Some(JsonV1Command::SourceWriteDraft),
+        _ => None,
+    }
+}
+
+fn legacy_json_requested_from_invalid_arguments(args: &[std::ffi::OsString]) -> bool {
+    if !args.iter().any(|argument| argument == "--json") {
+        return false;
+    }
+    matches!(
+        (
+            args.get(1).and_then(|argument| argument.to_str()),
+            args.get(2).and_then(|argument| argument.to_str())
+        ),
+        (Some("asset"), _)
+            | (Some("check"), _)
+            | (Some("human"), _)
+            | (Some("hooks"), _)
+            | (Some("source"), Some("write-draft"))
+            | (Some("source"), Some("repair-state"))
+    )
 }
 
 trait AddOutcomeName {

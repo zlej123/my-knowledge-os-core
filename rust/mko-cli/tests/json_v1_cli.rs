@@ -174,38 +174,145 @@ fn json_v1_rejects_legacy_json_switch_without_mixing_stdout_or_stderr() {
 }
 
 #[test]
-fn recovery_mapping_is_exact_and_unknown_codes_are_null() {
+#[allow(deprecated)]
+fn legacy_detailed_commands_require_repo_without_touching_the_default_profile() {
+    let env = JsonV1Env::new();
+    let pdf = env.root.join("outside.pdf");
+    write_pdf(&pdf, "legacy repo guard");
+    let add = one_json(
+        &env.command(["add", &pdf.display().to_string(), "--format", "json-v1"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+    let asset_id = add["data"]["asset_id"].as_str().unwrap();
+    let bundle = env
+        .repository
+        .join(".knowledge-os/runtime/prepared")
+        .join(format!("{asset_id}.json"));
+    let response = env.root.join("response.json");
+    fs::write(
+        &response,
+        include_bytes!("../../../tests/fixtures/semantic-response.json"),
+    )
+    .unwrap();
+
+    for arguments in [
+        vec![
+            "source".into(),
+            "prepare".into(),
+            "--asset-id".into(),
+            asset_id.into(),
+            "--output".into(),
+            bundle.display().to_string(),
+        ],
+        vec![
+            "source".into(),
+            "write-draft".into(),
+            "--bundle".into(),
+            bundle.display().to_string(),
+            "--response".into(),
+            response.display().to_string(),
+            "--json".into(),
+        ],
+        vec!["check".into(), "--json".into()],
+    ] {
+        let output = env.command(arguments).assert().code(2).get_output().clone();
+        assert!(output.stderr.is_empty() || output.stdout.is_empty());
+        if !output.stdout.is_empty() {
+            assert_eq!(one_json(&output.stdout)["error"]["code"], "usage");
+        }
+    }
+    assert!(!env.repository.join("sources").exists());
+}
+
+#[test]
+#[allow(deprecated)]
+fn json_v1_prepare_rejects_an_external_suffix_lookalike_output() {
+    let env = JsonV1Env::new();
+    let pdf = env.root.join("outside.pdf");
+    write_pdf(&pdf, "output containment");
+    let add = one_json(
+        &env.command(["add", &pdf.display().to_string(), "--format", "json-v1"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+    let asset_id = add["data"]["asset_id"].as_str().unwrap();
+    let output = env
+        .root
+        .join("external/.knowledge-os/runtime/prepared")
+        .join(format!("{asset_id}.json"));
+    let result = env
+        .command([
+            "source",
+            "prepare",
+            "--asset-id",
+            asset_id,
+            "--output",
+            &output.display().to_string(),
+            "--format",
+            "json-v1",
+        ])
+        .assert()
+        .code(1)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(one_json(&result)["error"]["code"], "runtime_output_invalid");
+    assert!(!output.exists());
+}
+
+#[test]
+#[allow(deprecated)]
+fn output_mode_never_treats_a_positional_json_v1_value_as_a_format_request() {
+    let env = JsonV1Env::new();
+    let human = env
+        .command(["add", "json-v1", "--format", "human"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    assert!(human.stdout.is_empty());
+    assert!(!human.stderr.is_empty());
+
+    env.command(["add", "json-v1", "--json"])
+        .assert()
+        .code(2)
+        .stdout("");
+    env.command(["add", "json-v1", "--json", "--format", "human"])
+        .assert()
+        .code(2)
+        .stdout("");
+}
+
+#[test]
+fn recovery_mapping_is_table_driven_and_unknown_codes_are_null() {
     use mko_cli::output::{RecoveryKind, recovery_for_error_code};
 
-    assert_eq!(
-        recovery_for_error_code("profile_missing"),
-        Some(RecoveryKind::Configure)
-    );
-    assert_eq!(
-        recovery_for_error_code("provider_hydration_failed"),
-        Some(RecoveryKind::Hydrate)
-    );
-    assert_eq!(
-        recovery_for_error_code("backup_confirmation_required"),
-        Some(RecoveryKind::VerifyBackup)
-    );
-    assert_eq!(
-        recovery_for_error_code("profile_permissions_invalid"),
-        Some(RecoveryKind::FixPermissions)
-    );
-    assert_eq!(
-        recovery_for_error_code("hook_conflict"),
-        Some(RecoveryKind::ResolveHookConflict)
-    );
-    assert_eq!(
-        recovery_for_error_code("extraction_timeout"),
-        Some(RecoveryKind::Retry)
-    );
-    assert_eq!(
-        recovery_for_error_code("registry_provider_mismatch"),
-        Some(RecoveryKind::Repair)
-    );
-    assert_eq!(recovery_for_error_code("unreviewed_new_code"), None);
+    let reviewed = [
+        ("profile_missing", RecoveryKind::Configure),
+        ("provider_hydration_failed", RecoveryKind::Hydrate),
+        ("backup_confirmation_required", RecoveryKind::VerifyBackup),
+        ("profile_permissions_invalid", RecoveryKind::FixPermissions),
+        ("hook_conflict", RecoveryKind::ResolveHookConflict),
+        ("extraction_timeout", RecoveryKind::Retry),
+        ("provider_import_locked", RecoveryKind::Retry),
+        ("registry_provider_mismatch", RecoveryKind::Repair),
+    ];
+    for (code, recovery) in reviewed {
+        assert_eq!(recovery_for_error_code(code), Some(recovery), "{code}");
+    }
+    for unknown in [
+        "provider_import_lock",
+        "profile_missing_extra",
+        "unreviewed_new_code",
+    ] {
+        assert_eq!(recovery_for_error_code(unknown), None, "{unknown}");
+    }
 }
 
 struct JsonV1Env {
