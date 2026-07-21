@@ -286,6 +286,17 @@ struct CapabilityPublicationLock<'a> {
 
 impl<'a> CapabilityPublicationLock<'a> {
     fn acquire(directory: &'a Dir, filename: &str) -> Result<Self, MkoError> {
+        Self::acquire_with_quarantine_observer(directory, filename, |_| {})
+    }
+
+    fn acquire_with_quarantine_observer<H>(
+        directory: &'a Dir,
+        filename: &str,
+        mut after_quarantine_discovery: H,
+    ) -> Result<Self, MkoError>
+    where
+        H: FnMut(&[PublicationQuarantine]),
+    {
         let lock_filename = format!(".{filename}.publish.lock");
         let deadline = Instant::now() + LOCK_WAIT;
         loop {
@@ -293,9 +304,12 @@ impl<'a> CapabilityPublicationLock<'a> {
                 return Err(publication_locked_error());
             }
             let scan_deadline = publication_scan_deadline(deadline);
-            if let Err(error) =
-                resolve_publication_quarantines(directory, &lock_filename, scan_deadline)
-            {
+            if let Err(error) = resolve_publication_quarantines_with_observer(
+                directory,
+                &lock_filename,
+                scan_deadline,
+                &mut after_quarantine_discovery,
+            ) {
                 if error.code() == "registry_locked" && Instant::now() < deadline {
                     thread::sleep(LOCK_RETRY);
                     continue;
@@ -667,7 +681,20 @@ fn resolve_publication_quarantines(
     filename: &str,
     deadline: Instant,
 ) -> Result<(), MkoError> {
+    resolve_publication_quarantines_with_observer(directory, filename, deadline, |_| {})
+}
+
+fn resolve_publication_quarantines_with_observer<O>(
+    directory: &Dir,
+    filename: &str,
+    deadline: Instant,
+    mut after_quarantine_discovery: O,
+) -> Result<(), MkoError>
+where
+    O: FnMut(&[PublicationQuarantine]),
+{
     let quarantines = scan_publication_quarantines(directory, filename, deadline)?;
+    after_quarantine_discovery(&quarantines);
     for quarantine in quarantines {
         check_publication_deadline(deadline)?;
         let valid = quarantine.authenticated && quarantine.record.is_some();
@@ -689,9 +716,13 @@ fn reap_publication_quarantine(
 ) -> Result<(), MkoError> {
     check_publication_deadline(deadline)?;
     let private = format!("{}.reap-{}", quarantine.filename, secure_cleanup_token()?);
-    directory
-        .rename(&quarantine.filename, directory, &private)
-        .map_err(lock_error)?;
+    match directory.rename(&quarantine.filename, directory, &private) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(publication_locked_error());
+        }
+        Err(error) => return Err(lock_error(error)),
+    }
     sync_capability_directory(directory)?;
     check_publication_deadline(deadline)?;
     let Some(expected_identity) = quarantine.identity else {
@@ -1149,6 +1180,43 @@ mod tests {
         let lock = CapabilityPublicationLock::acquire(&directory, "record.md").unwrap();
 
         assert!(directory.metadata(&quarantine).is_err());
+        drop(lock);
+        let _ = fs::remove_dir_all(directory_path);
+    }
+
+    #[test]
+    fn publication_lock_retries_when_discovered_cleanup_quarantine_vanishes() {
+        let directory_path = test_directory();
+        let directory = Dir::open_ambient_dir(&directory_path, ambient_authority()).unwrap();
+        let secret = "4".repeat(32);
+        let quarantine = format!("..record.md.publish.lock.cleanup-{secret}");
+        let stale = serde_json::json!({
+            "pid": u32::MAX,
+            "hostname": hostname::get().unwrap().to_string_lossy(),
+            "started_at": "2000-01-01T00:00:00Z",
+            "owner_token": secret,
+        });
+        directory
+            .write(&quarantine, serde_json::to_vec(&stale).unwrap())
+            .unwrap();
+        let mut discoveries = 0;
+
+        let lock = CapabilityPublicationLock::acquire_with_quarantine_observer(
+            &directory,
+            "record.md",
+            |quarantines| {
+                if quarantines.is_empty() {
+                    return;
+                }
+                discoveries += 1;
+                assert_eq!(quarantines.len(), 1);
+                assert_eq!(quarantines[0].filename, quarantine);
+                directory.remove_file(&quarantine).unwrap();
+            },
+        )
+        .expect("a vanished cleanup quarantine must be retried");
+
+        assert_eq!(discoveries, 1);
         drop(lock);
         let _ = fs::remove_dir_all(directory_path);
     }
