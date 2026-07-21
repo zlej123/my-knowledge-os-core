@@ -106,24 +106,6 @@ impl ElapsedClock for PreOpenMutatingClock {
     }
 }
 
-#[cfg(unix)]
-struct SwapToLinkClock {
-    calls: AtomicU64,
-    path: PathBuf,
-    target: PathBuf,
-}
-
-#[cfg(unix)]
-impl ElapsedClock for SwapToLinkClock {
-    fn elapsed_ms(&self) -> u64 {
-        if self.calls.fetch_add(1, Ordering::SeqCst) == 4 {
-            fs::remove_file(&self.path).unwrap();
-            std::os::unix::fs::symlink(&self.target, &self.path).unwrap();
-        }
-        0
-    }
-}
-
 impl ElapsedClock for MutatingClock {
     fn elapsed_ms(&self) -> u64 {
         if self.calls.fetch_add(1, Ordering::SeqCst) == 6 {
@@ -361,29 +343,9 @@ fn scanner_revalidates_pdf_after_a_pre_open_mutation() {
     assert_eq!(error.code(), "invalid_pdf");
 }
 
-#[cfg(unix)]
-#[test]
-fn scanner_does_not_follow_entry_swapped_to_symlink_before_open() {
-    let fixture = Fixture::new();
-    let path = fixture.provider_pdf("paper.pdf", b"%PDF-1.7\noriginal");
-    let target = fixture.outside_pdf("target.pdf", b"%PDF-1.7\noutside");
-    let clock = SwapToLinkClock {
-        calls: AtomicU64::new(0),
-        path,
-        target,
-    };
-
-    let result = scan_provider_pdfs(ProviderScanRequest::new(&fixture.provider), &clock).unwrap();
-
-    assert!(!result.scan_complete);
-    assert!(result.pdfs.is_empty());
-    assert!(
-        result
-            .warnings
-            .iter()
-            .any(|warning| warning.code == "scan_file_unreadable")
-    );
-}
+// Symlink-swap-before-open no-follow detection is covered at the exact critical window by
+// `provider_scan::tests::a_symlink_swapped_in_before_open_is_not_followed`, which drives the swap
+// through the scanner's before-file-open hook rather than a scan-clock call count.
 
 #[test]
 fn outside_pdf_is_copied_verified_and_original_is_unchanged() {

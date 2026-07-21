@@ -68,6 +68,9 @@ fn json_v1_failure_message(command: &JsonV1Command, code: &str) -> &'static str 
         JsonV1Command::Add => match code {
             "provider_not_found" => "The provider item was not found.",
             "inbox_unavailable" => "The inbox could not be scanned.",
+            "backup_confirmation_required" => {
+                "confirm a verified second copy before registering an only-copy or temporary PDF"
+            }
             _ => "The PDF could not be added.",
         },
         JsonV1Command::SourcePrepare => match code {

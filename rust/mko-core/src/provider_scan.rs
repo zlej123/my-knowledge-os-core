@@ -417,6 +417,8 @@ fn metadata_issue_warning(issue: &ProviderMetadataIssue) -> ProviderScanWarning 
         "scan_byte_limit"
     } else if issue.message.contains("depth limit") {
         "scan_depth_limit"
+    } else if issue.message.contains("provider subtree") {
+        "scan_subtree_unreadable"
     } else if issue.message.contains("enumerated PDF candidate") {
         "scan_file_unreadable"
     } else {
@@ -1396,6 +1398,39 @@ mod metadata_walk_tests {
         }));
         assert!(scan.warnings.iter().any(|warning| {
             warning.provider_locator.as_deref() == Some("z-raced.pdf")
+                && warning.code == "scan_file_unreadable"
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_swapped_in_before_open_is_not_followed() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let paper = root.path().join("paper.pdf");
+        let target = outside.path().join("target.pdf");
+        fs::write(&paper, b"%PDF-1.7\noriginal\n%%EOF\n").unwrap();
+        fs::write(&target, b"%PDF-1.7\noutside\n%%EOF\n").unwrap();
+        let mut swapped = false;
+
+        let scan = scan_provider_catalog_metadata_first_with_before_file_open(
+            ProviderScanRequest::new(root.path()),
+            &FixedElapsedClock,
+            &mut |relative| {
+                if relative == Path::new("paper.pdf") && !swapped {
+                    swapped = true;
+                    fs::remove_file(&paper).unwrap();
+                    std::os::unix::fs::symlink(&target, &paper).unwrap();
+                }
+            },
+        )
+        .unwrap();
+
+        assert!(swapped);
+        assert!(!scan.scan_complete);
+        assert!(scan.entries.is_empty());
+        assert!(scan.warnings.iter().any(|warning| {
+            warning.provider_locator.as_deref() == Some("paper.pdf")
                 && warning.code == "scan_file_unreadable"
         }));
     }

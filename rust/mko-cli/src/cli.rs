@@ -1345,7 +1345,17 @@ fn json_v1_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option
 }
 
 fn legacy_json_requested_from_invalid_arguments(args: &[std::ffi::OsString]) -> bool {
-    args.iter().any(|argument| argument == "--json")
+    if !args.iter().any(|argument| argument == "--json") {
+        return false;
+    }
+    // Frozen v0.1 behavior: any argument equal to `--json` selects legacy JSON error output for the
+    // legacy command families (asset/source/check/human/hooks/__extract-pdf) and for invocations
+    // that name no recognized subcommand at all. The v0.2-only commands below never accepted
+    // `--json`, so a parse failure there is an ordinary usage error, not legacy JSON output.
+    !matches!(
+        args.get(1).and_then(|argument| argument.to_str()),
+        Some("setup" | "add" | "doctor" | "inbox" | "status" | "review")
+    )
 }
 
 fn arguments_before_terminator(args: &[std::ffi::OsString]) -> &[std::ffi::OsString] {
