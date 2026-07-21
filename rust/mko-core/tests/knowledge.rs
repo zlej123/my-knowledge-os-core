@@ -4,8 +4,9 @@ use chrono::{DateTime, Utc};
 use mko_core::{
     clock::Clock,
     knowledge::{
-        ConceptKind, WriteKnowledgeRequest, normalize_and_validate_knowledge,
-        parse_knowledge_response, write_knowledge_note_with_clock,
+        ConceptKind, WriteKnowledgeRequest, approve_knowledge, list_unreviewed_knowledge,
+        normalize_and_validate_knowledge, parse_knowledge_response,
+        write_knowledge_note_with_clock,
     },
     registry::{CaptureRequest, capture_asset},
 };
@@ -194,4 +195,32 @@ fn write_rejects_unknown_asset() {
         .write("personal-asset-deadbeef", VALID.as_bytes(), false)
         .unwrap_err();
     assert_eq!(err.code(), "asset_not_found");
+}
+
+#[test]
+fn approve_marks_reviewed_and_records_approved_revision() {
+    let kb = knowledge_fixture();
+    let w = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    approve_knowledge(kb.repo(), &w.knowledge_id, &w.content_revision).unwrap();
+    let doc = fs::read_to_string(kb.repo().join(&w.knowledge_path)).unwrap();
+    assert!(doc.contains("status: reviewed"));
+    assert!(doc.contains(&format!("approved_revision: {}", w.content_revision)));
+    assert!(doc.contains("reviewed_at:") && !doc.contains("reviewed_at: null"));
+}
+
+#[test]
+fn approve_rejects_a_stale_revision() {
+    let kb = knowledge_fixture();
+    let w = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let err = approve_knowledge(kb.repo(), &w.knowledge_id, "sha256:0000").unwrap_err();
+    assert_eq!(err.code(), "knowledge_revision_mismatch");
+}
+
+#[test]
+fn list_unreviewed_returns_only_unreviewed_notes() {
+    let kb = knowledge_fixture();
+    let w = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    assert_eq!(list_unreviewed_knowledge(kb.repo()).unwrap().len(), 1);
+    approve_knowledge(kb.repo(), &w.knowledge_id, &w.content_revision).unwrap();
+    assert_eq!(list_unreviewed_knowledge(kb.repo()).unwrap().len(), 0);
 }

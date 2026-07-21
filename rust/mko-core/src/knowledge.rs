@@ -208,6 +208,7 @@ pub struct WriteKnowledgeResult {
 
 struct KnowledgeDocument {
     record: KnowledgeRecord,
+    body: String,
     path: PathBuf,
 }
 
@@ -617,6 +618,7 @@ fn read_knowledge_documents(repository_root: &Path) -> Result<Vec<KnowledgeDocum
             .map_err(|error| existing_knowledge_error(error.message()))?;
         documents.push(KnowledgeDocument {
             record: parsed.metadata,
+            body: parsed.body,
             path: entry_path,
         });
     }
@@ -656,4 +658,72 @@ fn knowledge_path_error() -> MkoError {
         "knowledge_path_invalid",
         "knowledge path must remain in a real knowledge directory",
     )
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingKnowledge {
+    pub knowledge_id: String,
+    pub asset_id: String,
+    pub title: String,
+    pub knowledge_path: String,
+    pub content_revision: String,
+}
+
+pub fn list_unreviewed_knowledge(
+    repository_root: &Path,
+) -> Result<Vec<PendingKnowledge>, MkoError> {
+    let repository_root = canonical_directory(repository_root, "repository_root_invalid")?;
+    let mut pending = read_knowledge_documents(&repository_root)?
+        .into_iter()
+        .filter(|document| document.record.review.status == ReviewState::Unreviewed)
+        .map(|document| {
+            let knowledge_path = repository_relative(&repository_root, &document.path)?;
+            Ok(PendingKnowledge {
+                knowledge_id: document.record.id,
+                asset_id: document.record.asset_id,
+                title: document.record.title,
+                knowledge_path,
+                content_revision: document.record.content_revision,
+            })
+        })
+        .collect::<Result<Vec<_>, MkoError>>()?;
+    pending.sort_by(|left, right| {
+        (&left.title, &left.knowledge_id).cmp(&(&right.title, &right.knowledge_id))
+    });
+    Ok(pending)
+}
+
+pub fn approve_knowledge(
+    repository_root: &Path,
+    knowledge_id: &str,
+    content_revision: &str,
+) -> Result<(), MkoError> {
+    approve_knowledge_with_clock(
+        repository_root,
+        knowledge_id,
+        content_revision,
+        &SystemClock,
+    )
+}
+
+pub fn approve_knowledge_with_clock(
+    repository_root: &Path,
+    knowledge_id: &str,
+    content_revision: &str,
+    clock: &dyn Clock,
+) -> Result<(), MkoError> {
+    let repository_root = canonical_directory(repository_root, "repository_root_invalid")?;
+    let mut document = find_knowledge(&repository_root, knowledge_id)?
+        .ok_or_else(|| MkoError::new("knowledge_not_found", "no knowledge note has this ID"))?;
+    if document.record.content_revision != content_revision {
+        return Err(MkoError::new(
+            "knowledge_revision_mismatch",
+            "knowledge note content_revision has changed since selection",
+        ));
+    }
+    document.record.review.status = ReviewState::Reviewed;
+    document.record.review.reviewed_at = Some(clock.now_utc());
+    document.record.approved_revision = Some(content_revision.to_owned());
+    let rendered = render_markdown(&document.record, &document.body)?;
+    write_replace(&document.path, rendered.as_bytes())
 }
