@@ -22,6 +22,8 @@ use crate::{
 pub const MAX_KNOWLEDGE_RESPONSE_BYTES: usize = 1024 * 1024;
 pub const MAX_KNOWLEDGE_STRING_BYTES: usize = 64 * 1024;
 const MAX_KNOWLEDGE_SLUG_BYTES: usize = 96;
+const MAX_KNOWLEDGE_ENTRIES: usize = 1024;
+const MAX_KNOWLEDGE_SCAN_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -597,21 +599,37 @@ fn read_knowledge_documents(repository_root: &Path) -> Result<Vec<KnowledgeDocum
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Ok(_) | Err(_) => return Err(knowledge_path_error()),
     }
+    let mut filenames = fs::read_dir(&path)
+        .map_err(|_| knowledge_scan_error())?
+        .take(MAX_KNOWLEDGE_ENTRIES + 1)
+        .map(|entry| {
+            let entry = entry.map_err(|_| knowledge_scan_error())?;
+            let file_type = entry.file_type().map_err(|_| knowledge_scan_error())?;
+            if file_type.is_symlink() {
+                return Err(knowledge_scan_error());
+            }
+            Ok(entry.file_name())
+        })
+        .collect::<Result<Vec<_>, MkoError>>()?;
+    if filenames.len() > MAX_KNOWLEDGE_ENTRIES {
+        return Err(knowledge_scan_error());
+    }
+    filenames.sort();
+    let mut total = 0u64;
     let mut documents = Vec::new();
-    for entry in fs::read_dir(&path)
-        .map_err(|error| MkoError::new("knowledge_unreadable", error.to_string()))?
-    {
-        let entry =
-            entry.map_err(|error| MkoError::new("knowledge_unreadable", error.to_string()))?;
-        let entry_path = entry.path();
+    for filename in filenames {
+        let entry_path = path.join(&filename);
         if entry_path.extension().and_then(|value| value.to_str()) != Some("md") {
             continue;
         }
-        let metadata = fs::symlink_metadata(&entry_path)
-            .map_err(|error| MkoError::new("knowledge_unreadable", error.to_string()))?;
+        let metadata = fs::symlink_metadata(&entry_path).map_err(|_| knowledge_scan_error())?;
         if !metadata.file_type().is_file() {
             return Err(knowledge_path_error());
         }
+        total = total
+            .checked_add(metadata.len())
+            .filter(|total| *total <= MAX_KNOWLEDGE_SCAN_BYTES)
+            .ok_or_else(knowledge_scan_error)?;
         let input = fs::read_to_string(&entry_path)
             .map_err(|error| MkoError::new("knowledge_unreadable", error.to_string()))?;
         let parsed = parse_markdown::<KnowledgeRecord>(&input)
@@ -623,6 +641,13 @@ fn read_knowledge_documents(repository_root: &Path) -> Result<Vec<KnowledgeDocum
         });
     }
     Ok(documents)
+}
+
+fn knowledge_scan_error() -> MkoError {
+    MkoError::new(
+        "knowledge_scan_limit",
+        "knowledge discovery exceeded a bounded or regular-file input limit",
+    )
 }
 
 fn validate_existing_knowledge(path: &Path, expected: &KnowledgeRecord) -> Result<(), MkoError> {
@@ -726,4 +751,66 @@ pub fn approve_knowledge_with_clock(
     document.record.approved_revision = Some(content_revision.to_owned());
     let rendered = render_markdown(&document.record, &document.body)?;
     write_replace(&document.path, rendered.as_bytes())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConceptMatch {
+    pub asset_id: String,
+    pub title: String,
+    pub name: String,
+    pub kind: ConceptKind,
+    pub locator: Option<String>,
+    pub knowledge_path: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KnowledgeSearchQuery {
+    pub term: String,
+    pub kind: Option<ConceptKind>,
+    pub tag: Option<String>,
+}
+
+pub fn search_knowledge(
+    repository_root: &Path,
+    query: &KnowledgeSearchQuery,
+) -> Result<Vec<ConceptMatch>, MkoError> {
+    let repository_root = canonical_directory(repository_root, "repository_root_invalid")?;
+    let term = query.term.to_lowercase();
+    let mut matches = Vec::new();
+    for document in read_knowledge_documents(&repository_root)? {
+        let knowledge_path = repository_relative(&repository_root, &document.path)?;
+        for concept in &document.record.concepts {
+            if let Some(kind) = &query.kind
+                && &concept.kind != kind
+            {
+                continue;
+            }
+            if let Some(tag) = &query.tag
+                && !concept.tags.iter().any(|value| value == tag)
+            {
+                continue;
+            }
+            if !term.is_empty() {
+                let haystack = format!(
+                    "{} {} {}",
+                    concept.name,
+                    concept.body,
+                    concept.tags.join(" ")
+                )
+                .to_lowercase();
+                if !haystack.contains(&term) {
+                    continue;
+                }
+            }
+            matches.push(ConceptMatch {
+                asset_id: document.record.asset_id.clone(),
+                title: document.record.title.clone(),
+                name: concept.name.clone(),
+                kind: concept.kind.clone(),
+                locator: concept.locator.clone(),
+                knowledge_path: knowledge_path.clone(),
+            });
+        }
+    }
+    Ok(matches)
 }

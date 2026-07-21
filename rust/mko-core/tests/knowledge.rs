@@ -4,9 +4,9 @@ use chrono::{DateTime, Utc};
 use mko_core::{
     clock::Clock,
     knowledge::{
-        ConceptKind, WriteKnowledgeRequest, approve_knowledge, list_unreviewed_knowledge,
-        normalize_and_validate_knowledge, parse_knowledge_response,
-        write_knowledge_note_with_clock,
+        ConceptKind, KnowledgeSearchQuery, WriteKnowledgeRequest, approve_knowledge,
+        list_unreviewed_knowledge, normalize_and_validate_knowledge, parse_knowledge_response,
+        search_knowledge, write_knowledge_note_with_clock,
     },
     registry::{CaptureRequest, capture_asset},
 };
@@ -26,6 +26,8 @@ impl Clock for FixedClock {
 struct KnowledgeFixture {
     _root: TempDir,
     repository: PathBuf,
+    provider: PathBuf,
+    local_config: PathBuf,
     asset_id: String,
     clock: FixedClock,
 }
@@ -50,6 +52,18 @@ impl KnowledgeFixture {
                 .with_replace(replace),
             &self.clock,
         )
+    }
+
+    fn second_asset(&self) -> String {
+        let pdf = self.provider.join("second.pdf");
+        fs::write(&pdf, b"%PDF-1.7\nsecond fixture").unwrap();
+        capture_asset(
+            CaptureRequest::new(&self.repository, &pdf)
+                .with_local_config(&self.local_config)
+                .with_captured_at(self.clock.now_utc()),
+        )
+        .unwrap()
+        .asset_id
     }
 }
 
@@ -87,6 +101,8 @@ fn knowledge_fixture() -> KnowledgeFixture {
     KnowledgeFixture {
         _root: root,
         repository,
+        provider,
+        local_config,
         asset_id,
         clock,
     }
@@ -223,4 +239,85 @@ fn list_unreviewed_returns_only_unreviewed_notes() {
     assert_eq!(list_unreviewed_knowledge(kb.repo()).unwrap().len(), 1);
     approve_knowledge(kb.repo(), &w.knowledge_id, &w.content_revision).unwrap();
     assert_eq!(list_unreviewed_knowledge(kb.repo()).unwrap().len(), 0);
+}
+
+const OTHER: &str = r#"{
+  "synthesis": "A control-theory text covering feedback stability.",
+  "concepts": [
+    {"name": "Feedback loop", "kind": "concept", "body": "output routed back as input", "tags": ["control"], "locator": "§1.1"}
+  ]
+}"#;
+
+#[test]
+fn search_finds_matches_across_documents_and_respects_filters() {
+    let kb = knowledge_fixture();
+    kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let second = kb.second_asset();
+    kb.write(&second, OTHER.as_bytes(), false).unwrap();
+
+    let hits = search_knowledge(
+        kb.repo(),
+        &KnowledgeSearchQuery {
+            term: "convolution".into(),
+            kind: None,
+            tag: None,
+        },
+    )
+    .unwrap();
+    assert!(hits.iter().any(|h| h.name == "Convolution"));
+
+    let formulas = search_knowledge(
+        kb.repo(),
+        &KnowledgeSearchQuery {
+            term: "x".into(),
+            kind: Some(ConceptKind::Formula),
+            tag: None,
+        },
+    )
+    .unwrap();
+    assert!(!formulas.is_empty());
+    assert!(formulas.iter().all(|h| h.kind == ConceptKind::Formula));
+
+    let tagged = search_knowledge(
+        kb.repo(),
+        &KnowledgeSearchQuery {
+            term: String::new(),
+            kind: None,
+            tag: Some("control".into()),
+        },
+    )
+    .unwrap();
+    assert!(tagged.iter().any(|h| h.name == "Feedback loop"));
+    assert!(tagged.iter().all(|h| h.name != "Convolution"));
+
+    let none = search_knowledge(
+        kb.repo(),
+        &KnowledgeSearchQuery {
+            term: "nonexistent-term".into(),
+            kind: None,
+            tag: None,
+        },
+    )
+    .unwrap();
+    assert!(none.is_empty());
+}
+
+#[test]
+fn search_is_bounded_by_a_maximum_entry_count() {
+    let kb = knowledge_fixture();
+    let knowledge_dir = kb.repo().join("knowledge");
+    fs::create_dir_all(&knowledge_dir).unwrap();
+    for index in 0..1025 {
+        fs::write(knowledge_dir.join(format!("note-{index:05}.md")), b"noise").unwrap();
+    }
+    let err = search_knowledge(
+        kb.repo(),
+        &KnowledgeSearchQuery {
+            term: "anything".into(),
+            kind: None,
+            tag: None,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "knowledge_scan_limit");
 }
