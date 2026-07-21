@@ -1,6 +1,95 @@
-use mko_core::knowledge::{
-    ConceptKind, normalize_and_validate_knowledge, parse_knowledge_response,
+use std::{fs, path::PathBuf};
+
+use chrono::{DateTime, Utc};
+use mko_core::{
+    clock::Clock,
+    knowledge::{
+        ConceptKind, WriteKnowledgeRequest, normalize_and_validate_knowledge,
+        parse_knowledge_response, write_knowledge_note_with_clock,
+    },
+    registry::{CaptureRequest, capture_asset},
 };
+use tempfile::TempDir;
+
+const NOW: &str = "2026-07-18T00:00:00Z";
+
+#[derive(Clone)]
+struct FixedClock(DateTime<Utc>);
+
+impl Clock for FixedClock {
+    fn now_utc(&self) -> DateTime<Utc> {
+        self.0
+    }
+}
+
+struct KnowledgeFixture {
+    _root: TempDir,
+    repository: PathBuf,
+    asset_id: String,
+    clock: FixedClock,
+}
+
+impl KnowledgeFixture {
+    fn repo(&self) -> &std::path::Path {
+        &self.repository
+    }
+
+    fn asset_id(&self) -> &str {
+        &self.asset_id
+    }
+
+    fn write(
+        &self,
+        asset_id: &str,
+        response: &[u8],
+        replace: bool,
+    ) -> Result<mko_core::knowledge::WriteKnowledgeResult, mko_core::error::MkoError> {
+        write_knowledge_note_with_clock(
+            WriteKnowledgeRequest::new(&self.repository, asset_id, response.to_vec())
+                .with_replace(replace),
+            &self.clock,
+        )
+    }
+}
+
+fn knowledge_fixture() -> KnowledgeFixture {
+    let root = tempfile::tempdir().unwrap();
+    let repository = root.path().join("repository");
+    let provider = root.path().join("provider");
+    let local_config = root.path().join("local-config.yaml");
+    fs::create_dir_all(&repository).unwrap();
+    fs::create_dir_all(&provider).unwrap();
+    fs::write(
+        repository.join("knowledge-os.yaml"),
+        "system: my-knowledge-os\nscope: personal\ncore_version: 0.1.0\nschema_version: 1\nprovider:\n  name: personal_google_drive\n  type: google-drive-stream\n  root_env: MKO_PERSONAL_PROVIDER_ROOT\n",
+    )
+    .unwrap();
+    fs::write(
+        &local_config,
+        format!("provider_root: {}\n", provider.display()),
+    )
+    .unwrap();
+    let pdf = provider.join("paper.pdf");
+    fs::write(&pdf, b"%PDF-1.7\nfixture").unwrap();
+    let clock = FixedClock(
+        DateTime::parse_from_rfc3339(NOW)
+            .unwrap()
+            .with_timezone(&Utc),
+    );
+    let asset_id = capture_asset(
+        CaptureRequest::new(&repository, &pdf)
+            .with_local_config(&local_config)
+            .with_captured_at(clock.now_utc()),
+    )
+    .unwrap()
+    .asset_id;
+    KnowledgeFixture {
+        _root: root,
+        repository,
+        asset_id,
+        clock,
+    }
+}
 
 const VALID: &str = r#"{
   "synthesis": "A signals-and-systems text covering LTI systems and transforms.",
@@ -56,4 +145,53 @@ fn rejects_invalid_kind() {
 fn allows_empty_concepts() {
     let mut r = parse_knowledge_response(r#"{"synthesis":"x","concepts":[]}"#.as_bytes()).unwrap();
     normalize_and_validate_knowledge(&mut r).unwrap();
+}
+
+#[test]
+fn write_creates_an_unreviewed_note_with_a_content_revision() {
+    let kb = knowledge_fixture();
+    let res = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    assert_eq!(res.result, "created");
+    assert!(res.content_revision.starts_with("sha256:"));
+    let doc = fs::read_to_string(kb.repo().join(&res.knowledge_path)).unwrap();
+    assert!(doc.contains("status: unreviewed"));
+    assert!(doc.contains("approved_revision: null"));
+    assert!(doc.contains("# ") && doc.contains("## Synthesis") && doc.contains("## Concepts"));
+    assert!(doc.contains("Convolution"));
+}
+
+#[test]
+fn write_is_idempotent_for_identical_content() {
+    let kb = knowledge_fixture();
+    let a = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let b = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    assert_eq!(b.result, "existing");
+    assert_eq!(a.content_revision, b.content_revision);
+}
+
+#[test]
+fn regenerating_requires_replace_and_resets_to_unreviewed_keeping_prior_approved_revision() {
+    let kb = knowledge_fixture();
+    kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let other = VALID.replace(
+        "LTI systems and transforms",
+        "LTI systems, transforms, and sampling",
+    );
+    let err = kb
+        .write(kb.asset_id(), other.as_bytes(), false)
+        .unwrap_err();
+    assert_eq!(err.code(), "replace_required");
+    let ok = kb.write(kb.asset_id(), other.as_bytes(), true).unwrap();
+    assert_eq!(ok.result, "replaced");
+    let doc = fs::read_to_string(kb.repo().join(&ok.knowledge_path)).unwrap();
+    assert!(doc.contains("status: unreviewed"));
+}
+
+#[test]
+fn write_rejects_unknown_asset() {
+    let kb = knowledge_fixture();
+    let err = kb
+        .write("personal-asset-deadbeef", VALID.as_bytes(), false)
+        .unwrap_err();
+    assert_eq!(err.code(), "asset_not_found");
 }
