@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::knowledge::ConceptKind;
+
 fn deserialize_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: Deserializer<'de>,
@@ -38,6 +40,16 @@ pub enum JsonV1Command {
     Status,
     #[serde(rename = "doctor")]
     Doctor,
+    #[serde(rename = "knowledge.write")]
+    KnowledgeWrite,
+    #[serde(rename = "knowledge.review")]
+    KnowledgeReview,
+    #[serde(rename = "knowledge.search")]
+    KnowledgeSearch,
+    #[serde(rename = "knowledge.show")]
+    KnowledgeShow,
+    #[serde(rename = "knowledge.list")]
+    KnowledgeList,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -261,6 +273,111 @@ pub struct DoctorCheckData {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeWriteOutcome {
+    Created,
+    Existing,
+    Replaced,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeWriteData {
+    pub write_outcome: KnowledgeWriteOutcome,
+    pub asset_id: String,
+    pub knowledge_id: String,
+    pub knowledge_path: String,
+    pub content_revision: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeReviewDecision {
+    Approved,
+    Deferred,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeReviewItemData {
+    pub knowledge_id: String,
+    pub asset_id: String,
+    pub title: String,
+    pub decision: KnowledgeReviewDecision,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeReviewData {
+    pub items: Vec<KnowledgeReviewItemData>,
+    pub remaining_unreviewed: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConceptMatchData {
+    pub asset_id: String,
+    pub title: String,
+    pub name: String,
+    pub kind: ConceptKind,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub locator: Option<String>,
+    pub knowledge_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeSearchData {
+    pub matches: Vec<ConceptMatchData>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeReviewStatusData {
+    Unreviewed,
+    Reviewed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeConceptSummary {
+    pub name: String,
+    pub kind: ConceptKind,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub locator: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeShowData {
+    pub asset_id: String,
+    pub title: String,
+    pub knowledge_path: String,
+    pub review_status: KnowledgeReviewStatusData,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub knowledge_id: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub content_revision: Option<String>,
+    pub concepts: Vec<KnowledgeConceptSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgePendingItemData {
+    pub knowledge_id: String,
+    pub asset_id: String,
+    pub title: String,
+    pub knowledge_path: String,
+    pub content_revision: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeListData {
+    pub items: Vec<KnowledgePendingItemData>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct JsonV1Error {
     pub code: String,
@@ -321,6 +438,41 @@ pub enum JsonV1Success {
         schema_version: u32,
         result: SuccessResult,
         data: DoctorData,
+    },
+    #[serde(rename = "knowledge.write")]
+    KnowledgeWrite {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: SuccessResult,
+        data: KnowledgeWriteData,
+    },
+    #[serde(rename = "knowledge.review")]
+    KnowledgeReview {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: SuccessResult,
+        data: KnowledgeReviewData,
+    },
+    #[serde(rename = "knowledge.search")]
+    KnowledgeSearch {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: SuccessResult,
+        data: KnowledgeSearchData,
+    },
+    #[serde(rename = "knowledge.show")]
+    KnowledgeShow {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: SuccessResult,
+        data: KnowledgeShowData,
+    },
+    #[serde(rename = "knowledge.list")]
+    KnowledgeList {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: SuccessResult,
+        data: KnowledgeListData,
     },
 }
 

@@ -18,9 +18,16 @@ use mko_core::{
     hooks::install_hooks,
     inbox::{InboxScanRequest, InboxScanResult, scan_inbox},
     json_v1::{
-        AddData, AddPayload, CheckData, DiagnosticData, DoctorCheckData, DoctorData, DraftOutcome,
-        JsonV1Command, JsonV1Success, NextAction, PrepareData, Recovery, SuccessResult, UserState,
-        WriteDraftData,
+        AddData, AddPayload, CheckData, ConceptMatchData, DiagnosticData, DoctorCheckData,
+        DoctorData, DraftOutcome, JsonV1Command, JsonV1Success, KnowledgeConceptSummary,
+        KnowledgeListData, KnowledgePendingItemData, KnowledgeReviewData, KnowledgeReviewDecision,
+        KnowledgeReviewItemData, KnowledgeReviewStatusData, KnowledgeSearchData, KnowledgeShowData,
+        KnowledgeWriteData, KnowledgeWriteOutcome, NextAction, PrepareData, Recovery,
+        SuccessResult, UserState, WriteDraftData,
+    },
+    knowledge::{
+        ConceptKind, ConceptMatch, KnowledgeSearchQuery, WriteKnowledgeRequest, approve_knowledge,
+        list_unreviewed_knowledge, search_knowledge, write_knowledge_note,
     },
     model::AssetStatus,
     pdf::{ExtractionWorkerResponse, extract_pdf_pages_from_reader, worker_executable},
@@ -239,6 +246,10 @@ enum Command {
     Inbox(InboxArgs),
     Status(StatusArgs),
     Review(ReviewArgs),
+    Knowledge {
+        #[command(subcommand)]
+        command: KnowledgeCommand,
+    },
     Human {
         #[command(subcommand)]
         command: HumanCommand,
@@ -256,6 +267,14 @@ enum SourceCommand {
     Prepare(PrepareArgs),
     WriteDraft(WriteDraftArgs),
     RepairState(RepairStateArgs),
+}
+#[derive(Subcommand)]
+enum KnowledgeCommand {
+    Write(KnowledgeWriteArgs),
+    Review(KnowledgeReviewArgs),
+    Search(KnowledgeSearchArgs),
+    Show(KnowledgeShowArgs),
+    List(KnowledgeListArgs),
 }
 #[derive(Subcommand)]
 enum AssetCommand {
@@ -363,6 +382,95 @@ struct StatusArgs {
 struct ReviewArgs {
     #[arg(long)]
     repo: Option<PathBuf>,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ConceptKindArg {
+    Definition,
+    Formula,
+    Concept,
+    Result,
+    Theorem,
+}
+impl From<ConceptKindArg> for ConceptKind {
+    fn from(value: ConceptKindArg) -> Self {
+        match value {
+            ConceptKindArg::Definition => ConceptKind::Definition,
+            ConceptKindArg::Formula => ConceptKind::Formula,
+            ConceptKindArg::Concept => ConceptKind::Concept,
+            ConceptKindArg::Result => ConceptKind::Result,
+            ConceptKindArg::Theorem => ConceptKind::Theorem,
+        }
+    }
+}
+#[derive(Args)]
+struct KnowledgeWriteArgs {
+    #[arg(
+        long,
+        required_unless_present = "format",
+        required_if_eq("format", "human")
+    )]
+    repo: Option<PathBuf>,
+    #[arg(long)]
+    asset_id: String,
+    #[arg(long)]
+    response: PathBuf,
+    #[arg(long)]
+    replace: bool,
+    #[arg(long, value_enum)]
+    format: Option<OutputFormat>,
+}
+#[derive(Args)]
+struct KnowledgeReviewArgs {
+    #[arg(
+        long,
+        required_unless_present = "format",
+        required_if_eq("format", "human")
+    )]
+    repo: Option<PathBuf>,
+    #[arg(long)]
+    asset_id: Option<String>,
+    #[arg(long, value_enum)]
+    format: Option<OutputFormat>,
+}
+#[derive(Args)]
+struct KnowledgeSearchArgs {
+    #[arg(
+        long,
+        required_unless_present = "format",
+        required_if_eq("format", "human")
+    )]
+    repo: Option<PathBuf>,
+    term: String,
+    #[arg(long, value_enum)]
+    kind: Option<ConceptKindArg>,
+    #[arg(long)]
+    tag: Option<String>,
+    #[arg(long, value_enum)]
+    format: Option<OutputFormat>,
+}
+#[derive(Args)]
+struct KnowledgeShowArgs {
+    #[arg(
+        long,
+        required_unless_present = "format",
+        required_if_eq("format", "human")
+    )]
+    repo: Option<PathBuf>,
+    #[arg(long)]
+    asset_id: String,
+    #[arg(long, value_enum)]
+    format: Option<OutputFormat>,
+}
+#[derive(Args)]
+struct KnowledgeListArgs {
+    #[arg(
+        long,
+        required_unless_present = "format",
+        required_if_eq("format", "human")
+    )]
+    repo: Option<PathBuf>,
+    #[arg(long, value_enum)]
+    format: Option<OutputFormat>,
 }
 #[derive(Args)]
 struct ApproveSourceArgs {
@@ -514,6 +622,21 @@ fn run(cli: Cli) -> Result<Exit, MkoError> {
         Command::Inbox(arguments) => inbox(arguments).map(|_| Exit::Success),
         Command::Status(arguments) => status(arguments).map(|_| Exit::Success),
         Command::Review(arguments) => review(arguments).map(|_| Exit::Success),
+        Command::Knowledge {
+            command: KnowledgeCommand::Write(arguments),
+        } => knowledge_write(arguments).map(|_| Exit::Success),
+        Command::Knowledge {
+            command: KnowledgeCommand::Review(arguments),
+        } => knowledge_review(arguments).map(|_| Exit::Success),
+        Command::Knowledge {
+            command: KnowledgeCommand::Search(arguments),
+        } => knowledge_search(arguments).map(|_| Exit::Success),
+        Command::Knowledge {
+            command: KnowledgeCommand::Show(arguments),
+        } => knowledge_show(arguments).map(|_| Exit::Success),
+        Command::Knowledge {
+            command: KnowledgeCommand::List(arguments),
+        } => knowledge_list(arguments).map(|_| Exit::Success),
         Command::Source {
             command: SourceCommand::Prepare(arguments),
         } => prepare(arguments).map(|_| Exit::Success),
@@ -827,6 +950,309 @@ fn review(arguments: ReviewArgs) -> Result<(), MkoError> {
         }
     }
     Ok(())
+}
+
+fn knowledge_write(arguments: KnowledgeWriteArgs) -> Result<(), MkoError> {
+    let json_v1 = format_is_json_v1(arguments.format);
+    let repository = if json_v1 {
+        resolve_context(arguments.repo.clone())?.repository_root
+    } else {
+        arguments.repo.clone().unwrap()
+    };
+    let response = std::fs::read(&arguments.response).map_err(|error| {
+        MkoError::new(
+            "knowledge_response_unreadable",
+            format!("cannot read {}: {error}", arguments.response.display()),
+        )
+    })?;
+    let result = write_knowledge_note(
+        WriteKnowledgeRequest::new(&repository, &arguments.asset_id, response)
+            .with_replace(arguments.replace),
+    )?;
+    if json_v1 {
+        emit_json_v1(JsonV1Success::KnowledgeWrite {
+            schema_version: 1,
+            result: SuccessResult::Ok,
+            data: KnowledgeWriteData {
+                write_outcome: knowledge_write_outcome(&result.result)?,
+                asset_id: arguments.asset_id,
+                knowledge_id: result.knowledge_id,
+                knowledge_path: result.knowledge_path,
+                content_revision: result.content_revision,
+            },
+        })
+    } else {
+        println!(
+            "{} {} {} {}",
+            result.result, arguments.asset_id, result.knowledge_path, result.content_revision
+        );
+        Ok(())
+    }
+}
+
+fn knowledge_write_outcome(result: &str) -> Result<KnowledgeWriteOutcome, MkoError> {
+    match result {
+        "created" => Ok(KnowledgeWriteOutcome::Created),
+        "existing" => Ok(KnowledgeWriteOutcome::Existing),
+        "replaced" => Ok(KnowledgeWriteOutcome::Replaced),
+        _ => Err(MkoError::new(
+            "knowledge_write_result_invalid",
+            "knowledge write returned an unknown result",
+        )),
+    }
+}
+
+fn knowledge_search(arguments: KnowledgeSearchArgs) -> Result<(), MkoError> {
+    let json_v1 = format_is_json_v1(arguments.format);
+    let repository = if json_v1 {
+        resolve_context(arguments.repo.clone())?.repository_root
+    } else {
+        arguments.repo.clone().unwrap()
+    };
+    let query = KnowledgeSearchQuery {
+        term: arguments.term.clone(),
+        kind: arguments.kind.map(Into::into),
+        tag: arguments.tag.clone(),
+    };
+    let matches = search_knowledge(&repository, &query)?;
+    if json_v1 {
+        emit_json_v1(JsonV1Success::KnowledgeSearch {
+            schema_version: 1,
+            result: SuccessResult::Ok,
+            data: KnowledgeSearchData {
+                matches: matches.iter().map(concept_match_data).collect(),
+            },
+        })
+    } else {
+        for concept in &matches {
+            println!(
+                "{} {} {} {}",
+                concept.asset_id,
+                concept.title,
+                concept.name,
+                concept_kind_label(&concept.kind)
+            );
+        }
+        Ok(())
+    }
+}
+
+fn knowledge_show(arguments: KnowledgeShowArgs) -> Result<(), MkoError> {
+    let json_v1 = format_is_json_v1(arguments.format);
+    let repository = if json_v1 {
+        resolve_context(arguments.repo.clone())?.repository_root
+    } else {
+        arguments.repo.clone().unwrap()
+    };
+    let pending = list_unreviewed_knowledge(&repository)?;
+    let unreviewed = pending
+        .into_iter()
+        .find(|item| item.asset_id == arguments.asset_id);
+    let all_matches = search_knowledge(
+        &repository,
+        &KnowledgeSearchQuery {
+            term: String::new(),
+            kind: None,
+            tag: None,
+        },
+    )?;
+    let concept_matches = all_matches
+        .into_iter()
+        .filter(|item| item.asset_id == arguments.asset_id)
+        .collect::<Vec<_>>();
+    if unreviewed.is_none() && concept_matches.is_empty() {
+        return Err(MkoError::new(
+            "knowledge_not_found",
+            "no knowledge note was found for that asset",
+        ));
+    }
+    let title = unreviewed
+        .as_ref()
+        .map(|item| item.title.clone())
+        .or_else(|| concept_matches.first().map(|item| item.title.clone()))
+        .unwrap_or_default();
+    let knowledge_path = unreviewed
+        .as_ref()
+        .map(|item| item.knowledge_path.clone())
+        .or_else(|| {
+            concept_matches
+                .first()
+                .map(|item| item.knowledge_path.clone())
+        })
+        .unwrap_or_default();
+    let review_status = if unreviewed.is_some() {
+        KnowledgeReviewStatusData::Unreviewed
+    } else {
+        KnowledgeReviewStatusData::Reviewed
+    };
+    if json_v1 {
+        emit_json_v1(JsonV1Success::KnowledgeShow {
+            schema_version: 1,
+            result: SuccessResult::Ok,
+            data: KnowledgeShowData {
+                asset_id: arguments.asset_id,
+                title,
+                knowledge_path,
+                review_status,
+                knowledge_id: unreviewed.as_ref().map(|item| item.knowledge_id.clone()),
+                content_revision: unreviewed
+                    .as_ref()
+                    .map(|item| item.content_revision.clone()),
+                concepts: concept_matches
+                    .iter()
+                    .map(|concept| KnowledgeConceptSummary {
+                        name: concept.name.clone(),
+                        kind: concept.kind.clone(),
+                        locator: concept.locator.clone(),
+                    })
+                    .collect(),
+            },
+        })
+    } else {
+        println!("{} {} {}", arguments.asset_id, title, knowledge_path);
+        for concept in &concept_matches {
+            println!("- {} ({})", concept.name, concept_kind_label(&concept.kind));
+        }
+        Ok(())
+    }
+}
+
+fn knowledge_list(arguments: KnowledgeListArgs) -> Result<(), MkoError> {
+    let json_v1 = format_is_json_v1(arguments.format);
+    let repository = if json_v1 {
+        resolve_context(arguments.repo.clone())?.repository_root
+    } else {
+        arguments.repo.clone().unwrap()
+    };
+    let pending = list_unreviewed_knowledge(&repository)?;
+    if json_v1 {
+        emit_json_v1(JsonV1Success::KnowledgeList {
+            schema_version: 1,
+            result: SuccessResult::Ok,
+            data: KnowledgeListData {
+                items: pending
+                    .into_iter()
+                    .map(|item| KnowledgePendingItemData {
+                        knowledge_id: item.knowledge_id,
+                        asset_id: item.asset_id,
+                        title: item.title,
+                        knowledge_path: item.knowledge_path,
+                        content_revision: item.content_revision,
+                    })
+                    .collect(),
+            },
+        })
+    } else {
+        for item in &pending {
+            println!(
+                "{} {} {} {}",
+                item.asset_id, item.title, item.knowledge_path, item.content_revision
+            );
+        }
+        Ok(())
+    }
+}
+
+fn knowledge_review(arguments: KnowledgeReviewArgs) -> Result<(), MkoError> {
+    let json_v1 = format_is_json_v1(arguments.format);
+    let repository = if json_v1 {
+        resolve_context(arguments.repo.clone())?.repository_root
+    } else {
+        arguments.repo.clone().unwrap()
+    };
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(MkoError::new(
+            "human_confirmation_required",
+            "knowledge review requires an interactive terminal",
+        ));
+    }
+    let pending = list_unreviewed_knowledge(&repository)?;
+    let selected = match &arguments.asset_id {
+        Some(asset_id) => pending
+            .into_iter()
+            .filter(|item| &item.asset_id == asset_id)
+            .collect::<Vec<_>>(),
+        None => pending,
+    };
+    if selected.is_empty() {
+        return Err(MkoError::new(
+            "knowledge_not_found",
+            "no unreviewed knowledge note is available for review",
+        ));
+    }
+    let mut items = Vec::new();
+    for note in selected {
+        let text = std::fs::read_to_string(repository.join(&note.knowledge_path))
+            .map_err(|error| MkoError::new("knowledge_unreadable", error.to_string()))?;
+        println!("{text}");
+        print!("{} · {} — approve/defer: ", note.title, note.asset_id);
+        std::io::stdout()
+            .flush()
+            .map_err(|error| MkoError::new("terminal_write_failed", error.to_string()))?;
+        let mut choice = String::new();
+        std::io::stdin()
+            .read_line(&mut choice)
+            .map_err(|error| MkoError::new("terminal_read_failed", error.to_string()))?;
+        let choice = choice.trim().to_lowercase();
+        let decision = if choice == "approve" || choice == "y" || choice == "yes" {
+            approve_knowledge(&repository, &note.knowledge_id, &note.content_revision)?;
+            KnowledgeReviewDecision::Approved
+        } else {
+            KnowledgeReviewDecision::Deferred
+        };
+        if json_v1 {
+            items.push(KnowledgeReviewItemData {
+                knowledge_id: note.knowledge_id,
+                asset_id: note.asset_id,
+                title: note.title,
+                decision,
+            });
+        } else {
+            println!(
+                "{} {} {}",
+                match decision {
+                    KnowledgeReviewDecision::Approved => "approved",
+                    KnowledgeReviewDecision::Deferred => "deferred",
+                },
+                note.knowledge_id,
+                note.asset_id,
+            );
+        }
+    }
+    if json_v1 {
+        let remaining = list_unreviewed_knowledge(&repository)?.len() as u64;
+        emit_json_v1(JsonV1Success::KnowledgeReview {
+            schema_version: 1,
+            result: SuccessResult::Ok,
+            data: KnowledgeReviewData {
+                items,
+                remaining_unreviewed: remaining,
+            },
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn concept_match_data(concept: &ConceptMatch) -> ConceptMatchData {
+    ConceptMatchData {
+        asset_id: concept.asset_id.clone(),
+        title: concept.title.clone(),
+        name: concept.name.clone(),
+        kind: concept.kind.clone(),
+        locator: concept.locator.clone(),
+        knowledge_path: concept.knowledge_path.clone(),
+    }
+}
+
+fn concept_kind_label(kind: &ConceptKind) -> &'static str {
+    match kind {
+        ConceptKind::Definition => "definition",
+        ConceptKind::Formula => "formula",
+        ConceptKind::Concept => "concept",
+        ConceptKind::Result => "result",
+        ConceptKind::Theorem => "theorem",
+    }
 }
 
 fn resolve_catalog_context(
@@ -1316,6 +1742,41 @@ fn json_v1_command(cli: &Cli) -> Option<JsonV1Command> {
                     ..
                 }),
         } => Some(JsonV1Command::SourceWriteDraft),
+        Command::Knowledge {
+            command:
+                KnowledgeCommand::Write(KnowledgeWriteArgs {
+                    format: Some(OutputFormat::JsonV1),
+                    ..
+                }),
+        } => Some(JsonV1Command::KnowledgeWrite),
+        Command::Knowledge {
+            command:
+                KnowledgeCommand::Review(KnowledgeReviewArgs {
+                    format: Some(OutputFormat::JsonV1),
+                    ..
+                }),
+        } => Some(JsonV1Command::KnowledgeReview),
+        Command::Knowledge {
+            command:
+                KnowledgeCommand::Search(KnowledgeSearchArgs {
+                    format: Some(OutputFormat::JsonV1),
+                    ..
+                }),
+        } => Some(JsonV1Command::KnowledgeSearch),
+        Command::Knowledge {
+            command:
+                KnowledgeCommand::Show(KnowledgeShowArgs {
+                    format: Some(OutputFormat::JsonV1),
+                    ..
+                }),
+        } => Some(JsonV1Command::KnowledgeShow),
+        Command::Knowledge {
+            command:
+                KnowledgeCommand::List(KnowledgeListArgs {
+                    format: Some(OutputFormat::JsonV1),
+                    ..
+                }),
+        } => Some(JsonV1Command::KnowledgeList),
         _ => None,
     }
 }
@@ -1340,6 +1801,11 @@ fn json_v1_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option
         ("status", _) => Some(JsonV1Command::Status),
         ("source", Some("prepare")) => Some(JsonV1Command::SourcePrepare),
         ("source", Some("write-draft")) => Some(JsonV1Command::SourceWriteDraft),
+        ("knowledge", Some("write")) => Some(JsonV1Command::KnowledgeWrite),
+        ("knowledge", Some("review")) => Some(JsonV1Command::KnowledgeReview),
+        ("knowledge", Some("search")) => Some(JsonV1Command::KnowledgeSearch),
+        ("knowledge", Some("show")) => Some(JsonV1Command::KnowledgeShow),
+        ("knowledge", Some("list")) => Some(JsonV1Command::KnowledgeList),
         _ => None,
     }
 }
@@ -1354,7 +1820,7 @@ fn legacy_json_requested_from_invalid_arguments(args: &[std::ffi::OsString]) -> 
     // `--json`, so a parse failure there is an ordinary usage error, not legacy JSON output.
     !matches!(
         args.get(1).and_then(|argument| argument.to_str()),
-        Some("setup" | "add" | "doctor" | "inbox" | "status" | "review")
+        Some("setup" | "add" | "doctor" | "inbox" | "status" | "review" | "knowledge")
     )
 }
 

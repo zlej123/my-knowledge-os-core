@@ -91,6 +91,22 @@ fn json_v1_failure_message(command: &JsonV1Command, code: &str) -> &'static str 
             "repository_not_configured" => "No default repository is configured.",
             _ => "The repository status could not be inspected.",
         },
+        JsonV1Command::KnowledgeWrite => match code {
+            "asset_not_found" => "The asset was not found.",
+            "replace_required" => "Regenerating this knowledge note requires --replace.",
+            _ => "The knowledge note could not be written.",
+        },
+        JsonV1Command::KnowledgeReview => match code {
+            "human_confirmation_required" => "Knowledge review requires an interactive terminal.",
+            "knowledge_not_found" => "No unreviewed knowledge note is available for review.",
+            _ => "The knowledge note could not be reviewed.",
+        },
+        JsonV1Command::KnowledgeSearch => "The knowledge base could not be searched.",
+        JsonV1Command::KnowledgeShow => match code {
+            "knowledge_not_found" => "No knowledge note was found for that asset.",
+            _ => "The knowledge note could not be shown.",
+        },
+        JsonV1Command::KnowledgeList => "The knowledge notes could not be listed.",
     }
 }
 

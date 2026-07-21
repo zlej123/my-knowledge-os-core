@@ -1,0 +1,1 @@
+{"schema_version":1,"command":"knowledge.write","result":"error","error":{"code":"asset_not_found","message":"The asset was not found.","recovery":null}}
