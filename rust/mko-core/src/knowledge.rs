@@ -1,9 +1,14 @@
 use std::{
     collections::HashSet,
-    fs,
+    io::{Read, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
+use cap_std::{
+    ambient_authority,
+    fs::{Dir, OpenOptions, OpenOptionsExt},
+};
 use chrono::{DateTime, Utc};
 use chrono_tz::Asia::Seoul;
 use serde::{Deserialize, Serialize};
@@ -11,11 +16,12 @@ use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
-    atomic::{AtomicWriteResult, write_new, write_replace},
+    atomic::{AtomicWriteResult, write_replace_capability_validated_at_commit},
     clock::{Clock, SystemClock},
     error::MkoError,
     front_matter::{parse_markdown, render_markdown},
     path_policy::canonical_directory,
+    prepare::{PreparedSourceBundle, load_prepared_source_bundle},
     registry::read_asset,
 };
 
@@ -24,6 +30,7 @@ pub const MAX_KNOWLEDGE_STRING_BYTES: usize = 64 * 1024;
 const MAX_KNOWLEDGE_SLUG_BYTES: usize = 96;
 const MAX_KNOWLEDGE_ENTRIES: usize = 1024;
 const MAX_KNOWLEDGE_SCAN_BYTES: u64 = 8 * 1024 * 1024;
+static NEXT_KNOWLEDGE_TEMP: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -175,6 +182,7 @@ fn schema_error(message: impl Into<String>) -> MkoError {
 #[derive(Clone, Debug)]
 pub struct WriteKnowledgeRequest {
     repository_root: PathBuf,
+    bundle_path: PathBuf,
     asset_id: String,
     response: Vec<u8>,
     replace: bool,
@@ -183,11 +191,13 @@ pub struct WriteKnowledgeRequest {
 impl WriteKnowledgeRequest {
     pub fn new(
         repository_root: impl AsRef<Path>,
+        bundle_path: impl AsRef<Path>,
         asset_id: impl Into<String>,
         response: Vec<u8>,
     ) -> Self {
         Self {
             repository_root: repository_root.as_ref().to_path_buf(),
+            bundle_path: bundle_path.as_ref().to_path_buf(),
             asset_id: asset_id.into(),
             response,
             replace: false,
@@ -212,6 +222,25 @@ struct KnowledgeDocument {
     record: KnowledgeRecord,
     body: String,
     path: PathBuf,
+    filename: String,
+    snapshot: Vec<u8>,
+}
+
+struct KnowledgeDirectory {
+    path: PathBuf,
+    directory: Dir,
+}
+
+pub trait KnowledgeMutationObserver {
+    fn before_publication(&mut self) -> Result<(), MkoError>;
+}
+
+struct NoopKnowledgeMutationObserver;
+
+impl KnowledgeMutationObserver for NoopKnowledgeMutationObserver {
+    fn before_publication(&mut self) -> Result<(), MkoError> {
+        Ok(())
+    }
 }
 
 pub fn write_knowledge_note(
@@ -224,11 +253,21 @@ pub fn write_knowledge_note_with_clock(
     request: WriteKnowledgeRequest,
     clock: &dyn Clock,
 ) -> Result<WriteKnowledgeResult, MkoError> {
+    write_knowledge_note_with_clock_and_observer(request, clock, &mut NoopKnowledgeMutationObserver)
+}
+
+pub fn write_knowledge_note_with_clock_and_observer(
+    request: WriteKnowledgeRequest,
+    _clock: &dyn Clock,
+    observer: &mut dyn KnowledgeMutationObserver,
+) -> Result<WriteKnowledgeResult, MkoError> {
     let repository_root = canonical_directory(&request.repository_root, "repository_root_invalid")?;
     let mut response = parse_knowledge_response(&request.response)?;
     normalize_and_validate_knowledge(&mut response)?;
     let asset = read_asset(&repository_root, &request.asset_id)
         .map_err(|error| MkoError::new("asset_not_found", error.message()))?;
+    let bundle = load_prepared_source_bundle(&request.repository_root, &request.bundle_path)?;
+    validate_knowledge_bundle(&bundle, &asset, &request.asset_id)?;
 
     let hash = asset.id.strip_prefix("personal-asset-").ok_or_else(|| {
         MkoError::new(
@@ -238,7 +277,12 @@ pub fn write_knowledge_note_with_clock(
     })?;
     let expected_id = format!("personal-knowledge-{hash}");
 
-    let existing = find_knowledge(&repository_root, &expected_id)?;
+    let knowledge = existing_knowledge_directory(&repository_root)?;
+    let existing = knowledge
+        .as_ref()
+        .map(|knowledge| find_knowledge_in_directory(knowledge, &expected_id))
+        .transpose()?
+        .flatten();
     let approved_revision = existing
         .as_ref()
         .and_then(|document| document.record.approved_revision.clone());
@@ -267,6 +311,7 @@ pub fn write_knowledge_note_with_clock(
     record.content_revision = calculate_knowledge_revision(&record, &body)?;
 
     if let Some(existing) = existing {
+        validate_document_revision(&existing, &existing.record.content_revision)?;
         if record.content_revision == existing.record.content_revision {
             return Ok(WriteKnowledgeResult {
                 result: "existing".into(),
@@ -282,7 +327,23 @@ pub fn write_knowledge_note_with_clock(
             ));
         }
         let document = render_markdown(&record, &body)?;
-        write_replace(&existing.path, document.as_bytes())?;
+        let knowledge = knowledge.as_ref().ok_or_else(knowledge_changed_error)?;
+        observer.before_publication()?;
+        write_replace_capability_validated_at_commit(
+            &knowledge.directory,
+            Path::new(&existing.filename),
+            document.as_bytes(),
+            || Ok(()),
+            || {
+                validate_expected_knowledge_snapshot(
+                    &knowledge.directory,
+                    Path::new(&existing.filename),
+                    &existing.snapshot,
+                    &existing.record.content_revision,
+                )
+            },
+        )
+        .map_err(map_knowledge_publication_error)?;
         return Ok(WriteKnowledgeResult {
             result: "replaced".into(),
             knowledge_id: record.id,
@@ -292,19 +353,48 @@ pub fn write_knowledge_note_with_clock(
     }
 
     let knowledge_dir = knowledge_directory(&repository_root)?;
-    let filename = knowledge_filename(clock.now_utc(), &asset.title, &expected_id)?;
-    let destination = knowledge_dir.join(&filename);
+    let filename = knowledge_filename(asset.created_at, &asset.title, &expected_id)?;
     let document = render_markdown(&record, &body)?;
-    match write_new(&destination, document.as_bytes(), |path| {
-        validate_existing_knowledge(path, &record)
-    })? {
-        AtomicWriteResult::Created | AtomicWriteResult::Existing => Ok(WriteKnowledgeResult {
-            result: "created".into(),
-            knowledge_id: record.id,
-            knowledge_path: format!("knowledge/{filename}"),
-            content_revision: record.content_revision,
-        }),
+    match write_new_knowledge_capability(
+        &knowledge_dir.directory,
+        Path::new(&filename),
+        document.as_bytes(),
+        &record,
+        &body,
+    )? {
+        result @ (AtomicWriteResult::Created | AtomicWriteResult::Existing) => {
+            Ok(WriteKnowledgeResult {
+                result: match result {
+                    AtomicWriteResult::Created => "created",
+                    AtomicWriteResult::Existing => "existing",
+                }
+                .into(),
+                knowledge_id: record.id,
+                knowledge_path: format!("knowledge/{filename}"),
+                content_revision: record.content_revision,
+            })
+        }
     }
+}
+
+fn validate_knowledge_bundle(
+    bundle: &PreparedSourceBundle,
+    asset: &crate::model::AssetRecord,
+    requested_asset_id: &str,
+) -> Result<(), MkoError> {
+    if bundle.asset_id != requested_asset_id
+        || bundle.asset_id != asset.id
+        || bundle.source_id != asset.id.replacen("asset", "source", 1)
+        || bundle.fingerprint != asset.fingerprint
+        || bundle.title_hint != asset.title
+        || bundle.logical_path != asset.provider.locator
+    {
+        return Err(MkoError::new(
+            "bundle_invalid",
+            "prepared Source bundle does not match the requested Asset Registry record",
+        ));
+    }
+    Ok(())
 }
 
 fn assign_concept_ids(inputs: &[ConceptInput]) -> Vec<Concept> {
@@ -536,27 +626,50 @@ fn knowledge_filename(
     Ok(format!("{date}-{slug}-{}.md", &hash[..12]))
 }
 
-fn knowledge_directory(repository_root: &Path) -> Result<PathBuf, MkoError> {
-    let path = repository_root.join("knowledge");
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_dir() => {}
-        Ok(_) => return Err(knowledge_path_error()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir(&path).map_err(|_| knowledge_path_error())?;
-        }
+fn knowledge_directory(repository_root: &Path) -> Result<KnowledgeDirectory, MkoError> {
+    if let Some(knowledge) = existing_knowledge_directory(repository_root)? {
+        return Ok(knowledge);
+    }
+    let repository = Dir::open_ambient_dir(repository_root, ambient_authority())
+        .map_err(|_| knowledge_path_error())?;
+    match repository.create_dir("knowledge") {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(_) => return Err(knowledge_path_error()),
     }
-    let canonical = fs::canonicalize(&path).map_err(|_| knowledge_path_error())?;
-    if !canonical.starts_with(repository_root) {
-        return Err(knowledge_path_error());
-    }
-    reject_knowledge_collisions(&canonical)?;
-    Ok(canonical)
+    open_knowledge_directory(repository_root, &repository)?.ok_or_else(knowledge_path_error)
 }
 
-fn reject_knowledge_collisions(knowledge: &Path) -> Result<(), MkoError> {
+fn existing_knowledge_directory(
+    repository_root: &Path,
+) -> Result<Option<KnowledgeDirectory>, MkoError> {
+    let repository = Dir::open_ambient_dir(repository_root, ambient_authority())
+        .map_err(|_| knowledge_path_error())?;
+    open_knowledge_directory(repository_root, &repository)
+}
+
+fn open_knowledge_directory(
+    repository_root: &Path,
+    repository: &Dir,
+) -> Result<Option<KnowledgeDirectory>, MkoError> {
+    match repository.symlink_metadata("knowledge") {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Ok(_) | Err(_) => return Err(knowledge_path_error()),
+    }
+    let directory = repository
+        .open_dir("knowledge")
+        .map_err(|_| knowledge_path_error())?;
+    reject_knowledge_collisions(&directory)?;
+    Ok(Some(KnowledgeDirectory {
+        path: repository_root.join("knowledge"),
+        directory,
+    }))
+}
+
+fn reject_knowledge_collisions(knowledge: &Dir) -> Result<(), MkoError> {
     let mut names = HashSet::new();
-    for entry in fs::read_dir(knowledge).map_err(|_| knowledge_path_error())? {
+    for entry in knowledge.entries().map_err(|_| knowledge_path_error())? {
         let entry = entry.map_err(|_| knowledge_path_error())?;
         let name = entry
             .file_name()
@@ -575,11 +688,11 @@ fn reject_knowledge_collisions(knowledge: &Path) -> Result<(), MkoError> {
     Ok(())
 }
 
-fn find_knowledge(
-    repository_root: &Path,
+fn find_knowledge_in_directory(
+    knowledge: &KnowledgeDirectory,
     knowledge_id: &str,
 ) -> Result<Option<KnowledgeDocument>, MkoError> {
-    let mut matches = read_knowledge_documents(repository_root)?
+    let mut matches = read_knowledge_documents_from_directory(knowledge)?
         .into_iter()
         .filter(|document| document.record.id == knowledge_id);
     let found = matches.next();
@@ -593,13 +706,18 @@ fn find_knowledge(
 }
 
 fn read_knowledge_documents(repository_root: &Path) -> Result<Vec<KnowledgeDocument>, MkoError> {
-    let path = repository_root.join("knowledge");
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_dir() => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Ok(_) | Err(_) => return Err(knowledge_path_error()),
-    }
-    let mut filenames = fs::read_dir(&path)
+    let Some(knowledge) = existing_knowledge_directory(repository_root)? else {
+        return Ok(Vec::new());
+    };
+    read_knowledge_documents_from_directory(&knowledge)
+}
+
+fn read_knowledge_documents_from_directory(
+    knowledge: &KnowledgeDirectory,
+) -> Result<Vec<KnowledgeDocument>, MkoError> {
+    let mut filenames = knowledge
+        .directory
+        .entries()
         .map_err(|_| knowledge_scan_error())?
         .take(MAX_KNOWLEDGE_ENTRIES + 1)
         .map(|entry| {
@@ -618,30 +736,91 @@ fn read_knowledge_documents(repository_root: &Path) -> Result<Vec<KnowledgeDocum
     let mut total = 0u64;
     let mut documents = Vec::new();
     for filename in filenames {
-        let entry_path = path.join(&filename);
-        if entry_path.extension().and_then(|value| value.to_str()) != Some("md") {
+        if Path::new(&filename)
+            .extension()
+            .and_then(|value| value.to_str())
+            != Some("md")
+        {
             continue;
         }
-        let metadata = fs::symlink_metadata(&entry_path).map_err(|_| knowledge_scan_error())?;
-        if !metadata.file_type().is_file() {
-            return Err(knowledge_path_error());
-        }
+        let snapshot = read_knowledge_snapshot(&knowledge.directory, Path::new(&filename))?;
         total = total
-            .checked_add(metadata.len())
+            .checked_add(snapshot.len() as u64)
             .filter(|total| *total <= MAX_KNOWLEDGE_SCAN_BYTES)
             .ok_or_else(knowledge_scan_error)?;
-        let input = fs::read_to_string(&entry_path)
+        let input = std::str::from_utf8(&snapshot)
             .map_err(|error| MkoError::new("knowledge_unreadable", error.to_string()))?;
-        let parsed = parse_markdown::<KnowledgeRecord>(&input)
+        let parsed = parse_markdown::<KnowledgeRecord>(input)
             .map_err(|error| existing_knowledge_error(error.message()))?;
         documents.push(KnowledgeDocument {
             record: parsed.metadata,
             body: parsed.body,
-            path: entry_path,
+            path: knowledge.path.join(&filename),
+            filename: filename.into_string().map_err(|_| knowledge_scan_error())?,
+            snapshot,
         });
     }
     Ok(documents)
 }
+
+fn read_knowledge_snapshot(directory: &Dir, filename: &Path) -> Result<Vec<u8>, MkoError> {
+    let path_metadata = directory
+        .symlink_metadata(filename)
+        .map_err(|_| knowledge_scan_error())?;
+    if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
+        return Err(knowledge_path_error());
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_nofollow(&mut options, false);
+    let mut file = directory
+        .open_with(filename, &options)
+        .map_err(|error| MkoError::new("knowledge_unreadable", error.to_string()))?;
+    let metadata = file.metadata().map_err(|_| knowledge_scan_error())?;
+    if !metadata.is_file() || metadata.len() > MAX_KNOWLEDGE_SCAN_BYTES {
+        return Err(knowledge_scan_error());
+    }
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(MAX_KNOWLEDGE_SCAN_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| MkoError::new("knowledge_unreadable", error.to_string()))?;
+    if bytes.len() as u64 > MAX_KNOWLEDGE_SCAN_BYTES {
+        return Err(knowledge_scan_error());
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn configure_nofollow(options: &mut OpenOptions, directory: bool) {
+    const O_NOFOLLOW: i32 = 0x20_000;
+    const O_DIRECTORY: i32 = 0x10_000;
+    options.custom_flags(O_NOFOLLOW | if directory { O_DIRECTORY } else { 0 });
+}
+
+#[cfg(target_os = "macos")]
+fn configure_nofollow(options: &mut OpenOptions, directory: bool) {
+    const O_NOFOLLOW: i32 = 0x100;
+    const O_DIRECTORY: i32 = 0x10_0000;
+    options.custom_flags(O_NOFOLLOW | if directory { O_DIRECTORY } else { 0 });
+}
+
+#[cfg(windows)]
+fn configure_nofollow(options: &mut OpenOptions, directory: bool) {
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    options.custom_flags(
+        FILE_FLAG_OPEN_REPARSE_POINT
+            | if directory {
+                FILE_FLAG_BACKUP_SEMANTICS
+            } else {
+                0
+            },
+    );
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn configure_nofollow(_options: &mut OpenOptions, _directory: bool) {}
 
 fn knowledge_scan_error() -> MkoError {
     MkoError::new(
@@ -650,13 +829,81 @@ fn knowledge_scan_error() -> MkoError {
     )
 }
 
-fn validate_existing_knowledge(path: &Path, expected: &KnowledgeRecord) -> Result<(), MkoError> {
-    let input = fs::read_to_string(path)
+fn write_new_knowledge_capability(
+    directory: &Dir,
+    filename: &Path,
+    bytes: &[u8],
+    expected: &KnowledgeRecord,
+    expected_body: &str,
+) -> Result<AtomicWriteResult, MkoError> {
+    let filename = filename
+        .to_str()
+        .ok_or_else(|| MkoError::new("knowledge_write_failed", "invalid Knowledge filename"))?;
+    let temporary = format!(
+        ".{filename}.{}.{}.tmp",
+        std::process::id(),
+        NEXT_KNOWLEDGE_TEMP.fetch_add(1, Ordering::Relaxed)
+    );
+    let result = (|| {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut file = directory
+            .open_with(&temporary, &options)
+            .map_err(|error| MkoError::new("knowledge_write_failed", error.to_string()))?;
+        file.write_all(bytes)
+            .map_err(|error| MkoError::new("knowledge_write_failed", error.to_string()))?;
+        file.sync_all()
+            .map_err(|error| MkoError::new("knowledge_write_failed", error.to_string()))?;
+        drop(file);
+        match directory.hard_link(&temporary, directory, filename) {
+            Ok(()) => {
+                directory
+                    .remove_file(&temporary)
+                    .map_err(|error| MkoError::new("knowledge_write_failed", error.to_string()))?;
+                sync_knowledge_directory(directory)?;
+                Ok(AtomicWriteResult::Created)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                validate_existing_knowledge(
+                    directory,
+                    Path::new(filename),
+                    expected,
+                    expected_body,
+                )?;
+                Ok(AtomicWriteResult::Existing)
+            }
+            Err(error) => Err(MkoError::new("knowledge_write_failed", error.to_string())),
+        }
+    })();
+    if result.is_err() || matches!(&result, Ok(AtomicWriteResult::Existing)) {
+        let _ = directory.remove_file(&temporary);
+    }
+    result
+}
+
+fn sync_knowledge_directory(directory: &Dir) -> Result<(), MkoError> {
+    directory
+        .try_clone()
+        .and_then(|directory| directory.into_std_file().sync_all())
+        .map_err(|error| MkoError::new("knowledge_write_failed", error.to_string()))
+}
+
+fn validate_existing_knowledge(
+    directory: &Dir,
+    filename: &Path,
+    expected: &KnowledgeRecord,
+    expected_body: &str,
+) -> Result<(), MkoError> {
+    let bytes = read_knowledge_snapshot(directory, filename)?;
+    let input = std::str::from_utf8(&bytes)
         .map_err(|error| MkoError::new("knowledge_unreadable", error.to_string()))?;
-    let existing = parse_markdown::<KnowledgeRecord>(&input)
+    let existing = parse_markdown::<KnowledgeRecord>(input)
         .map_err(|error| existing_knowledge_error(error.message()))?;
     if existing.metadata.id != expected.id
         || existing.metadata.content_revision != expected.content_revision
+        || calculate_knowledge_revision(&existing.metadata, &existing.body)?
+            != expected.content_revision
+        || calculate_knowledge_revision(expected, expected_body)? != expected.content_revision
     {
         return Err(MkoError::new(
             "knowledge_conflict",
@@ -664,6 +911,56 @@ fn validate_existing_knowledge(path: &Path, expected: &KnowledgeRecord) -> Resul
         ));
     }
     Ok(())
+}
+
+fn validate_document_revision(
+    document: &KnowledgeDocument,
+    expected_revision: &str,
+) -> Result<(), MkoError> {
+    let actual = calculate_knowledge_revision(&document.record, &document.body)?;
+    if document.record.content_revision != actual || actual != expected_revision {
+        return Err(knowledge_changed_error());
+    }
+    Ok(())
+}
+
+fn validate_expected_knowledge_snapshot(
+    directory: &Dir,
+    filename: &Path,
+    expected_bytes: &[u8],
+    expected_revision: &str,
+) -> Result<(), MkoError> {
+    let current =
+        read_knowledge_snapshot(directory, filename).map_err(|_| knowledge_changed_error())?;
+    if current != expected_bytes {
+        return Err(knowledge_changed_error());
+    }
+    let input = std::str::from_utf8(&current).map_err(|_| knowledge_changed_error())?;
+    let parsed = parse_markdown::<KnowledgeRecord>(input).map_err(|_| knowledge_changed_error())?;
+    let actual = calculate_knowledge_revision(&parsed.metadata, &parsed.body)
+        .map_err(|_| knowledge_changed_error())?;
+    if parsed.metadata.content_revision != actual || actual != expected_revision {
+        return Err(knowledge_changed_error());
+    }
+    Ok(())
+}
+
+fn map_knowledge_publication_error(error: MkoError) -> MkoError {
+    if matches!(
+        error.code(),
+        "registry_destination_invalid" | "registry_not_found"
+    ) {
+        knowledge_changed_error()
+    } else {
+        error
+    }
+}
+
+fn knowledge_changed_error() -> MkoError {
+    MkoError::new(
+        "knowledge_revision_mismatch",
+        "knowledge note changed after selection; nothing was published",
+    )
 }
 
 fn repository_relative(repository_root: &Path, path: &Path) -> Result<String, MkoError> {
@@ -737,20 +1034,48 @@ pub fn approve_knowledge_with_clock(
     content_revision: &str,
     clock: &dyn Clock,
 ) -> Result<(), MkoError> {
+    approve_knowledge_with_clock_and_observer(
+        repository_root,
+        knowledge_id,
+        content_revision,
+        clock,
+        &mut NoopKnowledgeMutationObserver,
+    )
+}
+
+pub fn approve_knowledge_with_clock_and_observer(
+    repository_root: &Path,
+    knowledge_id: &str,
+    content_revision: &str,
+    clock: &dyn Clock,
+    observer: &mut dyn KnowledgeMutationObserver,
+) -> Result<(), MkoError> {
     let repository_root = canonical_directory(repository_root, "repository_root_invalid")?;
-    let mut document = find_knowledge(&repository_root, knowledge_id)?
+    let knowledge = existing_knowledge_directory(&repository_root)?
         .ok_or_else(|| MkoError::new("knowledge_not_found", "no knowledge note has this ID"))?;
-    if document.record.content_revision != content_revision {
-        return Err(MkoError::new(
-            "knowledge_revision_mismatch",
-            "knowledge note content_revision has changed since selection",
-        ));
-    }
+    let mut document = find_knowledge_in_directory(&knowledge, knowledge_id)?
+        .ok_or_else(|| MkoError::new("knowledge_not_found", "no knowledge note has this ID"))?;
+    validate_document_revision(&document, content_revision)?;
     document.record.review.status = ReviewState::Reviewed;
     document.record.review.reviewed_at = Some(clock.now_utc());
     document.record.approved_revision = Some(content_revision.to_owned());
     let rendered = render_markdown(&document.record, &document.body)?;
-    write_replace(&document.path, rendered.as_bytes())
+    observer.before_publication()?;
+    write_replace_capability_validated_at_commit(
+        &knowledge.directory,
+        Path::new(&document.filename),
+        rendered.as_bytes(),
+        || Ok(()),
+        || {
+            validate_expected_knowledge_snapshot(
+                &knowledge.directory,
+                Path::new(&document.filename),
+                &document.snapshot,
+                content_revision,
+            )
+        },
+    )
+    .map_err(map_knowledge_publication_error)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -863,7 +1188,11 @@ pub fn validate_knowledge_record(
 
     let review_valid = match record.review.status {
         ReviewState::Unreviewed => {
-            record.approved_revision.is_none() && record.review.reviewed_at.is_none()
+            record.review.reviewed_at.is_none()
+                && record
+                    .approved_revision
+                    .as_deref()
+                    .is_none_or(is_sha256_revision)
         }
         ReviewState::Reviewed => {
             record.approved_revision.as_deref() == Some(actual.as_str())
@@ -893,4 +1222,13 @@ pub fn validate_knowledge_record(
     }
 
     issues
+}
+
+fn is_sha256_revision(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hash| {
+        hash.len() == 64
+            && hash
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }

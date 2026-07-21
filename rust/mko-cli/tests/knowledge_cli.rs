@@ -5,6 +5,12 @@ use std::{
 };
 
 use assert_cmd::Command;
+use mko_core::{
+    pdf::{EXTRACTOR_NAME, EXTRACTOR_VERSION},
+    prepare::{PROCESSOR_VERSION, PROMPT_VERSION, PreparedSourceBundle, TRUST, VersionedComponent},
+    registry::read_asset,
+    version::KNOWLEDGE_CONTRACT_VERSION,
+};
 use serde_json::Value;
 
 static NEXT_ENV: AtomicU64 = AtomicU64::new(0);
@@ -32,6 +38,8 @@ fn knowledge_write_creates_an_unreviewed_note_and_emits_json_v1() {
             &env.repository.display().to_string(),
             "--asset-id",
             &asset_id,
+            "--bundle",
+            &env.bundle_path(&asset_id).display().to_string(),
             "--response",
             &response.display().to_string(),
             "--format",
@@ -131,6 +139,10 @@ fn knowledge_write_rejects_an_unknown_asset_with_a_path_free_golden() {
             &env.repository.display().to_string(),
             "--asset-id",
             "personal-asset-deadbeef",
+            "--bundle",
+            &env.bundle_path("personal-asset-deadbeef")
+                .display()
+                .to_string(),
             "--response",
             &response.display().to_string(),
             "--format",
@@ -148,6 +160,38 @@ fn knowledge_write_rejects_an_unknown_asset_with_a_path_free_golden() {
         include_bytes!("../../../tests/fixtures/json-v1/knowledge-asset-missing.json")
     );
     assert!(!String::from_utf8_lossy(&output).contains(&env.repository.display().to_string()));
+}
+
+#[test]
+#[allow(deprecated)]
+fn knowledge_write_requires_the_prepared_bundle_argument() {
+    let env = Env::new();
+    let asset_id = env.capture_asset("paper.pdf", b"%PDF-1.7\nfixture");
+    let response = env.write_response("response.json", VALID_RESPONSE);
+
+    let output = env
+        .command([
+            "knowledge",
+            "write",
+            "--repo",
+            &env.repository.display().to_string(),
+            "--asset-id",
+            &asset_id,
+            "--response",
+            &response.display().to_string(),
+            "--format",
+            "json-v1",
+        ])
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+
+    let value = one_json(&output);
+    assert_eq!(value["command"], "knowledge.write");
+    assert_eq!(value["result"], "error");
+    assert_eq!(value["error"]["code"], "usage");
 }
 
 #[test]
@@ -376,7 +420,39 @@ impl Env {
             .stdout
             .clone();
         let value = parse_json(&output);
-        value["asset_id"].as_str().unwrap().to_owned()
+        let asset_id = value["asset_id"].as_str().unwrap().to_owned();
+        self.publish_bundle(&asset_id);
+        asset_id
+    }
+
+    fn bundle_path(&self, asset_id: &str) -> PathBuf {
+        self.repository
+            .join(".knowledge-os/runtime/prepared")
+            .join(format!("{asset_id}.json"))
+    }
+
+    fn publish_bundle(&self, asset_id: &str) {
+        let asset = read_asset(&self.repository, asset_id).unwrap();
+        let bundle = PreparedSourceBundle {
+            schema_version: 1,
+            asset_id: asset.id.clone(),
+            source_id: asset.id.replacen("asset", "source", 1),
+            fingerprint: asset.fingerprint,
+            title_hint: asset.title,
+            logical_path: asset.provider.locator,
+            pages: vec!["Fixture page".into()],
+            trust: TRUST.into(),
+            extractor: VersionedComponent {
+                name: EXTRACTOR_NAME.into(),
+                version: EXTRACTOR_VERSION.into(),
+            },
+            core_version: KNOWLEDGE_CONTRACT_VERSION.into(),
+            processor_version: PROCESSOR_VERSION.into(),
+            prompt_version: PROMPT_VERSION.into(),
+        };
+        let path = self.bundle_path(asset_id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, serde_json::to_vec_pretty(&bundle).unwrap()).unwrap();
     }
 
     fn write_response(&self, name: &str, contents: &str) -> PathBuf {
@@ -398,6 +474,8 @@ impl Env {
             self.repository.display().to_string(),
             "--asset-id".into(),
             asset_id.into(),
+            "--bundle".into(),
+            self.bundle_path(asset_id).display().to_string(),
             "--response".into(),
             response.display().to_string(),
             "--format".into(),

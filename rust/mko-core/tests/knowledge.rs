@@ -1,14 +1,21 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{Arc, Barrier},
+    thread,
+};
 
 use chrono::{DateTime, Utc};
 use mko_core::{
     check::{CheckRequest, check_repository},
     clock::Clock,
     knowledge::{
-        ConceptKind, KnowledgeSearchQuery, WriteKnowledgeRequest, approve_knowledge,
-        list_unreviewed_knowledge, normalize_and_validate_knowledge, parse_knowledge_response,
-        search_knowledge, write_knowledge_note_with_clock,
+        ConceptKind, KnowledgeMutationObserver, KnowledgeSearchQuery, WriteKnowledgeRequest,
+        approve_knowledge, approve_knowledge_with_clock_and_observer, list_unreviewed_knowledge,
+        normalize_and_validate_knowledge, parse_knowledge_response, search_knowledge,
+        write_knowledge_note_with_clock, write_knowledge_note_with_clock_and_observer,
     },
+    prepare::{PrepareRequest, prepare_source_with_extractor},
     registry::{CaptureRequest, capture_asset},
 };
 use tempfile::TempDir;
@@ -30,6 +37,7 @@ struct KnowledgeFixture {
     provider: PathBuf,
     local_config: PathBuf,
     asset_id: String,
+    bundle_path: PathBuf,
     clock: FixedClock,
 }
 
@@ -42,6 +50,10 @@ impl KnowledgeFixture {
         &self.asset_id
     }
 
+    fn bundle_path(&self) -> &std::path::Path {
+        &self.bundle_path
+    }
+
     fn write(
         &self,
         asset_id: &str,
@@ -49,22 +61,46 @@ impl KnowledgeFixture {
         replace: bool,
     ) -> Result<mko_core::knowledge::WriteKnowledgeResult, mko_core::error::MkoError> {
         write_knowledge_note_with_clock(
-            WriteKnowledgeRequest::new(&self.repository, asset_id, response.to_vec())
-                .with_replace(replace),
+            WriteKnowledgeRequest::new(
+                &self.repository,
+                self.bundle_for(asset_id),
+                asset_id,
+                response.to_vec(),
+            )
+            .with_replace(replace),
             &self.clock,
         )
     }
 
-    fn second_asset(&self) -> String {
+    fn bundle_for(&self, asset_id: &str) -> PathBuf {
+        self.repository
+            .join(".knowledge-os/runtime/prepared")
+            .join(format!("{asset_id}.json"))
+    }
+
+    fn prepare_bundle(&self, asset_id: &str) -> PathBuf {
+        let bundle_path = self.bundle_for(asset_id);
+        prepare_source_with_extractor(
+            PrepareRequest::new(&self.repository, asset_id, &bundle_path)
+                .with_local_config(&self.local_config),
+            |_, _| Ok(vec!["Fixture page".into()]),
+        )
+        .unwrap();
+        bundle_path
+    }
+
+    fn second_asset(&self) -> (String, PathBuf) {
         let pdf = self.provider.join("second.pdf");
         fs::write(&pdf, b"%PDF-1.7\nsecond fixture").unwrap();
-        capture_asset(
+        let asset_id = capture_asset(
             CaptureRequest::new(&self.repository, &pdf)
                 .with_local_config(&self.local_config)
                 .with_captured_at(self.clock.now_utc()),
         )
         .unwrap()
-        .asset_id
+        .asset_id;
+        let bundle_path = self.prepare_bundle(&asset_id);
+        (asset_id, bundle_path)
     }
 }
 
@@ -99,13 +135,31 @@ fn knowledge_fixture() -> KnowledgeFixture {
     )
     .unwrap()
     .asset_id;
+    let bundle_path = repository
+        .join(".knowledge-os/runtime/prepared")
+        .join(format!("{asset_id}.json"));
+    prepare_source_with_extractor(
+        PrepareRequest::new(&repository, &asset_id, &bundle_path).with_local_config(&local_config),
+        |_, _| Ok(vec!["Fixture page".into()]),
+    )
+    .unwrap();
     KnowledgeFixture {
         _root: root,
         repository,
         provider,
         local_config,
         asset_id,
+        bundle_path,
         clock,
+    }
+}
+
+struct BarrierObserver(Arc<Barrier>);
+
+impl KnowledgeMutationObserver for BarrierObserver {
+    fn before_publication(&mut self) -> Result<(), mko_core::error::MkoError> {
+        self.0.wait();
+        Ok(())
     }
 }
 
@@ -190,7 +244,13 @@ fn write_is_idempotent_for_identical_content() {
 #[test]
 fn regenerating_requires_replace_and_resets_to_unreviewed_keeping_prior_approved_revision() {
     let kb = knowledge_fixture();
-    kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let original = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    approve_knowledge(
+        kb.repo(),
+        &original.knowledge_id,
+        &original.content_revision,
+    )
+    .unwrap();
     let other = VALID.replace(
         "LTI systems and transforms",
         "LTI systems, transforms, and sampling",
@@ -203,6 +263,12 @@ fn regenerating_requires_replace_and_resets_to_unreviewed_keeping_prior_approved
     assert_eq!(ok.result, "replaced");
     let doc = fs::read_to_string(kb.repo().join(&ok.knowledge_path)).unwrap();
     assert!(doc.contains("status: unreviewed"));
+    assert!(doc.contains("reviewed_at: null"));
+    assert!(doc.contains(&format!("approved_revision: {}", original.content_revision)));
+
+    let report = check_repository(CheckRequest::new(kb.repo())).unwrap();
+    assert!(!report.has_code("review_invalid"));
+    assert!(!report.has_code("revision_mismatch"));
 }
 
 #[test]
@@ -212,6 +278,76 @@ fn write_rejects_unknown_asset() {
         .write("personal-asset-deadbeef", VALID.as_bytes(), false)
         .unwrap_err();
     assert_eq!(err.code(), "asset_not_found");
+}
+
+#[test]
+fn write_rejects_a_missing_prepared_bundle() {
+    let kb = knowledge_fixture();
+    fs::remove_file(kb.bundle_path()).unwrap();
+
+    let err = kb
+        .write(kb.asset_id(), VALID.as_bytes(), false)
+        .unwrap_err();
+
+    assert_eq!(err.code(), "runtime_publication_invalid");
+}
+
+#[test]
+fn write_rejects_a_bundle_outside_the_canonical_runtime_path() {
+    let kb = knowledge_fixture();
+    let outside = kb.repo().join("prepared.json");
+    fs::copy(kb.bundle_path(), &outside).unwrap();
+
+    let err = write_knowledge_note_with_clock(
+        WriteKnowledgeRequest::new(
+            kb.repo(),
+            &outside,
+            kb.asset_id(),
+            VALID.as_bytes().to_vec(),
+        ),
+        &kb.clock,
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code(), "runtime_output_invalid");
+}
+
+#[test]
+fn write_rejects_a_bundle_for_a_different_asset() {
+    let kb = knowledge_fixture();
+    let (_second_asset, second_bundle) = kb.second_asset();
+
+    let err = write_knowledge_note_with_clock(
+        WriteKnowledgeRequest::new(
+            kb.repo(),
+            second_bundle,
+            kb.asset_id(),
+            VALID.as_bytes().to_vec(),
+        ),
+        &kb.clock,
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code(), "bundle_invalid");
+}
+
+#[test]
+fn write_rejects_an_untrusted_prepared_bundle() {
+    let kb = knowledge_fixture();
+    let mut bundle: serde_json::Value =
+        serde_json::from_slice(&fs::read(kb.bundle_path()).unwrap()).unwrap();
+    bundle["trust"] = "trusted".into();
+    fs::write(
+        kb.bundle_path(),
+        serde_json::to_vec_pretty(&bundle).unwrap(),
+    )
+    .unwrap();
+
+    let err = kb
+        .write(kb.asset_id(), VALID.as_bytes(), false)
+        .unwrap_err();
+
+    assert_eq!(err.code(), "bundle_invalid");
 }
 
 #[test]
@@ -234,6 +370,124 @@ fn approve_rejects_a_stale_revision() {
 }
 
 #[test]
+fn approve_rejects_body_tampering_even_when_the_stored_revision_is_unchanged() {
+    let kb = knowledge_fixture();
+    let written = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let path = kb.repo().join(&written.knowledge_path);
+    let tampered = fs::read_to_string(&path)
+        .unwrap()
+        .replace("LTI systems and transforms", "tampered after selection");
+    fs::write(&path, tampered).unwrap();
+
+    let err =
+        approve_knowledge(kb.repo(), &written.knowledge_id, &written.content_revision).unwrap_err();
+
+    assert_eq!(err.code(), "knowledge_revision_mismatch");
+    assert!(
+        fs::read_to_string(path)
+            .unwrap()
+            .contains("status: unreviewed")
+    );
+}
+
+#[test]
+fn concurrent_replace_and_approve_publish_only_one_stale_snapshot() {
+    let kb = knowledge_fixture();
+    let written = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let changed = VALID.replace(
+        "LTI systems and transforms",
+        "LTI systems, transforms, and sampling",
+    );
+    let barrier = Arc::new(Barrier::new(2));
+
+    let replace_repository = kb.repository.clone();
+    let replace_bundle = kb.bundle_path.clone();
+    let replace_asset = kb.asset_id.clone();
+    let replace_clock = kb.clock.clone();
+    let replace_barrier = Arc::clone(&barrier);
+    let replace = thread::spawn(move || {
+        let mut observer = BarrierObserver(replace_barrier);
+        write_knowledge_note_with_clock_and_observer(
+            WriteKnowledgeRequest::new(
+                replace_repository,
+                replace_bundle,
+                replace_asset,
+                changed.into_bytes(),
+            )
+            .with_replace(true),
+            &replace_clock,
+            &mut observer,
+        )
+    });
+
+    let approve_repository = kb.repository.clone();
+    let approve_clock = kb.clock.clone();
+    let approve_barrier = Arc::clone(&barrier);
+    let knowledge_id = written.knowledge_id.clone();
+    let content_revision = written.content_revision.clone();
+    let approve = thread::spawn(move || {
+        let mut observer = BarrierObserver(approve_barrier);
+        approve_knowledge_with_clock_and_observer(
+            &approve_repository,
+            &knowledge_id,
+            &content_revision,
+            &approve_clock,
+            &mut observer,
+        )
+    });
+
+    let replace_result = replace.join().unwrap();
+    let approve_result = approve.join().unwrap();
+    assert_eq!(
+        usize::from(replace_result.is_ok()) + usize::from(approve_result.is_ok()),
+        1
+    );
+    for error in [replace_result.err(), approve_result.err()]
+        .into_iter()
+        .flatten()
+    {
+        assert_eq!(error.code(), "knowledge_revision_mismatch");
+    }
+    let report = check_repository(CheckRequest::new(kb.repo())).unwrap();
+    assert!(!report.has_code("review_invalid"));
+    assert!(!report.has_code("revision_mismatch"));
+}
+
+#[test]
+fn concurrent_first_creation_reports_created_then_existing() {
+    let kb = knowledge_fixture();
+    let barrier = Arc::new(Barrier::new(2));
+    let mut workers = Vec::new();
+    for timestamp in ["2026-07-18T14:59:59Z", "2026-07-18T15:00:01Z"] {
+        let repository = kb.repository.clone();
+        let bundle = kb.bundle_path.clone();
+        let asset_id = kb.asset_id.clone();
+        let clock = FixedClock(
+            DateTime::parse_from_rfc3339(timestamp)
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        let barrier = Arc::clone(&barrier);
+        workers.push(thread::spawn(move || {
+            barrier.wait();
+            write_knowledge_note_with_clock(
+                WriteKnowledgeRequest::new(repository, bundle, asset_id, VALID.as_bytes().to_vec()),
+                &clock,
+            )
+            .unwrap()
+            .result
+        }));
+    }
+
+    let mut outcomes = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect::<Vec<_>>();
+    outcomes.sort();
+    assert_eq!(outcomes, ["created", "existing"]);
+}
+
+#[test]
 fn list_unreviewed_returns_only_unreviewed_notes() {
     let kb = knowledge_fixture();
     let w = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
@@ -253,7 +507,7 @@ const OTHER: &str = r#"{
 fn search_finds_matches_across_documents_and_respects_filters() {
     let kb = knowledge_fixture();
     kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
-    let second = kb.second_asset();
+    let (second, _) = kb.second_asset();
     kb.write(&second, OTHER.as_bytes(), false).unwrap();
 
     let hits = search_knowledge(

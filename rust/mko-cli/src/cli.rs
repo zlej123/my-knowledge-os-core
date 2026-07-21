@@ -413,6 +413,8 @@ struct KnowledgeWriteArgs {
     #[arg(long)]
     asset_id: String,
     #[arg(long)]
+    bundle: PathBuf,
+    #[arg(long)]
     response: PathBuf,
     #[arg(long)]
     replace: bool,
@@ -959,6 +961,11 @@ fn knowledge_write(arguments: KnowledgeWriteArgs) -> Result<(), MkoError> {
     } else {
         arguments.repo.clone().unwrap()
     };
+    let bundle = if json_v1 {
+        normalized_runtime_output(&repository, &arguments.asset_id, &arguments.bundle)?
+    } else {
+        arguments.bundle.clone()
+    };
     let response = std::fs::read(&arguments.response).map_err(|error| {
         MkoError::new(
             "knowledge_response_unreadable",
@@ -966,7 +973,7 @@ fn knowledge_write(arguments: KnowledgeWriteArgs) -> Result<(), MkoError> {
         )
     })?;
     let result = write_knowledge_note(
-        WriteKnowledgeRequest::new(&repository, &arguments.asset_id, response)
+        WriteKnowledgeRequest::new(&repository, bundle, &arguments.asset_id, response)
             .with_replace(arguments.replace),
     )?;
     if json_v1 {
