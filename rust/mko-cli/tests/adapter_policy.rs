@@ -455,6 +455,8 @@ fn knowledge_os_skill_exposes_only_the_json_v1_pending_source_workflow() {
     let commands = executable_surfaces(&text);
     let allowed = [
         "mko doctor",
+        "mko inbox",
+        "mko status",
         "mko add",
         "mko source prepare",
         "mko source write-draft",
@@ -494,6 +496,9 @@ fn knowledge_os_skill_exposes_only_the_json_v1_pending_source_workflow() {
         "--verified-backup",
         "temporary",
         "only-copy",
+        "setup diagnosis",
+        "Inbox display",
+        "status or review-queue display",
     ] {
         assert!(
             text.contains(required),
@@ -726,6 +731,10 @@ fn knowledge_os_skill_defines_core_owned_resumable_batch_processing() {
         "repair",
         "retry",
         "remaining",
+        "data.scan_complete",
+        "independently from `data.remaining`",
+        "even when `remaining` is `0`",
+        "batch as incomplete",
         "human-review pending",
     ] {
         assert!(
@@ -770,6 +779,7 @@ fn batch_forward_contract_is_future_blind_and_requires_safe_blocker_reporting() 
         "blockers_reported_not_executed",
         "no_locator_shell_reuse",
         "no_replace_pending",
+        "scan_complete_independent",
     ] {
         assert!(
             rubric.contains(required),
@@ -800,9 +810,15 @@ fn release_guide_and_manual_smoke_preserve_human_only_v0_2_boundaries() {
         "Advanced v0.1 commands",
         "Skill installer or generator.",
         "manual",
+        "outside the configured Inbox",
+        "Inbox 정리해줘",
     ] {
         assert!(readme.contains(required), "README is missing: {required}");
     }
+    assert!(
+        !readme.contains("Put a locally hydrated, personal PDF in the Inbox."),
+        "the single-PDF quick start must not create a backup-confirmation trap"
+    );
     for forbidden in ["automatic commit", "automatic push"] {
         assert!(
             !readme.to_lowercase().contains(forbidden),
@@ -865,10 +881,13 @@ fn forward_review_labels_historical_evidence_and_current_manual_gates() {
         "## Historical Task 8 and Task 10 evidence",
         "## Current release validation",
         "23 adapter-policy tests",
-        "6 deterministic forward-harness tests",
-        "quick_validate.py: PENDING",
-        "fresh-context worker evaluation: PENDING",
+        "7 deterministic forward-harness tests",
+        "quick_validate.py: PASS",
+        "fresh-context worker evaluation: PASS",
         "Google Drive smoke: PENDING",
+        "native Windows filesystem and ACL coverage",
+        "synthetic placeholder-flag logic",
+        "actual cloud placeholder behavior remains",
     ] {
         assert!(
             review.contains(required),

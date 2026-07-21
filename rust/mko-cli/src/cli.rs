@@ -1345,14 +1345,7 @@ fn json_v1_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option
 }
 
 fn legacy_json_requested_from_invalid_arguments(args: &[std::ffi::OsString]) -> bool {
-    let args = arguments_before_terminator(args);
-    if !args.iter().any(|argument| argument == "--json") {
-        return false;
-    }
-    matches!(
-        args.get(1).and_then(|argument| argument.to_str()),
-        Some("asset" | "source" | "check" | "human" | "hooks" | "__extract-pdf")
-    )
+    args.iter().any(|argument| argument == "--json")
 }
 
 fn arguments_before_terminator(args: &[std::ffi::OsString]) -> &[std::ffi::OsString] {

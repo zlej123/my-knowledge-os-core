@@ -70,6 +70,26 @@ fn mixed_inbox_matches_the_redacted_resumable_batch_transcript() {
 }
 
 #[test]
+fn incomplete_scan_signal_is_independent_of_zero_remaining() {
+    let transcript: Value = serde_json::from_str(include_str!(
+        "../../../tests/skill-forward/harness/healthy-batch.json"
+    ))
+    .unwrap();
+    let incomplete = transcript["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|step| step.get("result"))
+        .filter_map(|result| result.get("data"))
+        .any(|data| data["scan_complete"] == false && data["remaining"] == 0);
+
+    assert!(
+        incomplete,
+        "the deterministic batch harness must cover scan_complete=false with remaining=0"
+    );
+}
+
+#[test]
 fn platform_specific_paths_normalize_to_identical_logical_transcripts() {
     let mut macos = platform_transcript(
         "/private/tmp/run/home/Library/Application Support/mko/profiles.yaml",

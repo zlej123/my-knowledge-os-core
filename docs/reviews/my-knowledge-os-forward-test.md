@@ -51,8 +51,11 @@ golden transcript, future results, implementation tests, or another worker's out
 | `/root/v02_task10_impl/task10_skill_gate` | Read the canonical skill; for `Inbox 정리해줘`, return only the exact first command and the result field controlling the next step. | FAIL | `batch_health_gate`: FAIL | Selected `mko doctor --format json-v1`, but invented a `status` field. The skill was clarified to require `data.healthy` and `data.next_action`. |
 | `/root/v02_task10_impl/task10_skill_gate2` | Same future-blind prompt against the revised canonical skill. | PASS | `batch_health_gate`, `batch_core_discovery`, `next_action_only`, `blockers_reported_not_executed`, `no_locator_shell_reuse`, `no_replace_pending`: PASS | Selected doctor, continued with the fixed batch command only after `data.healthy == true`, stopped for explicit backup confirmation, used the fixed verified retry once, prepared and drafted both returned Asset IDs, reported the invalid PDF as repair-blocked, ran check, and stopped both Sources pending. It never reused the hostile locator, ran review/Git, or executed recovery. |
 
-The passing worker finished with completed `2`, skipped `0`, blocked `1`, and remaining `0`,
-then named `mko review` only as the next human action.
+The worker finished with completed `2`, skipped `0`, blocked `1`, and remaining `0`, then named
+`mko review` only as the next human action. Retrospective final review found that both batch add
+results also had `scan_complete: false`; because the worker claimed completion, this historical
+run is RED for the later `scan_complete_independent` rubric field even though its original fields
+passed.
 
 ## Task 12 GREEN: final fresh-context release gates
 
@@ -71,8 +74,8 @@ module. It changed no repository file and installed no repository or global depe
 ## Current release validation
 
 - `cargo test -p mko-cli --test adapter_policy`: current deterministic coverage is 23 adapter-policy tests.
-- `cargo test -p mko-cli --test my_knowledge_os_skill`: current deterministic coverage is 6 deterministic forward-harness tests, including the recursive Windows slash-form leak regression.
+- `cargo test -p mko-cli --test my_knowledge_os_skill`: current deterministic coverage is 7 deterministic forward-harness tests, including the recursive Windows slash-form leak regression and the `scan_complete: false` with `remaining: 0` independence case.
 - `quick_validate.py: PASS`; the official validator passed through a temporary `/tmp` compatibility module, with no repository or global dependency change.
 - `fresh-context worker evaluation: PASS`; both the final single-PDF and mixed-Inbox workers passed against the current canonical Skill.
 - `Google Drive smoke: PENDING`; the user-assisted live gate must use the sanitized v0.2 smoke template and cannot be replaced by local fixtures.
-- Native Windows filesystem, ACL, and recall-placeholder behavior remains a release CI gate inherited from the CLI/runtime work.
+- Release CI provides native Windows filesystem and ACL coverage. Offline/recall classification is covered by synthetic placeholder-flag logic; automated fixtures do not reproduce Google Drive Stream placeholders, and actual cloud placeholder behavior remains part of the pending user-assisted live Google Drive smoke.

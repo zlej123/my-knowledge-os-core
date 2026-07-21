@@ -163,6 +163,40 @@ fn legacy_json_usage_errors_remain_byte_frozen_for_source_commands() {
 
 #[test]
 #[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
+fn every_malformed_argument_equal_to_json_selects_frozen_legacy_json_output() {
+    let cases = [
+        (
+            vec!["--json"],
+            b"{\"error\":{\"code\":\"usage\",\"message\":\"error: unexpected argument '--json' found\\n\\nUsage: mko <COMMAND>\\n\\nFor more information, try '--help'.\\n\"},\"result\":\"error\"}\n"
+                .as_slice(),
+        ),
+        (
+            vec!["not-a-command", "--json"],
+            b"{\"error\":{\"code\":\"usage\",\"message\":\"error: unrecognized subcommand 'not-a-command'\\n\\nUsage: mko <COMMAND>\\n\\nFor more information, try '--help'.\\n\"},\"result\":\"error\"}\n"
+                .as_slice(),
+        ),
+        (
+            vec!["--", "--json"],
+            b"{\"error\":{\"code\":\"usage\",\"message\":\"error: unrecognized subcommand '--json'\\n\\nUsage: mko <COMMAND>\\n\\nFor more information, try '--help'.\\n\"},\"result\":\"error\"}\n"
+                .as_slice(),
+        ),
+    ];
+
+    for (arguments, expected_stdout) in cases {
+        let output = Command::cargo_bin("mko")
+            .unwrap()
+            .args(arguments)
+            .assert()
+            .code(2)
+            .get_output()
+            .clone();
+        assert_eq!(output.stdout, expected_stdout);
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
+#[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
 fn asset_lifecycle_commands_report_a_changed_asset_and_its_successor() {
     let env = CliTestEnv::new();
     let pdf = env.provider.join("paper.pdf");

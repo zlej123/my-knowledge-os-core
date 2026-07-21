@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
@@ -13,7 +12,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::{
     error::MkoError,
-    fingerprint::{fingerprint_open_file, fingerprint_open_file_with_guard, validate_pdf_content},
+    fingerprint::{fingerprint_open_file_with_guard, validate_pdf_content},
     model::Fingerprint,
     path_policy::{canonical_directory, validate_portable_relative_path},
 };
@@ -207,6 +206,8 @@ pub(crate) struct ProviderMetadataIssue {
 pub(crate) struct ProviderMetadataWalk {
     pub entries: Vec<ProviderMetadataEntry>,
     pub issues: Vec<ProviderMetadataIssue>,
+    pub entries_seen: u64,
+    pub total_pdf_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -224,6 +225,8 @@ pub(crate) struct ProviderCatalogScan {
     pub mutation_safe: bool,
     pub entries: Vec<ProviderCatalogEntry>,
     pub warnings: Vec<ProviderScanWarning>,
+    pub entries_seen: u64,
+    pub total_pdf_bytes: u64,
 }
 
 pub(crate) fn scan_provider_catalog_metadata_first_with_deadline(
@@ -285,8 +288,8 @@ fn scan_provider_catalog_metadata_first_inner(
             break;
         }
         let relative_path = entry.relative_path.clone();
-        match materialize_metadata_entry(entry, |relative_path, file| {
-            fingerprint_retained_pdf(relative_path, file, deadline)
+        match materialize_metadata_entry(entry, |relative_path, expected_size, file| {
+            fingerprint_retained_pdf(relative_path, expected_size, file, deadline)
         }) {
             ProviderMetadataAccess::Placeholder => {
                 entries.push(ProviderCatalogEntry::Placeholder {
@@ -325,6 +328,8 @@ fn scan_provider_catalog_metadata_first_inner(
         mutation_safe,
         entries,
         warnings,
+        entries_seen: walk.entries_seen,
+        total_pdf_bytes: walk.total_pdf_bytes,
     })
 }
 
@@ -339,7 +344,7 @@ fn catalog_locator(entry: &ProviderCatalogEntry) -> &str {
 
 fn materialize_metadata_entry<T>(
     mut entry: ProviderMetadataEntry,
-    inspect_content: impl FnOnce(&Path, &mut File) -> Result<T, MkoError>,
+    inspect_content: impl FnOnce(&Path, u64, &mut File) -> Result<T, MkoError>,
 ) -> ProviderMetadataAccess<Result<T, MkoError>> {
     let relative_path = entry.relative_path.clone();
     match entry.hydration {
@@ -352,7 +357,7 @@ fn materialize_metadata_entry<T>(
                         "readable metadata entry has no retained file handle",
                     ))
                 },
-                |file| inspect_content(&relative_path, file),
+                |file| inspect_content(&relative_path, entry.size_bytes, file),
             );
             match entry.hydration {
                 ProviderHydrationDisposition::Supported => {
@@ -369,12 +374,19 @@ fn materialize_metadata_entry<T>(
 
 fn fingerprint_retained_pdf(
     relative_path: &Path,
+    expected_size: u64,
     file: &mut File,
     deadline: &ScanDeadline<'_>,
 ) -> Result<ProviderPdf, MkoError> {
     let locator = logical_locator(relative_path)?;
     let mut check_deadline = || deadline.check();
     let before = fingerprint_open_file_with_guard(file, &mut check_deadline)?;
+    if before.size_bytes != expected_size {
+        return Err(MkoError::new(
+            "fingerprint_changed",
+            "PDF changed after provider metadata inspection",
+        ));
+    }
     deadline.check()?;
     validate_pdf_content(file)?;
     deadline.check()?;
@@ -477,6 +489,8 @@ fn inspect_provider_metadata_with_deadline(
         before_file_open,
     };
     walk_provider_metadata(&root, Path::new(""), 0, &mut state);
+    state.walk.entries_seen = state.entries_seen;
+    state.walk.total_pdf_bytes = state.total_pdf_bytes;
     state
         .walk
         .entries
@@ -989,233 +1003,53 @@ pub fn scan_provider_pdfs(
     request: ProviderScanRequest,
     elapsed_clock: &dyn ElapsedClock,
 ) -> Result<ProviderScanResult, MkoError> {
-    validate_limits(request.limits)?;
-    let provider_root = canonical_directory(&request.provider_root, "provider_root_invalid")?;
-    let root = Dir::open_ambient_dir(&provider_root, ambient_authority()).map_err(|error| {
-        MkoError::new(
-            "provider_scan_failed",
-            format!("cannot open provider root: {error}"),
+    let deadline = ScanDeadline::start(elapsed_clock, request.limits);
+    scan_provider_pdfs_with_deadline(request, &deadline)
+}
+
+pub(crate) fn scan_provider_pdfs_with_deadline(
+    request: ProviderScanRequest,
+    deadline: &ScanDeadline<'_>,
+) -> Result<ProviderScanResult, MkoError> {
+    let scan = scan_provider_catalog_metadata_first_with_deadline(request, deadline)?;
+    if let Some(warning) = scan.warnings.iter().find(|warning| {
+        matches!(
+            warning.code.as_str(),
+            "fingerprint_changed" | "invalid_pdf" | "file_too_large"
         )
-    })?;
-    let started_ms = elapsed_clock.elapsed_ms();
-    let mut state = ScanState {
-        limits: request.limits,
-        started_ms,
-        elapsed_clock,
-        scan_complete: true,
-        stopped: false,
-        pdfs: Vec::new(),
-        warnings: Vec::new(),
-        entries_seen: 0,
-        total_pdf_bytes: 0,
-    };
-    walk_directory(&root, Path::new(""), 0, &mut state)?;
-    state
-        .pdfs
-        .sort_by(|left, right| left.provider_locator.cmp(&right.provider_locator));
-    Ok(ProviderScanResult {
-        scan_complete: state.scan_complete,
-        pdfs: state.pdfs,
-        warnings: state.warnings,
-        entries_seen: state.entries_seen,
-        total_pdf_bytes: state.total_pdf_bytes,
-    })
-}
-
-struct ScanState<'a> {
-    limits: ScanLimits,
-    started_ms: u64,
-    elapsed_clock: &'a dyn ElapsedClock,
-    scan_complete: bool,
-    stopped: bool,
-    pdfs: Vec<ProviderPdf>,
-    warnings: Vec<ProviderScanWarning>,
-    entries_seen: u64,
-    total_pdf_bytes: u64,
-}
-
-fn walk_directory(
-    directory: &Dir,
-    relative_directory: &Path,
-    depth: u64,
-    state: &mut ScanState<'_>,
-) -> Result<(), MkoError> {
-    if state.stopped || time_limit_reached(state) {
-        return Ok(());
+    }) {
+        return Err(MkoError::new(&warning.code, &warning.message));
     }
-    let mut read_dir = match directory.entries() {
-        Ok(entries) => entries,
-        Err(error) => {
-            mark_incomplete(
-                state,
-                "scan_subtree_unreadable",
-                format!("cannot read provider subtree: {error}"),
-                locator_for_directory(relative_directory),
-            );
-            return Ok(());
-        }
-    };
-    let remaining = state.limits.max_entries.saturating_sub(state.entries_seen);
-    if remaining == 0 {
-        mark_limit(
-            state,
-            "scan_entry_limit",
-            "provider scan reached the entry limit",
-        );
-        return Ok(());
-    }
-    let mut entries = Vec::new();
-    let mut inspected = 0;
-    let mut exhausted = false;
-    while inspected < remaining {
-        if time_limit_reached(state) {
-            state.entries_seen = state.entries_seen.saturating_add(inspected);
-            return Ok(());
-        }
-        let Some(entry) = read_dir.next() else {
-            exhausted = true;
-            break;
-        };
-        inspected += 1;
+    let mut pdfs = Vec::new();
+    let mut warnings = scan.warnings;
+    let mut has_placeholder = false;
+    for entry in scan.entries {
         match entry {
-            Ok(entry) => entries.push(entry),
-            Err(error) => mark_incomplete(
-                state,
-                "scan_entry_unreadable",
-                format!("cannot enumerate provider entry: {error}"),
-                locator_for_directory(relative_directory),
-            ),
+            ProviderCatalogEntry::Readable(pdf) => pdfs.push(pdf),
+            ProviderCatalogEntry::Placeholder {
+                provider_locator, ..
+            } => {
+                has_placeholder = true;
+                warnings.push(ProviderScanWarning {
+                    code: "provider_not_hydrated".into(),
+                    message: "provider PDF is not available offline".into(),
+                    provider_locator: Some(provider_locator),
+                });
+            }
         }
     }
-    state.entries_seen = state.entries_seen.saturating_add(inspected);
-    if !exhausted {
-        mark_incomplete(
-            state,
-            "scan_entry_limit",
-            "provider scan reached the entry limit before deterministic ordering was established"
-                .into(),
-            None,
-        );
-        return Ok(());
-    }
-    entries.sort_by_key(|entry| entry.file_name());
-    reject_directory_collisions(&entries)?;
-
-    for entry in entries {
-        if state.stopped || time_limit_reached(state) {
-            break;
-        }
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            mark_incomplete(
-                state,
-                "scan_path_invalid",
-                "provider entry name is not valid UTF-8".into(),
-                locator_for_directory(relative_directory),
-            );
-            continue;
-        };
-        if excluded_name(name) {
-            continue;
-        }
-        let relative = relative_directory.join(name);
-        let locator = logical_locator(&relative)?;
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(error) => {
-                mark_incomplete(
-                    state,
-                    "scan_entry_unreadable",
-                    format!("cannot inspect provider entry: {error}"),
-                    Some(locator),
-                );
-                continue;
-            }
-        };
-        if file_type.is_symlink() {
-            continue;
-        }
-        if file_type.is_dir() {
-            if depth >= state.limits.max_depth {
-                mark_incomplete(
-                    state,
-                    "scan_depth_limit",
-                    "provider scan reached the depth limit".into(),
-                    Some(locator),
-                );
-                continue;
-            }
-            let _ = state.elapsed_clock.elapsed_ms();
-            match open_directory_nofollow(&entry) {
-                Ok(child) => walk_directory(&child, &relative, depth + 1, state)?,
-                Err(error) => mark_incomplete(
-                    state,
-                    "scan_subtree_unreadable",
-                    format!("cannot open provider subtree: {error}"),
-                    Some(locator),
-                ),
-            }
-            continue;
-        }
-        if !file_type.is_file() || !has_pdf_extension(name) {
-            continue;
-        }
-        let _ = state.elapsed_clock.elapsed_ms();
-        let mut file = match open_file_nofollow(&entry) {
-            Ok(file) => file,
-            Err(error) => {
-                mark_incomplete(
-                    state,
-                    "scan_file_unreadable",
-                    format!("cannot open PDF candidate: {error}"),
-                    Some(locator),
-                );
-                continue;
-            }
-        };
-        let metadata = file.metadata().map_err(|error| {
-            MkoError::new(
-                "file_unreadable",
-                format!("cannot inspect opened PDF: {error}"),
-            )
-        })?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            continue;
-        }
-        let before = fingerprint_open_file(&mut file)?;
-        validate_pdf_content(&mut file)?;
-        let _ = state.elapsed_clock.elapsed_ms();
-        let after = fingerprint_open_file(&mut file)?;
-        validate_pdf_content(&mut file)?;
-        if before != after {
-            return Err(MkoError::new(
-                "fingerprint_changed",
-                "PDF changed while the provider was being scanned",
-            ));
-        }
-        let next_total = state
-            .total_pdf_bytes
-            .checked_add(before.size_bytes)
-            .ok_or_else(|| {
-                MkoError::new("scan_byte_limit", "provider PDF byte count overflowed")
-            })?;
-        if next_total > state.limits.max_total_bytes {
-            mark_limit(
-                state,
-                "scan_byte_limit",
-                "provider scan reached the aggregate PDF byte limit",
-            );
-            break;
-        }
-        state.total_pdf_bytes = next_total;
-        state.pdfs.push(ProviderPdf {
-            provider_locator: locator,
-            relative_path: relative,
-            size_bytes: before.size_bytes,
-            fingerprint: before.fingerprint,
-        });
-    }
-    Ok(())
+    warnings.sort_by(|left, right| {
+        left.code
+            .cmp(&right.code)
+            .then(left.provider_locator.cmp(&right.provider_locator))
+    });
+    Ok(ProviderScanResult {
+        scan_complete: scan.scan_complete && !has_placeholder,
+        pdfs,
+        warnings,
+        entries_seen: scan.entries_seen,
+        total_pdf_bytes: scan.total_pdf_bytes,
+    })
 }
 
 fn validate_limits(limits: ScanLimits) -> Result<(), MkoError> {
@@ -1228,68 +1062,6 @@ fn validate_limits(limits: ScanLimits) -> Result<(), MkoError> {
             "scan_limits_invalid",
             "provider scan limits must be positive",
         ));
-    }
-    Ok(())
-}
-
-fn time_limit_reached(state: &mut ScanState<'_>) -> bool {
-    let elapsed = state
-        .elapsed_clock
-        .elapsed_ms()
-        .saturating_sub(state.started_ms);
-    if elapsed < state.limits.max_elapsed_ms {
-        return false;
-    }
-    mark_limit(
-        state,
-        "scan_time_limit",
-        "provider scan reached the time limit",
-    );
-    true
-}
-
-fn mark_limit(state: &mut ScanState<'_>, code: &str, message: &str) {
-    state.stopped = true;
-    mark_incomplete(state, code, message.into(), None);
-}
-
-fn mark_incomplete(
-    state: &mut ScanState<'_>,
-    code: &str,
-    message: String,
-    provider_locator: Option<String>,
-) {
-    state.scan_complete = false;
-    if !state
-        .warnings
-        .iter()
-        .any(|warning| warning.code == code && warning.provider_locator == provider_locator)
-    {
-        state.warnings.push(ProviderScanWarning {
-            code: code.into(),
-            message,
-            provider_locator,
-        });
-    }
-}
-
-fn reject_directory_collisions(entries: &[cap_std::fs::DirEntry]) -> Result<(), MkoError> {
-    let mut names = HashMap::new();
-    for entry in entries {
-        let name = entry.file_name();
-        let name = name.to_str().ok_or_else(|| {
-            MkoError::new("invalid_path", "provider filename must be valid UTF-8")
-        })?;
-        if excluded_name(name) {
-            continue;
-        }
-        let key = collision_key(name);
-        if names.insert(key, name.to_owned()).is_some() {
-            return Err(MkoError::new(
-                "path_collision",
-                "provider contains a case or Unicode-normalization filename collision",
-            ));
-        }
     }
     Ok(())
 }
@@ -1310,14 +1082,6 @@ fn logical_locator(relative: &Path) -> Result<String, MkoError> {
     Ok(locator)
 }
 
-fn locator_for_directory(relative: &Path) -> Option<String> {
-    if relative.as_os_str().is_empty() {
-        None
-    } else {
-        logical_locator(relative).ok()
-    }
-}
-
 pub(crate) fn excluded_name(name: &str) -> bool {
     let lowercase = name.to_ascii_lowercase();
     name.starts_with('.')
@@ -1336,17 +1100,6 @@ fn has_pdf_extension(name: &str) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
 }
 
-fn collision_key(name: &str) -> String {
-    name.nfc().collect::<String>().to_lowercase()
-}
-
-fn open_file_nofollow(entry: &DirEntry) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    configure_nofollow(&mut options, false);
-    entry.open_with(&options)
-}
-
 fn open_directory_nofollow(entry: &DirEntry) -> std::io::Result<Dir> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -1363,14 +1116,16 @@ fn open_directory_nofollow(entry: &DirEntry) -> std::io::Result<Dir> {
 fn configure_nofollow(options: &mut OpenOptions, directory: bool) {
     const O_NOFOLLOW: i32 = 0x20_000;
     const O_DIRECTORY: i32 = 0x10_000;
-    options.custom_flags(O_NOFOLLOW | if directory { O_DIRECTORY } else { 0 });
+    const O_NONBLOCK: i32 = 0x800;
+    options.custom_flags(O_NOFOLLOW | O_NONBLOCK | if directory { O_DIRECTORY } else { 0 });
 }
 
 #[cfg(target_os = "macos")]
 fn configure_nofollow(options: &mut OpenOptions, directory: bool) {
     const O_NOFOLLOW: i32 = 0x100;
     const O_DIRECTORY: i32 = 0x10_0000;
-    options.custom_flags(O_NOFOLLOW | if directory { O_DIRECTORY } else { 0 });
+    const O_NONBLOCK: i32 = 0x4;
+    options.custom_flags(O_NOFOLLOW | O_NONBLOCK | if directory { O_DIRECTORY } else { 0 });
 }
 
 #[cfg(windows)]
@@ -1788,7 +1543,7 @@ mod metadata_walk_tests {
         let content_open_calls = Cell::new(0);
 
         let materialized =
-            materialize_metadata_entry(entry, |_, _| -> Result<(), crate::error::MkoError> {
+            materialize_metadata_entry(entry, |_, _, _| -> Result<(), crate::error::MkoError> {
                 content_open_calls.set(content_open_calls.get() + 1);
                 unreachable!("placeholder content must never be opened")
             });
@@ -1808,7 +1563,7 @@ mod metadata_walk_tests {
         };
 
         let materialized =
-            materialize_metadata_entry(entry, |_, _| -> Result<(), crate::error::MkoError> {
+            materialize_metadata_entry(entry, |_, _, _| -> Result<(), crate::error::MkoError> {
                 unreachable!("a missing handle cannot be inspected")
             });
 

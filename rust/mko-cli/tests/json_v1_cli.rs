@@ -155,6 +155,34 @@ fn json_v1_errors_are_single_stdout_objects_with_reviewed_recovery_only() {
 
 #[test]
 #[allow(deprecated)]
+fn json_v1_nonexistent_absolute_repository_error_is_path_free_and_byte_stable() {
+    let env = JsonV1Env::new();
+    let missing = env.root.join("missing-absolute-repository");
+    assert!(missing.is_absolute());
+    let output = env
+        .command([
+            "check",
+            "--repo",
+            &missing.display().to_string(),
+            "--format",
+            "json-v1",
+        ])
+        .assert()
+        .code(1)
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(
+        output,
+        include_bytes!("../../../tests/fixtures/json-v1/check-repository-missing.json")
+    );
+    assert!(!String::from_utf8_lossy(&output).contains(&missing.display().to_string()));
+}
+
+#[test]
+#[allow(deprecated)]
 fn json_v1_rejects_legacy_json_switch_without_mixing_stdout_or_stderr() {
     let env = JsonV1Env::new();
     let output = env

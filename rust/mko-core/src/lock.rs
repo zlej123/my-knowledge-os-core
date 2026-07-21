@@ -298,35 +298,27 @@ fn secure_lock_directory(repository_root: &Path) -> Result<Dir, MkoError> {
 }
 
 fn ensure_real_child_directory(parent: &Dir, name: &str) -> Result<Dir, MkoError> {
-    match parent.symlink_metadata(name) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-        Ok(_) => {
-            return Err(MkoError::new(
-                "lock_write_failed",
-                "lock directory is not a real directory",
-            ));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            match parent.create_dir(name) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(MkoError::new("lock_write_failed", error.to_string())),
-            }
-            let metadata = parent
-                .symlink_metadata(name)
-                .map_err(|error| MkoError::new("lock_write_failed", error.to_string()))?;
-            if !metadata.is_dir() || metadata.file_type().is_symlink() {
-                return Err(MkoError::new(
-                    "lock_write_failed",
-                    "lock directory is not a real directory",
-                ));
-            }
-        }
+    match parent.create_dir(name) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(MkoError::new("lock_write_failed", error.to_string())),
     }
-    parent
-        .open_dir(name)
-        .map_err(|error| MkoError::new("lock_write_failed", error.to_string()))
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_lock_open(&mut options, true);
+    let file = parent
+        .open_with(name, &options)
+        .map_err(|error| MkoError::new("lock_write_failed", error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| MkoError::new("lock_write_failed", error.to_string()))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(MkoError::new(
+            "lock_write_failed",
+            "lock directory is not a real directory",
+        ));
+    }
+    Ok(Dir::from_std_file(file.into_std()))
 }
 
 impl Drop for AssetLock {

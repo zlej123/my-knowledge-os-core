@@ -50,14 +50,43 @@ pub fn emit_json_v1_failure(command: JsonV1Command, error: &MkoError) -> Result<
 }
 
 pub fn json_v1_failure(command: JsonV1Command, error: &MkoError) -> JsonV1Failure {
+    let message = json_v1_failure_message(&command, error.code());
     JsonV1Failure {
         schema_version: 1,
         command,
         result: FailureResult::Error,
         error: JsonV1Error {
             code: error.code().into(),
-            message: error.message().into(),
+            message: message.into(),
             recovery: recovery_for_error_code(error.code()).map(|kind| Recovery { kind }),
+        },
+    }
+}
+
+fn json_v1_failure_message(command: &JsonV1Command, code: &str) -> &'static str {
+    match command {
+        JsonV1Command::Add => match code {
+            "provider_not_found" => "The provider item was not found.",
+            "inbox_unavailable" => "The inbox could not be scanned.",
+            _ => "The PDF could not be added.",
+        },
+        JsonV1Command::SourcePrepare => match code {
+            "asset_incomplete" => "The asset is not ready for preparation.",
+            _ => "The source could not be prepared.",
+        },
+        JsonV1Command::SourceWriteDraft => match code {
+            "draft_conflict" => "A pending draft already exists.",
+            _ => "The source draft could not be written.",
+        },
+        JsonV1Command::Check => "The repository could not be checked.",
+        JsonV1Command::Doctor => "The configuration could not be inspected.",
+        JsonV1Command::Inbox => match code {
+            "inbox_unavailable" => "The inbox is not configured.",
+            _ => "The inbox could not be inspected.",
+        },
+        JsonV1Command::Status => match code {
+            "repository_not_configured" => "No default repository is configured.",
+            _ => "The repository status could not be inspected.",
         },
     }
 }

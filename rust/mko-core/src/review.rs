@@ -81,6 +81,7 @@ pub fn list_pending_sources(repository_root: &Path) -> Result<Vec<ReviewSelectio
     let mut filenames = sources
         .entries()
         .map_err(|_| source_scan_error())?
+        .take(MAX_SOURCE_ENTRIES + 1)
         .map(|entry| {
             let entry = entry.map_err(|_| source_scan_error())?;
             let file_type = entry.file_type().map_err(|_| source_scan_error())?;

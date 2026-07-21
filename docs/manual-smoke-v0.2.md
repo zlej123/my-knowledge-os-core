@@ -8,7 +8,9 @@ non-sensitive, locally hydrated Google Drive PDF must perform every interactive 
 
 ## Preconditions
 
-- Use one Personal Scope PDF that is already available offline in Google Drive streaming storage.
+- Use one Personal Scope PDF that is already available offline in Google Drive streaming storage
+  and outside the configured Inbox, unless the smoke intentionally exercises explicit verified-backup
+  confirmation.
 - Use a private Personal KB with no unrelated staged changes.
 - Do not place the PDF or a copy in the KB.
 - Allow the Core and Skill to create their required transient extracted bundle and runtime artifacts below `.knowledge-os/runtime/` while processing. Do not commit, copy, or record extracted text or those runtime artifacts.

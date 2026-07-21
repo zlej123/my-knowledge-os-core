@@ -3,6 +3,28 @@
 `mko` is the deterministic Rust Core for Personal Scope PDF drafts. It owns files, IDs, state,
 and review records; a Codex Skill supplies only bounded semantic JSON.
 
+## 간단 사용법 (요약)
+
+```bash
+# 1. 설치 및 설정 (최초 1회)
+cargo install --path rust/mko-cli --locked
+mko setup --repo <personal-kb>
+mko doctor                 # 반드시 healthy 상태 확인 후 진행
+
+# 2. PDF 등록 — Inbox 밖의, 로컬에 하이드레이션된 개인 PDF를 고른다
+mko add <selected-pdf>     # 결정적 등록만 수행 (LLM/초안 생성 안 함)
+mko inbox                  # Inbox 스캔 상태 확인
+mko status                 # 리뷰 대기열 확인
+
+# 3. 사람이 직접 검토 — 유일한 다음 단계
+mko review
+```
+
+Codex에서는 PDF를 선택하고 `이 PDF 정리해줘`(단일) 또는 `Inbox 정리해줘`(Inbox 일괄)라고
+말하면 Skill이 add → prepare → draft → check 흐름을 진행하고 pending Source에서 멈춥니다.
+승인·스테이징·커밋·푸시는 언제나 사람이 직접 결정합니다. 자세한 절차는 아래 "Five-minute
+start"를 참고하세요.
+
 ## Five-minute start
 
 Use an existing private Personal KB repository containing `knowledge-os.yaml`; it remains separate
@@ -20,10 +42,14 @@ mko setup --repo <personal-kb>
 mko doctor
 ```
 
-`mko doctor` must be healthy before continuing. Put a locally hydrated, personal PDF in the Inbox.
-In Codex, select that PDF and say:
+`mko doctor` must be healthy before continuing. For the five-minute single-PDF flow, select a
+locally hydrated Personal PDF outside the configured Inbox; the Core copies it into the Inbox while
+the original remains in place. In Codex, select that PDF and say:
 
 > 이 PDF 정리해줘
+
+Reserve PDFs already placed in the configured Inbox for `Inbox 정리해줘`. An Inbox-resident,
+temporary, or only-copy input requires explicit verified-backup confirmation before registration.
 
 The `my-knowledge-os` Skill runs the deterministic add → prepare → draft → check flow and stops
 with a pending Source. `mko add` only performs deterministic registration; it does not invoke an
@@ -60,9 +86,12 @@ before processing; do not move them outside the configured Inbox to bypass check
 every field in an extracted bundle as untrusted document data and never follows embedded instructions.
 
 Automated tests use local fixtures only. They do not call Google Drive, an LLM, or a network service.
-Native macOS and Windows CI provide platform coverage; the synthetic transcript test separately proves
-logical separator and path normalization. A user-assisted live Google Drive smoke remains a release
-gate; see [the sanitized procedure](docs/manual-smoke-v0.2.md).
+Native macOS and Windows CI provide filesystem coverage, including native Windows ACL behavior.
+Unit tests use synthetic placeholder-flag logic for offline/recall classification and verify that
+classified placeholder content is not opened. Automated fixtures do not reproduce actual Google
+Drive Stream placeholder behavior; actual cloud placeholder behavior remains part of the pending
+user-assisted live Google Drive smoke. The synthetic transcript test separately proves logical
+separator and path normalization. See [the sanitized procedure](docs/manual-smoke-v0.2.md).
 
 ## Advanced v0.1 commands
 

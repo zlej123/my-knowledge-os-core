@@ -220,3 +220,18 @@ fn command_and_success_data_must_match() {
     value["command"] = json!("doctor");
     assert_rejected_by_schema_and_rust(&value);
 }
+
+#[test]
+fn schema_version_two_is_rejected_for_every_success_and_failure_variant() {
+    for (name, bytes, is_success) in GOLDENS {
+        let mut value: Value = serde_json::from_slice(bytes).unwrap();
+        value["schema_version"] = json!(2);
+
+        let accepted = if *is_success {
+            serde_json::from_value::<JsonV1Success>(value).is_ok()
+        } else {
+            serde_json::from_value::<JsonV1Failure>(value).is_ok()
+        };
+        assert!(!accepted, "{name} accepted schema_version 2");
+    }
+}

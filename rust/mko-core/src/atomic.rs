@@ -608,8 +608,9 @@ fn scan_publication_quarantines(
         .read_dir(".")
         .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
     let mut quarantines = Vec::new();
-    for (index, entry) in entries.enumerate() {
-        if index >= PUBLICATION_SCAN_ENTRY_LIMIT || Instant::now() >= deadline {
+    let mut matching_candidates = 0;
+    for entry in entries {
+        if Instant::now() >= deadline {
             return Err(registry_scan_limit_error());
         }
         let entry =
@@ -621,6 +622,10 @@ fn scan_publication_quarantines(
         if target != filename {
             continue;
         }
+        if matching_candidates >= PUBLICATION_SCAN_ENTRY_LIMIT {
+            return Err(registry_scan_limit_error());
+        }
+        matching_candidates += 1;
         let (record, identity) =
             match read_publication_record_with_hook(directory, &name, deadline, || {}) {
                 Ok((record, identity)) => (record, Some(identity)),
@@ -1285,7 +1290,7 @@ mod tests {
     }
 
     #[test]
-    fn publication_quarantine_scan_has_a_hard_entry_bound() {
+    fn publication_quarantine_limit_ignores_ordinary_records() {
         let directory_path = test_directory();
         let directory = Dir::open_ambient_dir(&directory_path, ambient_authority()).unwrap();
         for index in 0..80 {
@@ -1295,13 +1300,11 @@ mod tests {
         }
 
         let started = Instant::now();
-        let error = match CapabilityPublicationLock::acquire(&directory, "record.md") {
-            Ok(_) => panic!("scan over the hard bound must fail closed"),
-            Err(error) => error,
-        };
+        let lock = CapabilityPublicationLock::acquire(&directory, "record.md")
+            .expect("ordinary records do not consume the quarantine candidate limit");
 
-        assert_eq!(error.code(), "registry_scan_limit");
         assert!(started.elapsed() < Duration::from_secs(1));
+        drop(lock);
         let _ = fs::remove_dir_all(directory_path);
     }
 

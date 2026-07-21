@@ -405,6 +405,24 @@ fn outside_pdf_is_copied_verified_and_original_is_unchanged() {
 }
 
 #[test]
+fn single_add_deadline_interrupts_provider_fingerprint() {
+    let fixture = Fixture::new();
+    let source = fixture.outside_pdf("selected.pdf", b"%PDF-1.7\nselected");
+    let mut slow = b"%PDF-1.7\n".to_vec();
+    slow.resize(3 * 1024 * 1024, b'x');
+    fixture.provider_pdf("unrelated.pdf", &slow);
+
+    let error = add_pdf(
+        AddRequest::new(fixture.context(), &source),
+        &FixedAuditClock,
+        &AdvancingClock::new(100),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "provider_scan_incomplete");
+}
+
+#[test]
 fn inbox_only_copy_requires_verified_backup_before_registration() {
     let fixture = Fixture::new();
     let source = fixture.provider_pdf("Paper.pdf", b"%PDF-1.7\ncontent");

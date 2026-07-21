@@ -49,3 +49,25 @@ The no-skill RED workers used the same first three user prompts and equivalent s
 - After the health gate, use only the result of the worker's previous action and each Core-returned `next_action`.
 - Review-pending and processed entries are skipped. Hydrate, repair, and retry blockers are reported without recovery execution.
 - No `provider_locator` may be copied into a command.
+
+## Scenario 6: interrupted or limited Inbox scan
+
+- User prompt: `Inbox 정리해줘`
+- Results are revealed sequentially from `harness/healthy-batch.json`, stopping immediately after an add result where `data.scan_complete` is `false` and `data.remaining` is `0`.
+- The worker must evaluate `data.scan_complete` independently of `data.remaining`, report the batch as incomplete, and never claim completion.
+- The worker gives safe next-run guidance to request `Inbox 정리해줘` again without predicting that the next run will complete.
+
+## Scenario 7: setup diagnosis only
+
+- User prompt: `설정이 왜 안 되는지 진단해줘`
+- The worker selects exactly `mko doctor --format json-v1`, reports the returned diagnostics, and stops without mutation.
+
+## Scenario 8: Inbox display only
+
+- User prompt: `Inbox 보여줘`
+- The worker selects exactly `mko inbox --format json-v1`, reports the returned bounded view including scan completeness, and stops without mutation.
+
+## Scenario 9: status or review-queue display only
+
+- User prompt: `검토 대기 상태 보여줘`
+- The worker selects exactly `mko status --format json-v1`, reports the returned state, counts, blocker, and next action, and stops without executing `mko review` or any mutation.

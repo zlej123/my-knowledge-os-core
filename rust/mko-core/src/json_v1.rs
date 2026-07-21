@@ -2,6 +2,18 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+fn deserialize_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let version = u32::deserialize(deserializer)?;
+    if version == 1 {
+        Ok(version)
+    } else {
+        Err(serde::de::Error::custom("schema_version must be 1"))
+    }
+}
+
 fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
@@ -263,42 +275,49 @@ pub struct JsonV1Error {
 pub enum JsonV1Success {
     #[serde(rename = "add")]
     Add {
+        #[serde(deserialize_with = "deserialize_schema_version")]
         schema_version: u32,
         result: SuccessResult,
         data: AddPayload,
     },
     #[serde(rename = "source.prepare")]
     SourcePrepare {
+        #[serde(deserialize_with = "deserialize_schema_version")]
         schema_version: u32,
         result: SuccessResult,
         data: PrepareData,
     },
     #[serde(rename = "source.write_draft")]
     SourceWriteDraft {
+        #[serde(deserialize_with = "deserialize_schema_version")]
         schema_version: u32,
         result: SuccessResult,
         data: WriteDraftData,
     },
     #[serde(rename = "check")]
     Check {
+        #[serde(deserialize_with = "deserialize_schema_version")]
         schema_version: u32,
         result: SuccessResult,
         data: CheckData,
     },
     #[serde(rename = "inbox")]
     Inbox {
+        #[serde(deserialize_with = "deserialize_schema_version")]
         schema_version: u32,
         result: SuccessResult,
         data: InboxData,
     },
     #[serde(rename = "status")]
     Status {
+        #[serde(deserialize_with = "deserialize_schema_version")]
         schema_version: u32,
         result: SuccessResult,
         data: StatusData,
     },
     #[serde(rename = "doctor")]
     Doctor {
+        #[serde(deserialize_with = "deserialize_schema_version")]
         schema_version: u32,
         result: SuccessResult,
         data: DoctorData,
@@ -308,6 +327,7 @@ pub enum JsonV1Success {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct JsonV1Failure {
+    #[serde(deserialize_with = "deserialize_schema_version")]
     pub schema_version: u32,
     pub command: JsonV1Command,
     pub result: FailureResult,

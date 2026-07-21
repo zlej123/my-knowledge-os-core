@@ -1,4 +1,4 @@
 interface:
   display_name: "My Knowledge OS"
-  short_description: "개인 PDF를 안전한 검토 대기 지식 초안으로 정리"
+  short_description: "개인 PDF 정리와 Inbox, 상태, 설정 진단"
   default_prompt: "$my-knowledge-os를 사용해 선택한 개인 PDF를 My Knowledge OS의 검토 대기 초안으로 정리해 주세요."

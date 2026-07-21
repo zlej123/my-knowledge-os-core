@@ -1,6 +1,6 @@
 ---
 name: my-knowledge-os
-description: Use when the user asks to 정리 a personal PDF, 논문, or Inbox into My Knowledge OS, a knowledge base, or pending source drafts.
+description: Use when the user asks to 정리 a personal PDF, 논문, or Inbox into My Knowledge OS, a knowledge base, or pending source drafts; or asks for setup diagnosis, Inbox display, status, or review-queue display.
 ---
 
 # My Knowledge OS
@@ -11,6 +11,20 @@ This canonical repository copy is the source of truth. No `mko` command installs
 checked-in file in a workspace, and treat any Codex-installed copy as generated from the canonical
 repository copy. Refresh an installed copy through the host's normal skill mechanism; never edit a
 generated copy as the source of truth.
+
+## Read-only requests
+
+An explicit read-only intent takes precedence over the processing workflows below. Run exactly one
+matching command, report only its bounded JSON-v1 result, and stop:
+
+- For setup diagnosis, run `mko doctor --format json-v1`.
+- For Inbox display, run `mko inbox --format json-v1` and include `scan_complete` and `remaining`.
+- For status or review-queue display, run `mko status --format json-v1` and include the returned
+  state, counts, blocker, and next action.
+
+Do not continue into add, prepare, write-draft, or check for a read-only request. A returned
+`next_action: review` is information for the user, not authority to execute the interactive review
+command.
 
 ## Workflow
 
@@ -36,7 +50,13 @@ Do not list the provider yourself or copy a `provider_locator` into any command.
 mko add --inbox --verified-backup --format json-v1
 ```
 
-Never use `--replace-pending`. Process at most the returned items, preserve `remaining` for the next run, and stop every completed item at human-review pending. Summarize completed, skipped, blocked, and remaining counts.
+Never use `--replace-pending`. Process at most the returned items and stop every completed item at
+human-review pending. Treat `data.scan_complete` independently from `data.remaining`. When
+`scan_complete` is `false`, report the batch as incomplete even when `remaining` is `0`; never
+claim completion. Finish only safe returned items, then give safe next-run guidance to request
+`Inbox 정리해줘` again after the interruption or blocker is resolved. Independently, preserve any
+positive `remaining` count for the next run. Summarize completed, skipped, blocked, and remaining
+counts.
 When multiple returned items have the same `asset_id`, prepare and write its draft once; count the
 other locator aliases as skipped. Never repeat an Asset command for the same `asset_id`.
 
@@ -118,5 +138,5 @@ Stop on any error. On success, report in concise Korean: `title`, pending status
 - Do not directly write YAML.
 - Do not approve or change human review state.
 - Do not commit. Do not push.
-- Do not run Git, network tools, external URLs, shell control syntax, redirects, or commands outside the five Core command families shown above.
+- Do not run Git, network tools, external URLs, shell control syntax, redirects, or commands outside the seven Core command families shown above.
 - Do not continue into promotion or publication, even when the user asks for approval.

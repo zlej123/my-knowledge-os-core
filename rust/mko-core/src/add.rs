@@ -15,7 +15,10 @@ use crate::{
     config::CaptureConfig,
     context::ResolvedPersonalContext,
     error::MkoError,
-    fingerprint::{FileSnapshot, asset_id, fingerprint_open_file, validate_pdf_content},
+    fingerprint::{
+        FileSnapshot, asset_id, fingerprint_open_file, fingerprint_open_file_with_guard,
+        validate_pdf_content,
+    },
     inbox::{InboxAddScan, InboxScanRequest, scan_inbox_for_add},
     json_v1::{
         AddOutcome, ImportOutcome, JsonV1Error, NextAction, Recovery, RecoveryKind, UserState,
@@ -24,7 +27,8 @@ use crate::{
     path_policy::provider_path,
     path_policy::validate_portable_relative_path,
     provider_scan::{
-        DEFAULT_SCAN_LIMITS, ElapsedClock, ProviderScanRequest, excluded_name, scan_provider_pdfs,
+        DEFAULT_SCAN_LIMITS, ElapsedClock, ProviderScanRequest, ScanDeadline, excluded_name,
+        scan_provider_pdfs_with_deadline,
     },
     registry::{CaptureRequest, capture_asset, read_asset},
 };
@@ -150,8 +154,24 @@ pub fn add_pdf(
         ));
     };
     let source_path = absolute_path(source)?;
+    let deadline = ScanDeadline::start(elapsed_clock, DEFAULT_SCAN_LIMITS);
+    let scan = scan_provider_pdfs_with_deadline(
+        ProviderScanRequest::new(&config.provider_root).with_limits(DEFAULT_SCAN_LIMITS),
+        &deadline,
+    )?;
+    if !scan.scan_complete {
+        let reason = scan
+            .warnings
+            .first()
+            .map(|warning| warning.code.as_str())
+            .unwrap_or("unknown");
+        return Err(MkoError::new(
+            "provider_scan_incomplete",
+            format!("provider scan was incomplete ({reason}); retry after resolving the warning"),
+        ));
+    }
     let (source_file, canonical_source) = open_source_nofollow(&source_path)?;
-    let source_snapshot = validated_snapshot(&source_file)?;
+    let source_snapshot = validated_snapshot_with_deadline(&source_file, &deadline)?;
     let id = asset_id(&source_snapshot.fingerprint)?;
     let existing_registry = config
         .repository_root
@@ -174,22 +194,6 @@ pub fn add_pdf(
         && request.backup_attestation != BackupAttestation::UserVerified
     {
         return Err(backup_confirmation_required());
-    }
-
-    let scan = scan_provider_pdfs(
-        ProviderScanRequest::new(&config.provider_root).with_limits(DEFAULT_SCAN_LIMITS),
-        elapsed_clock,
-    )?;
-    if !scan.scan_complete {
-        let reason = scan
-            .warnings
-            .first()
-            .map(|warning| warning.code.as_str())
-            .unwrap_or("unknown");
-        return Err(MkoError::new(
-            "provider_scan_incomplete",
-            format!("provider scan was incomplete ({reason}); retry after resolving the warning"),
-        ));
     }
 
     let (provider_locator, provider_relative_path, import_outcome) =
@@ -803,6 +807,22 @@ fn validated_snapshot(file: &fs::File) -> Result<FileSnapshot, MkoError> {
     Ok(snapshot)
 }
 
+fn validated_snapshot_with_deadline(
+    file: &fs::File,
+    deadline: &ScanDeadline<'_>,
+) -> Result<FileSnapshot, MkoError> {
+    let cloned = file
+        .try_clone()
+        .map_err(|error| MkoError::new("file_unreadable", error.to_string()))?;
+    let mut file = CapFile::from_std(cloned);
+    let mut check_deadline = || deadline.check();
+    let snapshot = fingerprint_open_file_with_guard(&mut file, &mut check_deadline)?;
+    deadline.check()?;
+    validate_pdf_content(&mut file)?;
+    deadline.check()?;
+    Ok(snapshot)
+}
+
 fn validate_existing_pdf(path: &Path, expected: &FileSnapshot) -> Result<(), MkoError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| MkoError::new("provider_import_failed", error.to_string()))?;
@@ -962,9 +982,10 @@ fn open_source_nofollow(path: &Path) -> Result<(fs::File, PathBuf), MkoError> {
 fn open_path_nofollow(path: &Path) -> std::io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     const O_NOFOLLOW: i32 = 0x20_000;
+    const O_NONBLOCK: i32 = 0x800;
     OpenOptions::new()
         .read(true)
-        .custom_flags(O_NOFOLLOW)
+        .custom_flags(O_NOFOLLOW | O_NONBLOCK)
         .open(path)
 }
 
@@ -972,9 +993,10 @@ fn open_path_nofollow(path: &Path) -> std::io::Result<fs::File> {
 fn open_path_nofollow(path: &Path) -> std::io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     const O_NOFOLLOW: i32 = 0x100;
+    const O_NONBLOCK: i32 = 0x4;
     OpenOptions::new()
         .read(true)
-        .custom_flags(O_NOFOLLOW)
+        .custom_flags(O_NOFOLLOW | O_NONBLOCK)
         .open(path)
 }
 
