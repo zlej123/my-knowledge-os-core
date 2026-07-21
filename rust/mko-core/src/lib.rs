@@ -17,6 +17,7 @@ pub mod front_matter;
 pub mod hooks;
 pub mod inbox;
 pub mod json_v1;
+pub mod knowledge;
 pub mod lock;
 pub mod model;
 pub mod path_policy;
