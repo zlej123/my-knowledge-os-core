@@ -24,6 +24,7 @@ use crate::{
     error::MkoError,
     front_matter::parse_markdown,
     hooks::PRE_COMMIT_SCRIPT,
+    knowledge::{KnowledgeRecord, validate_knowledge_record},
     model::{AssetRecord, AssetStatus, ReviewStatus, SourceRecord, SourceStatus},
     path_policy::validate_portable_relative_path,
     pdf::{EXTRACTOR_NAME, EXTRACTOR_VERSION},
@@ -131,6 +132,7 @@ pub fn check_repository(request: CheckRequest) -> Result<CheckReport, MkoError> 
 fn inspect_files(repository_root: &Path, files: &[RepositoryFile], issues: &mut Vec<CheckIssue>) {
     let mut assets = BTreeMap::<String, (String, AssetRecord)>::new();
     let mut sources = Vec::<(String, SourceRecord, String)>::new();
+    let mut knowledge_notes = Vec::<(String, KnowledgeRecord, String)>::new();
     let mut collision_keys = BTreeMap::<String, String>::new();
 
     for file in files {
@@ -187,6 +189,11 @@ fn inspect_files(repository_root: &Path, files: &[RepositoryFile], issues: &mut 
                 Ok((source, body)) => sources.push((file.path.clone(), source, body)),
                 Err(error) => issues.push(parse_issue(&file.path, error)),
             }
+        } else if file.path.starts_with("knowledge/") && file.path.ends_with(".md") {
+            match parse_utf8_markdown::<KnowledgeRecord>(file) {
+                Ok((record, body)) => knowledge_notes.push((file.path.clone(), record, body)),
+                Err(error) => issues.push(parse_issue(&file.path, error)),
+            }
         }
     }
 
@@ -232,6 +239,27 @@ fn inspect_files(repository_root: &Path, files: &[RepositoryFile], issues: &mut 
                 Some(format!(
                     "compare with {other} and keep one canonical Source"
                 )),
+            ));
+        }
+    }
+
+    for (path, record, body) in &knowledge_notes {
+        for validation in validate_knowledge_record(path, record, body) {
+            issues.push(issue(
+                &validation.code,
+                Some(&validation.path),
+                None,
+                &validation.message,
+                None,
+            ));
+        }
+        if !assets.contains_key(&record.asset_id) {
+            issues.push(issue(
+                "relation_missing",
+                Some(path),
+                None,
+                "knowledge note references an absent Asset Registry record",
+                None,
             ));
         }
     }

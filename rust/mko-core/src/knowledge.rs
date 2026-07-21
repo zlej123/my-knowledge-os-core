@@ -814,3 +814,83 @@ pub fn search_knowledge(
     }
     Ok(matches)
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KnowledgeValidationIssue {
+    pub code: String,
+    pub path: String,
+    pub message: String,
+}
+
+/// Validates a knowledge note's self-contained record shape and review-state
+/// consistency. Does not check that `asset_id` refers to an existing Asset
+/// Registry record; callers with a materialized asset set (such as
+/// `check.rs`) should verify that relation separately, mirroring how
+/// `check.rs::validate_source` checks Source-to-Asset relations directly
+/// rather than inside `asset_validation.rs`.
+pub fn validate_knowledge_record(
+    path: &str,
+    record: &KnowledgeRecord,
+    body: &str,
+) -> Vec<KnowledgeValidationIssue> {
+    let mut issues = Vec::new();
+    if record.record_type != "knowledge" || record.schema_version != 1 {
+        issues.push(KnowledgeValidationIssue {
+            code: "knowledge_invalid".into(),
+            path: path.into(),
+            message: "knowledge record_type or schema_version is not canonical".into(),
+        });
+    }
+
+    let actual = match calculate_knowledge_revision(record, body) {
+        Ok(revision) => revision,
+        Err(error) => {
+            issues.push(KnowledgeValidationIssue {
+                code: error.code().into(),
+                path: path.into(),
+                message: error.message().into(),
+            });
+            return issues;
+        }
+    };
+    if record.content_revision != actual {
+        issues.push(KnowledgeValidationIssue {
+            code: "revision_mismatch".into(),
+            path: path.into(),
+            message: "stored content_revision does not match recomputed knowledge content".into(),
+        });
+    }
+
+    let review_valid = match record.review.status {
+        ReviewState::Unreviewed => {
+            record.approved_revision.is_none() && record.review.reviewed_at.is_none()
+        }
+        ReviewState::Reviewed => {
+            record.approved_revision.as_deref() == Some(actual.as_str())
+                && record.review.reviewed_at.is_some()
+        }
+    };
+    if !review_valid {
+        issues.push(KnowledgeValidationIssue {
+            code: "review_invalid".into(),
+            path: path.into(),
+            message: "knowledge review status and approved_revision/reviewed_at are inconsistent"
+                .into(),
+        });
+    }
+
+    let mut seen_ids = HashSet::new();
+    let ids_valid = record
+        .concepts
+        .iter()
+        .all(|concept| !concept.id.is_empty() && seen_ids.insert(concept.id.clone()));
+    if !ids_valid {
+        issues.push(KnowledgeValidationIssue {
+            code: "concept_id_invalid".into(),
+            path: path.into(),
+            message: "knowledge concept IDs must be non-empty and unique within the note".into(),
+        });
+    }
+
+    issues
+}

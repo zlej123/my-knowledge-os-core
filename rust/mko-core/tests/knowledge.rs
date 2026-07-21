@@ -2,6 +2,7 @@ use std::{fs, path::PathBuf};
 
 use chrono::{DateTime, Utc};
 use mko_core::{
+    check::{CheckRequest, check_repository},
     clock::Clock,
     knowledge::{
         ConceptKind, KnowledgeSearchQuery, WriteKnowledgeRequest, approve_knowledge,
@@ -320,4 +321,45 @@ fn search_is_bounded_by_a_maximum_entry_count() {
     )
     .unwrap_err();
     assert_eq!(err.code(), "knowledge_scan_limit");
+}
+
+#[test]
+fn check_passes_a_clean_knowledge_note() {
+    let kb = knowledge_fixture();
+    kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let report = check_repository(CheckRequest::new(kb.repo())).unwrap();
+    assert!(!report.has_code("review_invalid"));
+    assert!(!report.has_code("revision_mismatch"));
+    assert!(!report.has_code("relation_missing"));
+    assert!(!report.has_code("knowledge_invalid"));
+    assert!(!report.has_code("concept_id_invalid"));
+}
+
+#[test]
+fn check_reports_review_state_inconsistency() {
+    let kb = knowledge_fixture();
+    let w = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let path = kb.repo().join(&w.knowledge_path);
+    let corrupted = fs::read_to_string(&path)
+        .unwrap()
+        .replace("status: unreviewed", "status: reviewed");
+    fs::write(&path, corrupted).unwrap();
+
+    let report = check_repository(CheckRequest::new(kb.repo())).unwrap();
+    assert!(report.has_code("review_invalid"));
+}
+
+#[test]
+fn check_reports_a_dangling_asset_relation() {
+    let kb = knowledge_fixture();
+    let w = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let path = kb.repo().join(&w.knowledge_path);
+    let dangling_asset_id = format!("personal-asset-{}", "0".repeat(64));
+    let corrupted = fs::read_to_string(&path)
+        .unwrap()
+        .replace(kb.asset_id(), &dangling_asset_id);
+    fs::write(&path, corrupted).unwrap();
+
+    let report = check_repository(CheckRequest::new(kb.repo())).unwrap();
+    assert!(report.has_code("relation_missing"));
 }
