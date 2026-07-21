@@ -577,6 +577,24 @@ fn setup_step_for_diagnostic_area(area: DiagnosticArea) -> SetupStep {
     }
 }
 
+/// Google Drive names each account's My Drive folder in the user's display language, so a bounded
+/// account root can appear under any of these localized folder names. Non-existent candidates are
+/// filtered out by `detect_google_drive_roots`, so listing several names per account is safe.
+const MY_DRIVE_FOLDER_NAMES: &[&str] = &[
+    "My Drive",     // English
+    "내 드라이브",  // Korean
+    "マイドライブ", // Japanese
+    "我的云端硬盘", // Simplified Chinese
+    "我的雲端硬碟", // Traditional Chinese
+    "Mi unidad",    // Spanish
+    "Mon Drive",    // French
+    "Meine Ablage", // German
+    "Il mio Drive", // Italian
+    "Meu Drive",    // Portuguese
+    "Mijn Drive",   // Dutch
+    "Мой диск",     // Russian
+];
+
 fn detect_macos_roots(
     home: &Path,
     candidates: &mut Vec<(String, PathBuf)>,
@@ -605,7 +623,9 @@ fn detect_macos_roots(
         if account_label.is_empty() {
             continue;
         }
-        candidates.push((account_label.into(), entry.path().join("My Drive")));
+        for my_drive in MY_DRIVE_FOLDER_NAMES {
+            candidates.push((account_label.into(), entry.path().join(my_drive)));
+        }
     }
     Ok(())
 }

@@ -142,6 +142,31 @@ fn detects_only_bounded_macos_google_drive_account_roots() {
 }
 
 #[test]
+fn detects_localized_macos_my_drive_folder_names() {
+    let fixture = Fixture::new(false);
+    // A localized Google Drive install names the account's My Drive folder in the
+    // user's language (here Korean "내 드라이브"), not the English "My Drive".
+    let localized = fixture
+        .platform
+        .home
+        .join("Library/CloudStorage")
+        .join("GoogleDrive-jhwan@example.com")
+        .join("내 드라이브");
+    fs::create_dir_all(&localized).unwrap();
+
+    let roots = detect_google_drive_roots(&fixture.platform).unwrap();
+
+    assert_eq!(
+        roots
+            .iter()
+            .map(|root| root.path.clone())
+            .collect::<Vec<_>>(),
+        vec![localized]
+    );
+    assert!(roots.iter().all(|root| root.account_label.contains('@')));
+}
+
+#[test]
 fn detects_only_bounded_windows_google_drive_roots() {
     let fixture = Fixture::new(true);
     let mirrored = fixture.windows_drive();
