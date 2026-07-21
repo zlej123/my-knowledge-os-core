@@ -80,7 +80,7 @@ fn command_key(surface: &str) -> Option<String> {
         };
         return match group {
             "check" => Some("mko check".into()),
-            "asset" | "source" | "human" | "hooks" => Some(words.get(2).map_or_else(
+            "asset" | "source" | "human" | "hooks" | "knowledge" => Some(words.get(2).map_or_else(
                 || format!("mko {group}"),
                 |&action| format!("mko {group} {action}"),
             )),
@@ -240,6 +240,56 @@ fn validate_semantic_response_shape(value: &Value) -> Result<(), String> {
     serde_json::from_value::<mko_core::model::SemanticResponse>(value.clone())
         .map(|_| ())
         .map_err(|error| format!("semantic response must match the runtime schema: {error}"))
+}
+
+fn validate_knowledge_response_shape(value: &Value) -> Result<(), String> {
+    const ROOT_FIELDS: &[&str] = &["synthesis", "concepts"];
+    const CONCEPT_FIELDS: &[&str] = &["name", "kind", "body", "tags", "locator"];
+
+    let root = value
+        .as_object()
+        .ok_or_else(|| "knowledge response must be a JSON object".to_string())?;
+    let actual_root = root.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    let expected_root = ROOT_FIELDS.iter().copied().collect::<BTreeSet<_>>();
+    if actual_root != expected_root {
+        return Err(format!(
+            "knowledge response fields differ: expected {expected_root:?}, got {actual_root:?}"
+        ));
+    }
+    if !root["synthesis"].is_string() {
+        return Err("synthesis must be a string".into());
+    }
+    let concepts = root["concepts"]
+        .as_array()
+        .ok_or_else(|| "concepts must be an array".to_string())?;
+    for concept in concepts {
+        let concept_object = concept
+            .as_object()
+            .ok_or_else(|| "each concept must be a JSON object".to_string())?;
+        let actual_concept = concept_object
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let expected_concept = CONCEPT_FIELDS.iter().copied().collect::<BTreeSet<_>>();
+        if actual_concept != expected_concept {
+            return Err(format!(
+                "concept fields differ: expected {expected_concept:?}, got {actual_concept:?}"
+            ));
+        }
+        if !concept_object["name"].is_string() || !concept_object["body"].is_string() {
+            return Err("concept name and body must be strings".into());
+        }
+        if !concept_object["tags"].is_array() {
+            return Err("concept tags must be an array".into());
+        }
+        if !(concept_object["locator"].is_string() || concept_object["locator"].is_null()) {
+            return Err("concept locator must be a string or null".into());
+        }
+    }
+
+    serde_json::from_value::<mko_core::knowledge::KnowledgeResponse>(value.clone())
+        .map(|_| ())
+        .map_err(|error| format!("knowledge response must match the runtime schema: {error}"))
 }
 
 #[test]
@@ -461,6 +511,7 @@ fn knowledge_os_skill_exposes_only_the_json_v1_pending_source_workflow() {
         "mko source prepare",
         "mko source write-draft",
         "mko check",
+        "mko knowledge write",
     ];
 
     validate_command_policy(&text, &allowed)
@@ -485,6 +536,15 @@ fn knowledge_os_skill_exposes_only_the_json_v1_pending_source_workflow() {
     assert!(
         !commands.contains("mko review"),
         "mko review may be named as a next action but must not be executable"
+    );
+    assert_eq!(
+        text.matches("mko knowledge review").count(),
+        1,
+        "the human knowledge review command must appear exactly once as the sole next action"
+    );
+    assert!(
+        !commands.contains("mko knowledge review"),
+        "mko knowledge review may be named as a next action but must not be executable"
     );
     for required in [
         "pending",
@@ -516,13 +576,69 @@ fn knowledge_os_skill_has_one_exact_semantic_response_contract() {
 
     assert_eq!(
         blocks.len(),
-        1,
-        "Skill must contain one semantic JSON object"
+        2,
+        "Skill must contain exactly one semantic-response-v1 object and one knowledge-response-v1 object"
     );
     let response: Value = serde_json::from_str(&blocks[0])
         .unwrap_or_else(|error| panic!("semantic-response-v1 must be JSON: {error}"));
     validate_semantic_response_shape(&response)
         .unwrap_or_else(|error| panic!("semantic-response-v1 is invalid: {error}"));
+
+    let knowledge_response: Value = serde_json::from_str(&blocks[1])
+        .unwrap_or_else(|error| panic!("knowledge-response-v1 must be JSON: {error}"));
+    validate_knowledge_response_shape(&knowledge_response)
+        .unwrap_or_else(|error| panic!("knowledge-response-v1 is invalid: {error}"));
+}
+
+#[test]
+fn knowledge_os_skill_defines_the_knowledge_extraction_flow() {
+    let path = knowledge_os_skill_path();
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} must exist and be readable: {error}", path.display()));
+    let commands = executable_surfaces(&text);
+
+    validate_command_policy(
+        &text,
+        &[
+            "mko doctor",
+            "mko inbox",
+            "mko status",
+            "mko add",
+            "mko source prepare",
+            "mko source write-draft",
+            "mko check",
+            "mko knowledge write",
+        ],
+    )
+    .unwrap_or_else(|error| panic!("integrated Skill {error}"));
+
+    assert!(
+        commands.contains("mko knowledge write"),
+        "the knowledge extraction flow must run mko knowledge write"
+    );
+    assert!(
+        commands
+            .lines()
+            .any(|line| line.starts_with("$ ") && line.contains("mko knowledge write"))
+            && commands.contains("--format json-v1"),
+        "mko knowledge write must be pinned to JSON v1"
+    );
+
+    for required in [
+        "Knowledge extraction",
+        "knowledge-response-v1",
+        "synthesis",
+        "concepts",
+        "Interpretation:",
+        "content_revision",
+        "knowledge_path",
+        "write_outcome",
+    ] {
+        assert!(
+            text.contains(required),
+            "missing knowledge extraction rule: {required}"
+        );
+    }
 }
 
 #[test]
@@ -784,6 +900,34 @@ fn batch_forward_contract_is_future_blind_and_requires_safe_blocker_reporting() 
         assert!(
             rubric.contains(required),
             "missing batch rubric field: {required}"
+        );
+    }
+}
+
+#[test]
+fn knowledge_forward_contract_requires_untrusted_bundle_and_no_review_execution() {
+    let scenarios = std::fs::read_to_string(forward_scenarios_path()).unwrap();
+    let rubric = std::fs::read_to_string(forward_rubric_path()).unwrap();
+
+    for required in [
+        "Scenario 10: knowledge extraction",
+        "knowledge-response-v1",
+        "mko knowledge write",
+        "mko knowledge review",
+        "trust == untrusted_document_text",
+    ] {
+        assert!(
+            scenarios.contains(required),
+            "missing knowledge scenario rule: {required}"
+        );
+    }
+    for required in [
+        "knowledge_untrusted_bundle",
+        "knowledge_no_review_execution",
+    ] {
+        assert!(
+            rubric.contains(required),
+            "missing knowledge rubric field: {required}"
         );
     }
 }
