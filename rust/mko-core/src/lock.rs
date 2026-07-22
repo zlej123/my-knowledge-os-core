@@ -23,6 +23,8 @@ const STALE_LOCK_TTL: Duration = Duration::minutes(15);
 const LOCK_SCAN_ENTRY_LIMIT: usize = 64;
 const LOCK_SCAN_TIME_LIMIT: StdDuration = StdDuration::from_millis(100);
 const LOCK_RECORD_BYTE_LIMIT: u64 = 4096;
+const REPOSITORY_MUTATION_FILENAME: &str = "repository-mutation.lock";
+const REPOSITORY_MUTATION_SCOPE: &str = "repository-v2-mutation";
 static NEXT_OWNER_TOKEN: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -154,6 +156,142 @@ pub struct AssetLock {
     asset_id: String,
     owner_token: String,
     identity: StableFileIdentity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StaleRepositoryLockPolicy {
+    Preserve,
+    Clear,
+}
+
+/// Serializes every schema-v2 mutation within one repository.
+///
+/// This lock is deliberately separate from `AssetLock`: it has a fixed
+/// repository-scoped filename and does not accept an Asset ID from callers.
+pub struct RepositoryMutationLock {
+    directory: Dir,
+    filename: String,
+    repository_root: PathBuf,
+    owner_token: String,
+    identity: StableFileIdentity,
+}
+
+impl std::fmt::Debug for RepositoryMutationLock {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RepositoryMutationLock")
+            .field("filename", &self.filename)
+            .field("repository_root", &self.repository_root)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RepositoryMutationLock {
+    pub fn acquire(
+        repository_root: &Path,
+        command: &str,
+        clock: &dyn Clock,
+        stale_policy: StaleRepositoryLockPolicy,
+    ) -> Result<Self, MkoError> {
+        Self::acquire_inner(repository_root, command, clock, stale_policy)
+            .map_err(map_repository_lock_error)
+    }
+
+    fn acquire_inner(
+        repository_root: &Path,
+        command: &str,
+        clock: &dyn Clock,
+        stale_policy: StaleRepositoryLockPolicy,
+    ) -> Result<Self, MkoError> {
+        let repository_root = fs::canonicalize(repository_root)
+            .map_err(|error| MkoError::new("lock_write_failed", error.to_string()))?;
+        let directory = secure_lock_directory(&repository_root)?;
+        let filename = REPOSITORY_MUTATION_FILENAME;
+        let clear_stale = stale_policy == StaleRepositoryLockPolicy::Clear;
+
+        resolve_authoritative_quarantines(
+            &directory,
+            &format!("{filename}.takeover"),
+            REPOSITORY_MUTATION_SCOPE,
+            clock,
+            clear_stale,
+        )?;
+        clear_stale_takeover_if_requested(
+            &directory,
+            filename,
+            REPOSITORY_MUTATION_SCOPE,
+            clock,
+            clear_stale,
+        )?;
+
+        if clear_stale {
+            let _takeover = TakeoverGuard::acquire(
+                &directory,
+                filename,
+                REPOSITORY_MUTATION_SCOPE,
+                command,
+                clock,
+                false,
+            )?;
+            resolve_authoritative_quarantines(
+                &directory,
+                filename,
+                REPOSITORY_MUTATION_SCOPE,
+                clock,
+                true,
+            )?;
+            match create_repository_mutation_lock(&directory, &repository_root, command, clock) {
+                Ok(lock) => return Ok(lock),
+                Err(error) if error.code() != "lock_exists" => return Err(error),
+                Err(_) => {}
+            }
+            remove_stale_entry(&directory, filename, REPOSITORY_MUTATION_SCOPE, clock)?;
+            return match create_repository_mutation_lock(
+                &directory,
+                &repository_root,
+                command,
+                clock,
+            ) {
+                Ok(lock) => Ok(lock),
+                Err(error) if error.code() == "lock_exists" => Err(lock_held_error()),
+                Err(error) => Err(error),
+            };
+        }
+
+        resolve_authoritative_quarantines(
+            &directory,
+            filename,
+            REPOSITORY_MUTATION_SCOPE,
+            clock,
+            false,
+        )?;
+        match create_repository_mutation_lock(&directory, &repository_root, command, clock) {
+            Ok(lock) => Ok(lock),
+            Err(error) if error.code() == "lock_exists" => Err(lock_held_error()),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl Drop for RepositoryMutationLock {
+    fn drop(&mut self) {
+        let Ok(_takeover) = TakeoverGuard::acquire(
+            &self.directory,
+            &self.filename,
+            REPOSITORY_MUTATION_SCOPE,
+            "repository mutation lock release",
+            &SystemClock,
+            false,
+        ) else {
+            return;
+        };
+        remove_if_owned(
+            &self.directory,
+            &self.filename,
+            &self.owner_token,
+            self.identity,
+        );
+    }
 }
 
 impl std::fmt::Debug for AssetLock {
@@ -469,6 +607,75 @@ fn create_lock(
             file.write_all(&bytes).and_then(|_| file.sync_all())
         },
     )
+}
+
+fn create_repository_mutation_lock(
+    directory: &Dir,
+    repository_root: &Path,
+    command: &str,
+    clock: &dyn Clock,
+) -> Result<RepositoryMutationLock, MkoError> {
+    let hostname = current_hostname()?;
+    let owner_token = next_owner_token()?;
+    ensure_no_authoritative_quarantine(
+        directory,
+        REPOSITORY_MUTATION_FILENAME,
+        REPOSITORY_MUTATION_SCOPE,
+        clock,
+    )?;
+    let mut file = match directory.open_with(
+        REPOSITORY_MUTATION_FILENAME,
+        cap_std::fs::OpenOptions::new().write(true).create_new(true),
+    ) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(MkoError::new(
+                "lock_exists",
+                "repository mutation lock already exists",
+            ));
+        }
+        Err(error) => return Err(MkoError::new("lock_write_failed", error.to_string())),
+    };
+    let identity = stable_file_identity(&file)?;
+    let record = LockRecord {
+        pid: std::process::id(),
+        hostname,
+        started_at: clock.now_utc(),
+        command: command.into(),
+        asset_id: REPOSITORY_MUTATION_SCOPE.into(),
+        owner_token: owner_token.clone(),
+    };
+    let bytes = serde_json::to_vec(&record)
+        .map_err(|error| MkoError::new("lock_write_failed", error.to_string()))?;
+    if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
+        remove_identity_owned(directory, REPOSITORY_MUTATION_FILENAME, identity);
+        return Err(MkoError::new("lock_write_failed", error.to_string()));
+    }
+    sync_lock_directory(directory)?;
+    if let Err(error) = ensure_no_authoritative_quarantine(
+        directory,
+        REPOSITORY_MUTATION_FILENAME,
+        REPOSITORY_MUTATION_SCOPE,
+        clock,
+    ) {
+        drop(file);
+        remove_if_owned(
+            directory,
+            REPOSITORY_MUTATION_FILENAME,
+            &owner_token,
+            identity,
+        );
+        return Err(error);
+    }
+    Ok(RepositoryMutationLock {
+        directory: directory
+            .try_clone()
+            .map_err(|error| MkoError::new("lock_write_failed", error.to_string()))?,
+        filename: REPOSITORY_MUTATION_FILENAME.into(),
+        repository_root: repository_root.to_path_buf(),
+        owner_token,
+        identity,
+    })
 }
 
 fn create_lock_with_writer<F>(
@@ -1084,6 +1291,19 @@ fn lock_held_error() -> MkoError {
         "lock_held",
         "asset operation lock is held; a stale lock requires --clear-stale-lock",
     )
+}
+
+fn map_repository_lock_error(error: MkoError) -> MkoError {
+    if error.code() == "lock_held" {
+        return MkoError::new(
+            "repository_lock_held",
+            "repository mutation lock is held; a stale lock requires an explicit clear policy",
+        );
+    }
+    let Some(suffix) = error.code().strip_prefix("lock_") else {
+        return error;
+    };
+    MkoError::new(format!("repository_lock_{suffix}"), error.message())
 }
 
 fn read_lock_record(

@@ -1,0 +1,57 @@
+{
+  "schema_version": 2,
+  "artifact_type": "prepared_content",
+  "bundle_id": "prepared-content-sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "content_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "asset_id": "personal-asset-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "asset_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "media_type": "application/pdf",
+  "trust": "untrusted_document_content",
+  "extractor": {
+    "name": "pdf-text",
+    "version": "2.0.0"
+  },
+  "metadata": {
+    "title": "Example paper",
+    "authors": ["Example Author"],
+    "created_at": "2026-07-22T00:00:00Z"
+  },
+  "content_blocks": [
+    {
+      "id": "block-0001",
+      "block_type": "text",
+      "locator": "page:1",
+      "text": "Grounded document text."
+    },
+    {
+      "id": "block-0002",
+      "block_type": "table",
+      "locator": "page:2/table:1",
+      "columns": ["Metric", "Value"],
+      "rows": [["Accuracy", 0.95], ["Verified", true]]
+    },
+    {
+      "id": "block-0003",
+      "block_type": "image",
+      "locator": "page:3/image:1",
+      "alt_text": null,
+      "artifact_id": "artifact-0001"
+    },
+    {
+      "id": "block-0004",
+      "block_type": "transcript",
+      "locator": "time:00:01:20-00:01:45",
+      "speaker": "Presenter",
+      "text": "A bounded transcript excerpt."
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "artifact-0001",
+      "media_type": "image/png",
+      "content_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "size_bytes": 1024,
+      "provider_locator": "derived/artifact-0001.png"
+    }
+  ]
+}

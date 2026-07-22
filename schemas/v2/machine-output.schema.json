@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-knowledge-os.local/schemas/v2/machine-output.schema.json",
+  "title": "My Knowledge OS machine envelope v2",
+  "oneOf": [
+    { "$ref": "#/$defs/queue_success" },
+    { "$ref": "#/$defs/failure" }
+  ],
+  "$defs": {
+    "command": {
+      "enum": [
+        "setup.plan",
+        "setup.apply",
+        "add",
+        "source.prepare",
+        "source.write",
+        "knowledge.write",
+        "check",
+        "status",
+        "queue",
+        "show",
+        "review.open",
+        "review.feedback",
+        "dashboard",
+        "doctor",
+        "sync.status"
+      ]
+    },
+    "next_action": {
+      "enum": [
+        "none",
+        "configure",
+        "hydrate",
+        "add",
+        "prepare",
+        "write_source",
+        "write_knowledge",
+        "review",
+        "repair",
+        "retry",
+        "sync"
+      ]
+    },
+    "empty_object": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 0
+    },
+    "queue_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "item_id",
+        "target_ids",
+        "title",
+        "item_type",
+        "state",
+        "revisions",
+        "next_action"
+      ],
+      "properties": {
+        "item_id": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "target_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
+        "title": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "item_type": { "enum": ["source", "knowledge", "combined"] },
+        "state": {
+          "enum": [
+            "unreviewed",
+            "deferred",
+            "changes_requested",
+            "revised_unreviewed",
+            "blocked"
+          ]
+        },
+        "revisions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
+        "next_action": { "enum": ["display", "regenerate", "diagnose"] }
+      }
+    },
+    "queue_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "scan_complete", "remaining", "next_cursor"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": { "$ref": "#/$defs/queue_item" }
+        },
+        "scan_complete": { "type": "boolean" },
+        "remaining": { "type": "integer", "minimum": 0 },
+        "next_cursor": { "type": ["string", "null"], "maxLength": 4096 }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable", "next_action", "details"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "retryable": { "type": "boolean" },
+        "next_action": { "$ref": "#/$defs/next_action" },
+        "details": { "$ref": "#/$defs/empty_object" }
+      }
+    },
+    "queue_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "queue" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/queue_data" }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "error"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "$ref": "#/$defs/command" },
+        "result": { "const": "error" },
+        "error": { "$ref": "#/$defs/error" }
+      }
+    }
+  }
+}

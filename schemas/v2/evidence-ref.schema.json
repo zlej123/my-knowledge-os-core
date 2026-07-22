@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-knowledge-os.local/schemas/v2/evidence-ref.schema.json",
+  "title": "My Knowledge OS evidence reference v2",
+  "$ref": "#/$defs/evidence_ref",
+  "$defs": {
+    "evidence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["block_id", "locator"],
+      "properties": {
+        "block_id": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "locator": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "text_span_utf8": {
+          "anyOf": [{ "$ref": "#/$defs/text_span_utf8" }, { "type": "null" }]
+        },
+        "table_range": {
+          "anyOf": [{ "$ref": "#/$defs/table_range" }, { "type": "null" }]
+        }
+      },
+      "not": {
+        "required": ["text_span_utf8", "table_range"],
+        "properties": {
+          "text_span_utf8": { "type": "object" },
+          "table_range": { "type": "object" }
+        }
+      }
+    },
+    "text_span_utf8": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "table_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row_start", "row_end", "column_start", "column_end"],
+      "properties": {
+        "row_start": { "type": "integer", "minimum": 0 },
+        "row_end": { "type": "integer", "minimum": 0 },
+        "column_start": { "type": "integer", "minimum": 0 },
+        "column_end": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

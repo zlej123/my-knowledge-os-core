@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-knowledge-os.local/schemas/v2/prepared-content.schema.json",
+  "title": "My Knowledge OS prepared content v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_type",
+    "bundle_id",
+    "content_digest",
+    "asset_id",
+    "asset_fingerprint",
+    "media_type",
+    "trust",
+    "extractor",
+    "metadata",
+    "content_blocks",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "artifact_type": { "const": "prepared_content" },
+    "bundle_id": { "$ref": "#/$defs/bundle_id" },
+    "content_digest": { "$ref": "#/$defs/sha256" },
+    "asset_id": { "$ref": "#/$defs/asset_id" },
+    "asset_fingerprint": { "$ref": "#/$defs/sha256" },
+    "media_type": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "trust": { "const": "untrusted_document_content" },
+    "extractor": { "$ref": "#/$defs/extractor" },
+    "metadata": { "$ref": "#/$defs/metadata" },
+    "content_blocks": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": { "$ref": "#/$defs/content_block" }
+    },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": { "$ref": "#/$defs/artifact" }
+    }
+  },
+  "$defs": {
+    "asset_id": { "type": "string", "pattern": "^personal-asset-[a-f0-9]{64}$" },
+    "bundle_id": { "type": "string", "pattern": "^prepared-content-sha256-[a-f0-9]{64}$" },
+    "sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "extractor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "authors", "created_at"],
+      "properties": {
+        "title": { "type": ["string", "null"], "maxLength": 4096 },
+        "authors": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": { "type": "string", "maxLength": 4096 }
+        },
+        "created_at": {
+          "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }]
+        }
+      }
+    },
+    "block_base": {
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "locator": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    },
+    "content_block": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "block_type", "locator", "text"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "block_type": { "const": "text" },
+            "locator": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "text": { "type": "string", "maxLength": 262144 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "block_type", "locator", "columns", "rows"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "block_type": { "const": "table" },
+            "locator": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "columns": {
+              "type": "array",
+              "maxItems": 4096,
+              "items": { "type": "string", "maxLength": 4096 }
+            },
+            "rows": {
+              "type": "array",
+              "maxItems": 10000,
+              "items": {
+                "type": "array",
+                "maxItems": 4096,
+                "items": { "type": ["string", "number", "boolean", "null"] }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "block_type", "locator", "alt_text", "artifact_id"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "block_type": { "const": "image" },
+            "locator": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "alt_text": { "type": ["string", "null"], "maxLength": 262144 },
+            "artifact_id": { "type": "string", "minLength": 1, "maxLength": 4096 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "block_type", "locator", "speaker", "text"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "block_type": { "const": "transcript" },
+            "locator": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "speaker": { "type": ["string", "null"], "maxLength": 4096 },
+            "text": { "type": "string", "maxLength": 262144 }
+          }
+        }
+      ]
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "media_type", "content_digest", "size_bytes", "provider_locator"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "media_type": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "content_digest": { "$ref": "#/$defs/sha256" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "provider_locator": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    }
+  }
+}
