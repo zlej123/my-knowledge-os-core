@@ -628,25 +628,13 @@ fn asset_deleted_before_cas_entry_validation_maps_to_asset_changed() {
     .unwrap_err();
 
     assert_eq!(error.code(), "asset_changed_during_approval");
-    assert!(
-        error.message().contains("Source was durably approved"),
-        "the error must disclose the partial commit: {}",
-        error.message()
-    );
-    assert!(
-        error.message().contains("mko check"),
-        "the error must direct the user to inspect durable state: {}",
-        error.message()
-    );
-    assert!(
-        error.message().contains("repair") && error.message().contains("before retrying approval"),
-        "the error must require state-aware repair before retry: {}",
-        error.message()
-    );
-    assert!(
-        !error.message().contains("nothing was published"),
-        "the error must not deny an already durable Source publication: {}",
-        error.message()
+    assert_eq!(
+        error.message(),
+        format!(
+            "Source was durably approved, but Asset {} is missing or is not a regular file, so its transition to processed did not occur. Restore the original Asset record manually from Git or backup, then run `mko check --repo \"{}\"` to verify the Source/Asset state before any further approval attempt",
+            env.asset_id,
+            fs::canonicalize(&env.repository).unwrap().display()
+        )
     );
     assert!(!asset_path.exists());
     assert_eq!(
@@ -685,6 +673,14 @@ fn asset_type_replaced_before_cas_entry_validation_maps_to_asset_changed() {
     .unwrap_err();
 
     assert_eq!(error.code(), "asset_changed_during_approval");
+    assert_eq!(
+        error.message(),
+        format!(
+            "Source was durably approved, but Asset {} is missing or is not a regular file, so its transition to processed did not occur. Restore the original Asset record manually from Git or backup, then run `mko check --repo \"{}\"` to verify the Source/Asset state before any further approval attempt",
+            env.asset_id,
+            fs::canonicalize(&env.repository).unwrap().display()
+        )
+    );
     assert!(asset_path.is_dir());
     assert_eq!(
         parse_markdown::<SourceRecord>(&fs::read_to_string(&env.source_path).unwrap())

@@ -470,10 +470,14 @@ fn map_asset_publication_error(
     repository_root: &Path,
     asset_id: &str,
 ) -> MkoError {
-    if is_cas_entry_change(&error) || error.code() == "asset_changed_during_approval" {
-        asset_changed_after_source_publication_error(repository_root, asset_id)
-    } else {
-        error
+    match error.code() {
+        "registry_not_found" | "registry_destination_invalid" => {
+            asset_unavailable_after_source_publication_error(repository_root, asset_id)
+        }
+        "registry_snapshot_changed" | "asset_changed_during_approval" => {
+            asset_changed_after_source_publication_error(repository_root, asset_id)
+        }
+        _ => error,
     }
 }
 
@@ -498,7 +502,20 @@ fn asset_changed_after_source_publication_error(
     MkoError::new(
         "asset_changed_during_approval",
         format!(
-            "Source was durably approved, but Asset {asset_id} changed before its transition to processed. Run `mko check --repo \"{}\"` to inspect the durable Source/Asset state, then complete the reported repair before retrying approval",
+            "Source was durably approved, but Asset {asset_id} changed before its transition to processed. Inspect and restore or reconcile the Asset record as needed, then run `mko check --repo \"{}\"` to verify the Source/Asset state before any further approval attempt",
+            repository_root.display()
+        ),
+    )
+}
+
+fn asset_unavailable_after_source_publication_error(
+    repository_root: &Path,
+    asset_id: &str,
+) -> MkoError {
+    MkoError::new(
+        "asset_changed_during_approval",
+        format!(
+            "Source was durably approved, but Asset {asset_id} is missing or is not a regular file, so its transition to processed did not occur. Restore the original Asset record manually from Git or backup, then run `mko check --repo \"{}\"` to verify the Source/Asset state before any further approval attempt",
             repository_root.display()
         ),
     )
