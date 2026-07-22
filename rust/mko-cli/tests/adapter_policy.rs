@@ -1254,3 +1254,28 @@ fn fresh_knowledge_forward_evidence_is_structured_and_auditable() {
     }
     assert_eq!(action["result"], "PASS");
 }
+
+#[test]
+fn v02_concurrency_contract_is_bounded_and_honest() {
+    let readme = std::fs::read_to_string(repository_path().join("README.md"))
+        .expect("README must document the release boundary");
+    let design = std::fs::read_to_string(
+        repository_path().join("docs/superpowers/specs/2026-07-22-knowledge-hardening-design.md"),
+    )
+    .expect("hardening design must document the concurrency boundary");
+
+    for document in [&readme, &design] {
+        for required in [
+            "namespace-level compare-and-swap",
+            "already-open writable handle",
+            "outside the v0.2 concurrency contract",
+            "hidden `.displaced` recovery entry",
+            "immutable revisions",
+        ] {
+            assert!(
+                document.contains(required),
+                "concurrency contract is missing: {required}"
+            );
+        }
+    }
+}

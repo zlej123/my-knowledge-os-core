@@ -194,13 +194,14 @@ where
     )
 }
 
-/// Replaces a capability-relative regular file only if the entry displaced after final
-/// validation still matches the caller's exact selected bytes.
+/// Replaces a capability-relative regular file using namespace-level compare-and-swap.
 ///
 /// Unlike an overwrite-capable rename, this protocol moves the public entry aside, validates the
 /// displaced bytes, then publishes with create-new semantics. A mismatching or failed publication
 /// restores the displaced entry when the public name remains vacant and otherwise preserves both
-/// entries without overwriting either one.
+/// entries without overwriting either one. This protocol serializes cooperating MKO writers and
+/// detects path-based replacement. It cannot portably revoke an already-open writable handle held
+/// by a non-cooperating process; writes through such a handle are outside the v0.2 contract.
 pub fn write_replace_capability_compare_exchange_validated_at_commit<B, V>(
     directory: &Dir,
     filename: &Path,
@@ -425,7 +426,7 @@ fn restore_displaced_after_error(
 fn registry_snapshot_changed_error() -> MkoError {
     MkoError::new(
         "registry_snapshot_changed",
-        "destination changed before conditional publication; newer bytes were preserved",
+        "destination changed before conditional publication; inspect current and recovery entries before retrying",
     )
 }
 

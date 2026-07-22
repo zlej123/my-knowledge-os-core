@@ -93,6 +93,19 @@ Drive Stream placeholder behavior; actual cloud placeholder behavior remains par
 user-assisted live Google Drive smoke. The synthetic transcript test separately proves logical
 separator and path normalization. See [the sanitized procedure](docs/manual-smoke-v0.2.md).
 
+### v0.2 concurrency contract
+
+Conditional publication provides namespace-level compare-and-swap for cooperating MKO writers and
+detects path-based replacement before publication. It does not provide portable exclusion against a
+non-cooperating process that retained an already-open writable handle to the previous file; writes
+through such a handle are outside the v0.2 concurrency contract. Close editors and other processes
+that may keep KB records open for writing before approving or regenerating a record.
+
+A failed or interrupted conditional publication may retain a hidden `.displaced` recovery entry
+beside the record. Do not delete or commit it blindly: preserve both files, inspect their contents,
+and choose the intended revision manually. Automatic recovery and immutable revisions are deferred
+to a future storage-format revision.
+
 ## Advanced v0.1 commands
 
 The detailed v0.1 interfaces remain frozen for automation and troubleshooting. They require an

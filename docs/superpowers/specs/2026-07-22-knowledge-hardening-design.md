@@ -23,6 +23,20 @@ make review, discovery, and concurrent publication safe enough for release.
 6. The pre-existing publication-quarantine disappearance race treats an entry that vanishes during
    owner cleanup as a retry, while malformed or replaced entries remain fail-closed.
 
+## v0.2 concurrency boundary
+
+Conditional publication provides namespace-level compare-and-swap for cooperating MKO writers and
+detects path-based replacement before publication. It does not provide portable exclusion against a
+non-cooperating process that retained an already-open writable handle to the previous file; writes
+through such a handle are outside the v0.2 concurrency contract. POSIX rename/unlink semantics and
+platform-dependent Windows sharing modes do not allow the portable Rust implementation to revoke an
+existing writer.
+
+A failed or interrupted publication may retain a hidden `.displaced` recovery entry beside the
+record. It is preserved for manual comparison rather than silently overwritten. Operators must
+preserve both entries and resolve the intended bytes before retrying. Automatic recovery and
+immutable revisions require a later storage-format design; they are not claimed by v0.2.
+
 ## Compatibility
 
 - Asset and Source schemas remain frozen.
@@ -30,6 +44,9 @@ make review, discovery, and concurrent publication safe enough for release.
 - `approved_revision` may be present on an `unreviewed` regenerated note; `reviewed_at` remains null
   until the new revision is approved.
 - JSON-v1 remains path-free and emits exactly one JSON object.
+- The concurrency boundary above narrows the original direct-filesystem-edit wording: v0.2 detects
+  path-based replacement and MKO-cooperating mutations, not writes through a pre-existing external
+  writable handle.
 
 ## Verification
 
