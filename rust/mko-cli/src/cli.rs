@@ -27,7 +27,7 @@ use mko_core::{
     },
     knowledge::{
         ConceptKind, ConceptMatch, KnowledgeSearchQuery, WriteKnowledgeRequest, approve_knowledge,
-        list_unreviewed_knowledge, search_knowledge, write_knowledge_note,
+        list_knowledge, list_unreviewed_knowledge, search_knowledge, write_knowledge_note,
     },
     model::AssetStatus,
     pdf::{ExtractionWorkerResponse, extract_pdf_pages_from_reader, worker_executable},
@@ -1052,46 +1052,26 @@ fn knowledge_show(arguments: KnowledgeShowArgs) -> Result<(), MkoError> {
     } else {
         arguments.repo.clone().unwrap()
     };
-    let pending = list_unreviewed_knowledge(&repository)?;
-    let unreviewed = pending
-        .into_iter()
-        .find(|item| item.asset_id == arguments.asset_id);
-    let all_matches = search_knowledge(
-        &repository,
-        &KnowledgeSearchQuery {
-            term: String::new(),
-            kind: None,
-            tag: None,
-        },
-    )?;
-    let concept_matches = all_matches
+    let mut notes = list_knowledge(&repository)?
         .into_iter()
         .filter(|item| item.asset_id == arguments.asset_id)
         .collect::<Vec<_>>();
-    if unreviewed.is_none() && concept_matches.is_empty() {
+    if notes.is_empty() {
         return Err(MkoError::new(
             "knowledge_not_found",
             "no knowledge note was found for that asset",
         ));
     }
-    let title = unreviewed
-        .as_ref()
-        .map(|item| item.title.clone())
-        .or_else(|| concept_matches.first().map(|item| item.title.clone()))
-        .unwrap_or_default();
-    let knowledge_path = unreviewed
-        .as_ref()
-        .map(|item| item.knowledge_path.clone())
-        .or_else(|| {
-            concept_matches
-                .first()
-                .map(|item| item.knowledge_path.clone())
-        })
-        .unwrap_or_default();
-    let review_status = if unreviewed.is_some() {
-        KnowledgeReviewStatusData::Unreviewed
-    } else {
-        KnowledgeReviewStatusData::Reviewed
+    if notes.len() > 1 {
+        return Err(MkoError::new(
+            "knowledge_conflict",
+            "multiple knowledge notes refer to that asset",
+        ));
+    }
+    let note = notes.pop().expect("the non-empty length was checked");
+    let review_status = match note.review_status {
+        mko_core::knowledge::ReviewState::Unreviewed => KnowledgeReviewStatusData::Unreviewed,
+        mko_core::knowledge::ReviewState::Reviewed => KnowledgeReviewStatusData::Reviewed,
     };
     if json_v1 {
         emit_json_v1(JsonV1Success::KnowledgeShow {
@@ -1099,14 +1079,13 @@ fn knowledge_show(arguments: KnowledgeShowArgs) -> Result<(), MkoError> {
             result: SuccessResult::Ok,
             data: KnowledgeShowData {
                 asset_id: arguments.asset_id,
-                title,
-                knowledge_path,
+                title: note.title,
+                knowledge_path: note.knowledge_path,
                 review_status,
-                knowledge_id: unreviewed.as_ref().map(|item| item.knowledge_id.clone()),
-                content_revision: unreviewed
-                    .as_ref()
-                    .map(|item| item.content_revision.clone()),
-                concepts: concept_matches
+                knowledge_id: Some(note.knowledge_id),
+                content_revision: Some(note.content_revision),
+                concepts: note
+                    .concepts
                     .iter()
                     .map(|concept| KnowledgeConceptSummary {
                         name: concept.name.clone(),
@@ -1117,8 +1096,11 @@ fn knowledge_show(arguments: KnowledgeShowArgs) -> Result<(), MkoError> {
             },
         })
     } else {
-        println!("{} {} {}", arguments.asset_id, title, knowledge_path);
-        for concept in &concept_matches {
+        println!(
+            "{} {} {}",
+            arguments.asset_id, note.title, note.knowledge_path
+        );
+        for concept in &note.concepts {
             println!("- {} ({})", concept.name, concept_kind_label(&concept.kind));
         }
         Ok(())
@@ -1132,13 +1114,13 @@ fn knowledge_list(arguments: KnowledgeListArgs) -> Result<(), MkoError> {
     } else {
         arguments.repo.clone().unwrap()
     };
-    let pending = list_unreviewed_knowledge(&repository)?;
+    let notes = list_knowledge(&repository)?;
     if json_v1 {
         emit_json_v1(JsonV1Success::KnowledgeList {
             schema_version: 1,
             result: SuccessResult::Ok,
             data: KnowledgeListData {
-                items: pending
+                items: notes
                     .into_iter()
                     .map(|item| KnowledgePendingItemData {
                         knowledge_id: item.knowledge_id,
@@ -1151,7 +1133,7 @@ fn knowledge_list(arguments: KnowledgeListArgs) -> Result<(), MkoError> {
             },
         })
     } else {
-        for item in &pending {
+        for item in &notes {
             println!(
                 "{} {} {} {}",
                 item.asset_id, item.title, item.knowledge_path, item.content_revision
@@ -1190,13 +1172,19 @@ fn knowledge_review(arguments: KnowledgeReviewArgs) -> Result<(), MkoError> {
     }
     let mut items = Vec::new();
     for note in selected {
-        let text = std::fs::read_to_string(repository.join(&note.knowledge_path))
-            .map_err(|error| MkoError::new("knowledge_unreadable", error.to_string()))?;
-        println!("{text}");
-        print!("{} · {} — approve/defer: ", note.title, note.asset_id);
-        std::io::stdout()
-            .flush()
-            .map_err(|error| MkoError::new("terminal_write_failed", error.to_string()))?;
+        if json_v1 {
+            eprintln!("{}", note.rendered_markdown);
+            eprint!("{} · {} — approve/defer: ", note.title, note.asset_id);
+            std::io::stderr()
+                .flush()
+                .map_err(|error| MkoError::new("terminal_write_failed", error.to_string()))?;
+        } else {
+            println!("{}", note.rendered_markdown);
+            print!("{} · {} — approve/defer: ", note.title, note.asset_id);
+            std::io::stdout()
+                .flush()
+                .map_err(|error| MkoError::new("terminal_write_failed", error.to_string()))?;
+        }
         let mut choice = String::new();
         std::io::stdin()
             .read_line(&mut choice)

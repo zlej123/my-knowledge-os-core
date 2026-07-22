@@ -24,7 +24,7 @@ use crate::{
     error::MkoError,
     front_matter::parse_markdown,
     hooks::PRE_COMMIT_SCRIPT,
-    knowledge::{KnowledgeRecord, validate_knowledge_record},
+    knowledge::{KnowledgeRecord, validate_knowledge_asset_contract, validate_knowledge_record},
     model::{AssetRecord, AssetStatus, ReviewStatus, SourceRecord, SourceStatus},
     path_policy::validate_portable_relative_path,
     pdf::{EXTRACTOR_NAME, EXTRACTOR_VERSION},
@@ -243,6 +243,7 @@ fn inspect_files(repository_root: &Path, files: &[RepositoryFile], issues: &mut 
         }
     }
 
+    let mut knowledge_assets = BTreeMap::<String, String>::new();
     for (path, record, body) in &knowledge_notes {
         for validation in validate_knowledge_record(path, record, body) {
             issues.push(issue(
@@ -253,13 +254,34 @@ fn inspect_files(repository_root: &Path, files: &[RepositoryFile], issues: &mut 
                 None,
             ));
         }
-        if !assets.contains_key(&record.asset_id) {
+        if let Some((_, asset)) = assets.get(&record.asset_id) {
+            for validation in validate_knowledge_asset_contract(path, record, asset) {
+                issues.push(issue(
+                    &validation.code,
+                    Some(&validation.path),
+                    None,
+                    &validation.message,
+                    None,
+                ));
+            }
+        } else {
             issues.push(issue(
                 "relation_missing",
                 Some(path),
                 None,
                 "knowledge note references an absent Asset Registry record",
                 None,
+            ));
+        }
+        if let Some(other) = knowledge_assets.insert(record.asset_id.clone(), path.clone()) {
+            issues.push(issue(
+                "relation_conflict",
+                Some(path),
+                None,
+                "more than one Knowledge note relates to the same Asset",
+                Some(format!(
+                    "compare with {other} and keep one canonical Knowledge note"
+                )),
             ));
         }
     }

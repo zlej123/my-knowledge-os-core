@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
+use crate::model::AssetRecord;
 use crate::{
     atomic::{AtomicWriteResult, write_replace_capability_validated_at_commit},
     clock::{Clock, SystemClock},
@@ -22,6 +23,7 @@ use crate::{
     front_matter::{parse_markdown, render_markdown},
     path_policy::canonical_directory,
     prepare::{PreparedSourceBundle, load_prepared_source_bundle},
+    provider_scan::{ElapsedClock, MonotonicElapsedClock, ScanDeadline, ScanLimits},
     registry::read_asset,
 };
 
@@ -30,6 +32,14 @@ pub const MAX_KNOWLEDGE_STRING_BYTES: usize = 64 * 1024;
 const MAX_KNOWLEDGE_SLUG_BYTES: usize = 96;
 const MAX_KNOWLEDGE_ENTRIES: usize = 1024;
 const MAX_KNOWLEDGE_SCAN_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_KNOWLEDGE_SCAN_ELAPSED_MS: u64 = 5_000;
+const DEFAULT_KNOWLEDGE_SCAN_LIMITS: ScanLimits = ScanLimits {
+    max_entries: MAX_KNOWLEDGE_ENTRIES as u64,
+    max_total_bytes: MAX_KNOWLEDGE_SCAN_BYTES,
+    max_elapsed_ms: MAX_KNOWLEDGE_SCAN_ELAPSED_MS,
+    max_depth: 1,
+    max_batch_items: MAX_KNOWLEDGE_ENTRIES as u64,
+};
 static NEXT_KNOWLEDGE_TEMP: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -244,6 +254,19 @@ pub trait KnowledgeMutationObserver {
 
     fn before_publication(&mut self) -> Result<(), MkoError>;
 }
+
+#[doc(hidden)]
+pub trait KnowledgeScanObserver {
+    fn before_entry_open(&mut self, _filename: &Path) -> Result<(), MkoError> {
+        Ok(())
+    }
+
+    fn after_entry_metadata(&mut self, _filename: &Path) -> Result<(), MkoError> {
+        Ok(())
+    }
+}
+
+impl KnowledgeScanObserver for () {}
 
 struct NoopKnowledgeMutationObserver;
 
@@ -668,14 +691,8 @@ fn knowledge_directory_with_observer(
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(_) => return Err(knowledge_path_error()),
     }
-    open_knowledge_directory(repository_root, &repository, observer)?
+    open_knowledge_directory(repository_root, &repository, observer, true)?
         .ok_or_else(knowledge_path_error)
-}
-
-fn existing_knowledge_directory(
-    repository_root: &Path,
-) -> Result<Option<KnowledgeDirectory>, MkoError> {
-    existing_knowledge_directory_with_observer(repository_root, &mut NoopKnowledgeMutationObserver)
 }
 
 fn existing_knowledge_directory_with_observer(
@@ -684,13 +701,14 @@ fn existing_knowledge_directory_with_observer(
 ) -> Result<Option<KnowledgeDirectory>, MkoError> {
     let repository = Dir::open_ambient_dir(repository_root, ambient_authority())
         .map_err(|_| knowledge_path_error())?;
-    open_knowledge_directory(repository_root, &repository, observer)
+    open_knowledge_directory(repository_root, &repository, observer, true)
 }
 
 fn open_knowledge_directory(
     repository_root: &Path,
     repository: &Dir,
     observer: &mut dyn KnowledgeMutationObserver,
+    reject_collisions: bool,
 ) -> Result<Option<KnowledgeDirectory>, MkoError> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -717,7 +735,9 @@ fn open_knowledge_directory(
         return Err(knowledge_path_error());
     }
     let directory = Dir::from_std_file(file.into_std());
-    reject_knowledge_collisions(&directory)?;
+    if reject_collisions {
+        reject_knowledge_collisions(&directory)?;
+    }
     Ok(Some(KnowledgeDirectory {
         path: repository_root.join("knowledge"),
         repository: repository.try_clone().map_err(|_| knowledge_path_error())?,
@@ -812,36 +832,95 @@ fn find_knowledge_in_directory(
 }
 
 fn read_knowledge_documents(repository_root: &Path) -> Result<Vec<KnowledgeDocument>, MkoError> {
-    let Some(knowledge) = existing_knowledge_directory(repository_root)? else {
-        return Ok(Vec::new());
-    };
-    read_knowledge_documents_from_directory(&knowledge)
+    let clock = MonotonicElapsedClock::start();
+    read_knowledge_documents_with_scan(
+        repository_root,
+        DEFAULT_KNOWLEDGE_SCAN_LIMITS,
+        &clock,
+        &mut (),
+    )
 }
 
 fn read_knowledge_documents_from_directory(
     knowledge: &KnowledgeDirectory,
 ) -> Result<Vec<KnowledgeDocument>, MkoError> {
-    let mut filenames = knowledge
+    let clock = MonotonicElapsedClock::start();
+    let deadline = ScanDeadline::start(&clock, DEFAULT_KNOWLEDGE_SCAN_LIMITS);
+    read_knowledge_documents_from_directory_with_scan(
+        knowledge,
+        DEFAULT_KNOWLEDGE_SCAN_LIMITS,
+        &deadline,
+        &mut (),
+    )
+}
+
+fn read_knowledge_documents_with_scan(
+    repository_root: &Path,
+    limits: ScanLimits,
+    clock: &dyn ElapsedClock,
+    observer: &mut dyn KnowledgeScanObserver,
+) -> Result<Vec<KnowledgeDocument>, MkoError> {
+    let deadline = ScanDeadline::start(clock, limits);
+    deadline.check()?;
+    let repository = Dir::open_ambient_dir(repository_root, ambient_authority())
+        .map_err(|_| knowledge_path_error())?;
+    let Some(knowledge) = open_knowledge_directory(
+        repository_root,
+        &repository,
+        &mut NoopKnowledgeMutationObserver,
+        false,
+    )?
+    else {
+        deadline.check()?;
+        return Ok(Vec::new());
+    };
+    read_knowledge_documents_from_directory_with_scan(&knowledge, limits, &deadline, observer)
+}
+
+fn read_knowledge_documents_from_directory_with_scan(
+    knowledge: &KnowledgeDirectory,
+    limits: ScanLimits,
+    deadline: &ScanDeadline<'_>,
+    observer: &mut dyn KnowledgeScanObserver,
+) -> Result<Vec<KnowledgeDocument>, MkoError> {
+    deadline.check()?;
+    let mut filenames = Vec::new();
+    let mut collision_names = HashSet::new();
+    for entry in knowledge
         .directory
         .entries()
         .map_err(|_| knowledge_scan_error())?
-        .take(MAX_KNOWLEDGE_ENTRIES + 1)
-        .map(|entry| {
-            let entry = entry.map_err(|_| knowledge_scan_error())?;
-            let file_type = entry.file_type().map_err(|_| knowledge_scan_error())?;
-            if file_type.is_symlink() {
-                return Err(knowledge_scan_error());
-            }
-            Ok(entry.file_name())
-        })
-        .collect::<Result<Vec<_>, MkoError>>()?;
-    if filenames.len() > MAX_KNOWLEDGE_ENTRIES {
-        return Err(knowledge_scan_error());
+    {
+        deadline.check()?;
+        if filenames.len() as u64 >= limits.max_entries {
+            return Err(knowledge_scan_error());
+        }
+        let entry = entry.map_err(|_| knowledge_scan_error())?;
+        let file_type = entry.file_type().map_err(|_| knowledge_scan_error())?;
+        if file_type.is_symlink() {
+            return Err(knowledge_path_error());
+        }
+        let filename = entry.file_name();
+        let collision_name = filename
+            .to_str()
+            .ok_or_else(knowledge_path_error)?
+            .nfc()
+            .collect::<String>()
+            .to_lowercase();
+        if !collision_names.insert(collision_name) {
+            return Err(MkoError::new(
+                "path_collision",
+                "knowledge contains a case or Unicode-normalization collision",
+            ));
+        }
+        filenames.push(filename);
     }
+    deadline.check()?;
     filenames.sort();
     let mut total = 0u64;
     let mut documents = Vec::new();
     for filename in filenames {
+        deadline.check()?;
         if Path::new(&filename)
             .extension()
             .and_then(|value| value.to_str())
@@ -849,10 +928,22 @@ fn read_knowledge_documents_from_directory(
         {
             continue;
         }
-        let snapshot = read_knowledge_snapshot(&knowledge.directory, Path::new(&filename))?;
+        observer.before_entry_open(Path::new(&filename))?;
+        deadline.check()?;
+        let remaining = limits
+            .max_total_bytes
+            .checked_sub(total)
+            .ok_or_else(knowledge_scan_error)?;
+        let snapshot = read_knowledge_snapshot_for_scan(
+            &knowledge.directory,
+            Path::new(&filename),
+            remaining,
+            deadline,
+            observer,
+        )?;
         total = total
             .checked_add(snapshot.len() as u64)
-            .filter(|total| *total <= MAX_KNOWLEDGE_SCAN_BYTES)
+            .filter(|total| *total <= limits.max_total_bytes)
             .ok_or_else(knowledge_scan_error)?;
         let input = std::str::from_utf8(&snapshot)
             .map_err(|error| MkoError::new("knowledge_unreadable", error.to_string()))?;
@@ -866,7 +957,39 @@ fn read_knowledge_documents_from_directory(
             snapshot,
         });
     }
+    deadline.check()?;
     Ok(documents)
+}
+
+fn read_knowledge_snapshot_for_scan(
+    directory: &Dir,
+    filename: &Path,
+    max_bytes: u64,
+    deadline: &ScanDeadline<'_>,
+    observer: &mut dyn KnowledgeScanObserver,
+) -> Result<Vec<u8>, MkoError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_nofollow(&mut options, false);
+    let mut file = directory
+        .open_with(filename, &options)
+        .map_err(|_| knowledge_path_error())?;
+    let metadata = file.metadata().map_err(|_| knowledge_scan_error())?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > max_bytes {
+        return Err(knowledge_scan_error());
+    }
+    observer.after_entry_metadata(filename)?;
+    deadline.check()?;
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| MkoError::new("knowledge_unreadable", error.to_string()))?;
+    deadline.check()?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(knowledge_scan_error());
+    }
+    Ok(bytes)
 }
 
 fn read_knowledge_snapshot(directory: &Dir, filename: &Path) -> Result<Vec<u8>, MkoError> {
@@ -1131,6 +1254,51 @@ pub struct PendingKnowledge {
     pub title: String,
     pub knowledge_path: String,
     pub content_revision: String,
+    pub rendered_markdown: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KnowledgeNote {
+    pub knowledge_id: String,
+    pub asset_id: String,
+    pub title: String,
+    pub knowledge_path: String,
+    pub content_revision: String,
+    pub review_status: ReviewState,
+    pub concepts: Vec<Concept>,
+}
+
+pub fn list_knowledge(repository_root: &Path) -> Result<Vec<KnowledgeNote>, MkoError> {
+    let repository_root = canonical_directory(repository_root, "repository_root_invalid")?;
+    project_knowledge_notes(
+        &repository_root,
+        read_knowledge_documents(&repository_root)?,
+    )
+}
+
+fn project_knowledge_notes(
+    repository_root: &Path,
+    documents: Vec<KnowledgeDocument>,
+) -> Result<Vec<KnowledgeNote>, MkoError> {
+    let mut notes = documents
+        .into_iter()
+        .map(|document| {
+            let knowledge_path = repository_relative(repository_root, &document.path)?;
+            Ok(KnowledgeNote {
+                knowledge_id: document.record.id,
+                asset_id: document.record.asset_id,
+                title: document.record.title,
+                knowledge_path,
+                content_revision: document.record.content_revision,
+                review_status: document.record.review.status,
+                concepts: document.record.concepts,
+            })
+        })
+        .collect::<Result<Vec<_>, MkoError>>()?;
+    notes.sort_by(|left, right| {
+        (&left.title, &left.knowledge_id).cmp(&(&right.title, &right.knowledge_id))
+    });
+    Ok(notes)
 }
 
 pub fn list_unreviewed_knowledge(
@@ -1142,12 +1310,15 @@ pub fn list_unreviewed_knowledge(
         .filter(|document| document.record.review.status == ReviewState::Unreviewed)
         .map(|document| {
             let knowledge_path = repository_relative(&repository_root, &document.path)?;
+            let rendered_markdown = String::from_utf8(document.snapshot)
+                .map_err(|error| MkoError::new("knowledge_unreadable", error.to_string()))?;
             Ok(PendingKnowledge {
                 knowledge_id: document.record.id,
                 asset_id: document.record.asset_id,
                 title: document.record.title,
                 knowledge_path,
                 content_revision: document.record.content_revision,
+                rendered_markdown,
             })
         })
         .collect::<Result<Vec<_>, MkoError>>()?;
@@ -1246,10 +1417,28 @@ pub fn search_knowledge(
     repository_root: &Path,
     query: &KnowledgeSearchQuery,
 ) -> Result<Vec<ConceptMatch>, MkoError> {
+    let clock = MonotonicElapsedClock::start();
+    search_knowledge_with_scan(
+        repository_root,
+        query,
+        DEFAULT_KNOWLEDGE_SCAN_LIMITS,
+        &clock,
+        &mut (),
+    )
+}
+
+#[doc(hidden)]
+pub fn search_knowledge_with_scan(
+    repository_root: &Path,
+    query: &KnowledgeSearchQuery,
+    limits: ScanLimits,
+    clock: &dyn ElapsedClock,
+    observer: &mut dyn KnowledgeScanObserver,
+) -> Result<Vec<ConceptMatch>, MkoError> {
     let repository_root = canonical_directory(repository_root, "repository_root_invalid")?;
     let term = query.term.to_lowercase();
     let mut matches = Vec::new();
-    for document in read_knowledge_documents(&repository_root)? {
+    for document in read_knowledge_documents_with_scan(&repository_root, limits, clock, observer)? {
         let knowledge_path = repository_relative(&repository_root, &document.path)?;
         for concept in &document.record.concepts {
             if let Some(kind) = &query.kind
@@ -1264,10 +1453,11 @@ pub fn search_knowledge(
             }
             if !term.is_empty() {
                 let haystack = format!(
-                    "{} {} {}",
+                    "{} {} {} {}",
                     concept.name,
                     concept.body,
-                    concept.tags.join(" ")
+                    concept.tags.join(" "),
+                    concept_kind_label(&concept.kind),
                 )
                 .to_lowercase();
                 if !haystack.contains(&term) {
@@ -1306,11 +1496,30 @@ pub fn validate_knowledge_record(
     body: &str,
 ) -> Vec<KnowledgeValidationIssue> {
     let mut issues = Vec::new();
-    if record.record_type != "knowledge" || record.schema_version != 1 {
+    let asset_hash = record
+        .asset_id
+        .strip_prefix("personal-asset-")
+        .filter(|hash| {
+            hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        });
+    let identity_valid = asset_hash.is_some_and(|hash| {
+        record.id == format!("personal-knowledge-{hash}")
+            && record.generation.asset_fingerprint == format!("sha256:{hash}")
+    });
+    if record.record_type != "knowledge"
+        || record.schema_version != 1
+        || !identity_valid
+        || record.generation.processor_version != "knowledge-v1"
+        || record.generation.prompt_version != "codex-knowledge-v1"
+    {
         issues.push(KnowledgeValidationIssue {
             code: "knowledge_invalid".into(),
             path: path.into(),
-            message: "knowledge record_type or schema_version is not canonical".into(),
+            message: "knowledge identity, schema, generation, or fingerprint is not canonical"
+                .into(),
         });
     }
 
@@ -1355,20 +1564,71 @@ pub fn validate_knowledge_record(
         });
     }
 
-    let mut seen_ids = HashSet::new();
+    let original_inputs = record
+        .concepts
+        .iter()
+        .map(|concept| ConceptInput {
+            name: concept.name.clone(),
+            kind: concept.kind.clone(),
+            body: concept.body.clone(),
+            tags: concept.tags.clone(),
+            locator: concept.locator.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut response = KnowledgeResponse {
+        synthesis: "validation placeholder".into(),
+        concepts: original_inputs.clone(),
+    };
+    if normalize_and_validate_knowledge(&mut response).is_err()
+        || response.concepts != original_inputs
+    {
+        issues.push(KnowledgeValidationIssue {
+            code: "concept_invalid".into(),
+            path: path.into(),
+            message: "knowledge concepts must satisfy the canonical durable constraints".into(),
+        });
+    }
+    let expected_ids = assign_concept_ids(&response.concepts);
     let ids_valid = record
         .concepts
         .iter()
-        .all(|concept| !concept.id.is_empty() && seen_ids.insert(concept.id.clone()));
+        .map(|concept| concept.id.as_str())
+        .eq(expected_ids.iter().map(|concept| concept.id.as_str()));
     if !ids_valid {
         issues.push(KnowledgeValidationIssue {
             code: "concept_id_invalid".into(),
             path: path.into(),
-            message: "knowledge concept IDs must be non-empty and unique within the note".into(),
+            message: "knowledge concept IDs must be canonical and unique within the note".into(),
         });
     }
 
     issues
+}
+
+pub fn validate_knowledge_asset_contract(
+    path: &str,
+    record: &KnowledgeRecord,
+    asset: &AssetRecord,
+) -> Vec<KnowledgeValidationIssue> {
+    let expected_id = asset
+        .id
+        .replacen("personal-asset-", "personal-knowledge-", 1);
+    let expected_path = knowledge_filename(asset.created_at, &asset.title, &expected_id)
+        .map(|filename| format!("knowledge/{filename}"));
+    if record.id != expected_id
+        || record.asset_id != asset.id
+        || record.title != asset.title
+        || record.generation.asset_fingerprint != asset.fingerprint.value
+        || expected_path.as_deref().ok() != Some(path)
+    {
+        vec![KnowledgeValidationIssue {
+            code: "knowledge_invalid".into(),
+            path: path.into(),
+            message: "knowledge ID, path, title, or Asset fingerprint link is not canonical".into(),
+        }]
+    } else {
+        Vec::new()
+    }
 }
 
 fn is_sha256_revision(value: &str) -> bool {

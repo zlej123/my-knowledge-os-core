@@ -4,8 +4,15 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+#[cfg(target_os = "macos")]
+use std::{
+    io::Write,
+    process::{Command as ProcessCommand, Stdio},
+};
+
 use assert_cmd::Command;
 use mko_core::{
+    knowledge::approve_knowledge,
     pdf::{EXTRACTOR_NAME, EXTRACTOR_VERSION},
     prepare::{PROCESSOR_VERSION, PROMPT_VERSION, PreparedSourceBundle, TRUST, VersionedComponent},
     registry::read_asset,
@@ -317,6 +324,117 @@ fn knowledge_show_and_list_report_the_written_note() {
 
 #[test]
 #[allow(deprecated)]
+fn knowledge_show_and_list_keep_a_reviewed_note_with_no_concepts() {
+    let env = Env::new();
+    let asset_id = env.capture_asset("empty.pdf", b"%PDF-1.7\nempty concepts fixture");
+    let response = env.write_response(
+        "empty-response.json",
+        r#"{"synthesis":"Useful synthesis without separate concepts.","concepts":[]}"#,
+    );
+    let written = one_json(
+        &env.command(env.write_arguments(&asset_id, &response, false))
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+    approve_knowledge(
+        &env.repository,
+        written["data"]["knowledge_id"].as_str().unwrap(),
+        written["data"]["content_revision"].as_str().unwrap(),
+    )
+    .unwrap();
+
+    let shown = one_json(
+        &env.command([
+            "knowledge",
+            "show",
+            "--repo",
+            &env.repository.display().to_string(),
+            "--asset-id",
+            &asset_id,
+            "--format",
+            "json-v1",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout,
+    );
+    assert_eq!(shown["data"]["review_status"], "reviewed");
+    assert_eq!(
+        shown["data"]["knowledge_id"],
+        written["data"]["knowledge_id"]
+    );
+    assert_eq!(shown["data"]["concepts"], serde_json::json!([]));
+
+    let listed = one_json(
+        &env.command([
+            "knowledge",
+            "list",
+            "--repo",
+            &env.repository.display().to_string(),
+            "--format",
+            "json-v1",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout,
+    );
+    let items = listed["data"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["asset_id"], asset_id);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[allow(deprecated)]
+fn interactive_knowledge_review_json_stdout_is_one_object() {
+    let env = Env::new();
+    let asset_id = env.capture_asset("review.pdf", b"%PDF-1.7\nreview fixture");
+    let response = env.write_response("review-response.json", VALID_RESPONSE);
+    env.command(env.write_arguments(&asset_id, &response, false))
+        .assert()
+        .success();
+    let stderr_path = env.root.join("review-stderr.log");
+    let shell_command = "stty -echo; exec \"$MKO_TEST_BIN\" knowledge review --repo \"$MKO_TEST_REPO\" --asset-id \"$MKO_TEST_ASSET\" --format json-v1 2>\"$MKO_TEST_STDERR\"";
+    let mut child = ProcessCommand::new("/usr/bin/script")
+        .args(["-q", "/dev/null", "/bin/sh", "-c", shell_command])
+        .env("MKO_TEST_BIN", assert_cmd::cargo::cargo_bin("mko"))
+        .env("MKO_TEST_REPO", &env.repository)
+        .env("MKO_TEST_ASSET", &asset_id)
+        .env("MKO_TEST_STDERR", &stderr_path)
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &env.provider)
+        .current_dir(&env.root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    stdin.write_all(b"approve\n").unwrap();
+    stdin.flush().unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "script stderr={} child stderr={} transcript={}",
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&stderr_path).unwrap_or_default(),
+        String::from_utf8_lossy(&output.stdout),
+    );
+
+    let value = one_json(&output.stdout);
+    assert_eq!(value["command"], "knowledge.review");
+    assert_eq!(value["data"]["items"][0]["decision"], "approved");
+    let prompts = fs::read_to_string(stderr_path).unwrap();
+    assert!(prompts.contains("approve/defer"));
+    assert!(prompts.contains("## Synthesis"));
+}
+
+#[test]
+#[allow(deprecated)]
 fn knowledge_review_requires_a_human_tty_and_has_no_json_bypass() {
     let env = Env::new();
 
@@ -498,7 +616,8 @@ fn one_json(stdout: &[u8]) -> Value {
     assert_eq!(
         stdout.iter().filter(|&&byte| byte == b'\n').count(),
         1,
-        "stdout must contain one JSON object"
+        "stdout must contain one JSON object: {}",
+        String::from_utf8_lossy(stdout)
     );
     serde_json::from_slice(stdout).unwrap()
 }

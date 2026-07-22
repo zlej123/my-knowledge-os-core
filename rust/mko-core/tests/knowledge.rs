@@ -1,7 +1,11 @@
 use std::{
     fs,
+    io::Write,
     path::PathBuf,
-    sync::{Arc, Barrier},
+    sync::{
+        Arc, Barrier,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
 };
 
@@ -10,12 +14,14 @@ use mko_core::{
     check::{CheckRequest, check_repository},
     clock::Clock,
     knowledge::{
-        ConceptKind, KnowledgeMutationObserver, KnowledgeSearchQuery, WriteKnowledgeRequest,
-        approve_knowledge, approve_knowledge_with_clock_and_observer, list_unreviewed_knowledge,
-        normalize_and_validate_knowledge, parse_knowledge_response, search_knowledge,
+        ConceptKind, KnowledgeMutationObserver, KnowledgeScanObserver, KnowledgeSearchQuery,
+        WriteKnowledgeRequest, approve_knowledge, approve_knowledge_with_clock_and_observer,
+        list_knowledge, list_unreviewed_knowledge, normalize_and_validate_knowledge,
+        parse_knowledge_response, search_knowledge, search_knowledge_with_scan,
         write_knowledge_note_with_clock, write_knowledge_note_with_clock_and_observer,
     },
     prepare::{PrepareRequest, prepare_source_with_extractor},
+    provider_scan::{ElapsedClock, ScanLimits},
     registry::{CaptureRequest, capture_asset},
 };
 use tempfile::TempDir;
@@ -214,6 +220,77 @@ const VALID: &str = r#"{
     {"name": "Causal signal", "kind": "definition", "body": "x(t)=0 for t<0", "tags": [], "locator": null}
   ]
 }"#;
+
+const EMPTY_CONCEPTS: &str = r#"{
+  "synthesis": "A useful note with no separately addressable concepts.",
+  "concepts": []
+}"#;
+
+struct IncrementingElapsedClock(AtomicU64);
+
+impl IncrementingElapsedClock {
+    fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+}
+
+impl ElapsedClock for IncrementingElapsedClock {
+    fn elapsed_ms(&self) -> u64 {
+        self.0.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+fn knowledge_scan_limits(max_total_bytes: u64, max_elapsed_ms: u64) -> ScanLimits {
+    ScanLimits {
+        max_entries: 16,
+        max_total_bytes,
+        max_elapsed_ms,
+        max_depth: 1,
+        max_batch_items: 16,
+    }
+}
+
+#[cfg(unix)]
+struct SwapKnowledgeEntryObserver {
+    entry: PathBuf,
+    retained: PathBuf,
+    outside: PathBuf,
+    swapped: bool,
+}
+
+#[cfg(unix)]
+impl KnowledgeScanObserver for SwapKnowledgeEntryObserver {
+    fn before_entry_open(&mut self, _: &std::path::Path) -> Result<(), mko_core::error::MkoError> {
+        if !self.swapped {
+            fs::rename(&self.entry, &self.retained).unwrap();
+            std::os::unix::fs::symlink(&self.outside, &self.entry).unwrap();
+            self.swapped = true;
+        }
+        Ok(())
+    }
+}
+
+struct GrowKnowledgeEntryObserver {
+    entry: PathBuf,
+    grown: bool,
+}
+
+impl KnowledgeScanObserver for GrowKnowledgeEntryObserver {
+    fn after_entry_metadata(
+        &mut self,
+        _: &std::path::Path,
+    ) -> Result<(), mko_core::error::MkoError> {
+        if !self.grown {
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(&self.entry)
+                .unwrap();
+            file.write_all(&vec![b'x'; 256]).unwrap();
+            self.grown = true;
+        }
+        Ok(())
+    }
+}
 
 #[test]
 fn parses_and_validates_a_well_formed_response() {
@@ -648,6 +725,25 @@ fn list_unreviewed_returns_only_unreviewed_notes() {
     assert_eq!(list_unreviewed_knowledge(kb.repo()).unwrap().len(), 0);
 }
 
+#[test]
+fn list_knowledge_keeps_reviewed_notes_with_no_concepts() {
+    let kb = knowledge_fixture();
+    let written = kb
+        .write(kb.asset_id(), EMPTY_CONCEPTS.as_bytes(), false)
+        .unwrap();
+    approve_knowledge(kb.repo(), &written.knowledge_id, &written.content_revision).unwrap();
+
+    let notes = list_knowledge(kb.repo()).unwrap();
+
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].asset_id, kb.asset_id());
+    assert_eq!(
+        notes[0].review_status,
+        mko_core::knowledge::ReviewState::Reviewed
+    );
+    assert!(notes[0].concepts.is_empty());
+}
+
 const OTHER: &str = r#"{
   "synthesis": "A control-theory text covering feedback stability.",
   "concepts": [
@@ -710,6 +806,109 @@ fn search_finds_matches_across_documents_and_respects_filters() {
 }
 
 #[test]
+fn search_term_includes_the_concept_kind() {
+    let kb = knowledge_fixture();
+    kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+
+    let hits = search_knowledge(
+        kb.repo(),
+        &KnowledgeSearchQuery {
+            term: "formula".into(),
+            kind: None,
+            tag: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].name, "Convolution");
+}
+
+#[test]
+fn knowledge_scan_has_one_elapsed_deadline() {
+    let kb = knowledge_fixture();
+    kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let clock = IncrementingElapsedClock::new();
+    let mut observer = ();
+
+    let error = search_knowledge_with_scan(
+        kb.repo(),
+        &KnowledgeSearchQuery {
+            term: String::new(),
+            kind: None,
+            tag: None,
+        },
+        knowledge_scan_limits(1024 * 1024, 2),
+        &clock,
+        &mut observer,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "scan_time_limit");
+}
+
+#[cfg(unix)]
+#[test]
+fn knowledge_scan_does_not_follow_an_entry_swapped_to_a_symlink() {
+    let kb = knowledge_fixture();
+    let written = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let entry = kb.repo().join(&written.knowledge_path);
+    let retained = entry.with_extension("retained");
+    let outside = kb._root.path().join("outside.md");
+    let outside_bytes = fs::read(&entry).unwrap();
+    fs::write(&outside, &outside_bytes).unwrap();
+    let mut observer = SwapKnowledgeEntryObserver {
+        entry,
+        retained,
+        outside: outside.clone(),
+        swapped: false,
+    };
+
+    let error = search_knowledge_with_scan(
+        kb.repo(),
+        &KnowledgeSearchQuery {
+            term: String::new(),
+            kind: None,
+            tag: None,
+        },
+        knowledge_scan_limits(1024 * 1024, 5_000),
+        &IncrementingElapsedClock::new(),
+        &mut observer,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "knowledge_path_invalid");
+    assert_eq!(fs::read(&outside).unwrap(), outside_bytes);
+}
+
+#[test]
+fn knowledge_scan_rejects_a_file_that_grows_after_open_metadata() {
+    let kb = knowledge_fixture();
+    let written = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let entry = kb.repo().join(&written.knowledge_path);
+    let initial_len = fs::metadata(&entry).unwrap().len();
+    let mut observer = GrowKnowledgeEntryObserver {
+        entry,
+        grown: false,
+    };
+
+    let error = search_knowledge_with_scan(
+        kb.repo(),
+        &KnowledgeSearchQuery {
+            term: String::new(),
+            kind: None,
+            tag: None,
+        },
+        knowledge_scan_limits(initial_len + 32, 5_000),
+        &IncrementingElapsedClock::new(),
+        &mut observer,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "knowledge_scan_limit");
+}
+
+#[test]
 fn search_is_bounded_by_a_maximum_entry_count() {
     let kb = knowledge_fixture();
     let knowledge_dir = kb.repo().join("knowledge");
@@ -768,4 +967,86 @@ fn check_reports_a_dangling_asset_relation() {
 
     let report = check_repository(CheckRequest::new(kb.repo())).unwrap();
     assert!(report.has_code("relation_missing"));
+}
+
+#[test]
+fn check_rejects_noncanonical_knowledge_id() {
+    let kb = knowledge_fixture();
+    let written = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let path = kb.repo().join(&written.knowledge_path);
+    let corrupted = fs::read_to_string(&path).unwrap().replace(
+        &written.knowledge_id,
+        &format!("personal-knowledge-{}", "0".repeat(64)),
+    );
+    fs::write(&path, corrupted).unwrap();
+
+    let report = check_repository(CheckRequest::new(kb.repo())).unwrap();
+
+    assert!(report.has_code("knowledge_invalid"));
+}
+
+#[test]
+fn check_rejects_noncanonical_knowledge_path() {
+    let kb = knowledge_fixture();
+    let written = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    fs::rename(
+        kb.repo().join(&written.knowledge_path),
+        kb.repo().join("knowledge/not-canonical.md"),
+    )
+    .unwrap();
+
+    let report = check_repository(CheckRequest::new(kb.repo())).unwrap();
+
+    assert!(report.has_code("knowledge_invalid"));
+}
+
+#[test]
+fn check_rejects_noncanonical_knowledge_generation_and_fingerprint() {
+    let kb = knowledge_fixture();
+    let written = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let path = kb.repo().join(&written.knowledge_path);
+    let corrupted = fs::read_to_string(&path)
+        .unwrap()
+        .replace(
+            "processor_version: knowledge-v1",
+            "processor_version: future-v9",
+        )
+        .replace("asset_fingerprint: sha256:", "asset_fingerprint: sha256:00");
+    fs::write(&path, corrupted).unwrap();
+
+    let report = check_repository(CheckRequest::new(kb.repo())).unwrap();
+
+    assert!(report.has_code("knowledge_invalid"));
+}
+
+#[test]
+fn check_rejects_noncanonical_concept_ids_and_content() {
+    let kb = knowledge_fixture();
+    let written = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let path = kb.repo().join(&written.knowledge_path);
+    let corrupted = fs::read_to_string(&path)
+        .unwrap()
+        .replace("id: convolution", "id: wrong-id")
+        .replace("name: Convolution", "name: ''");
+    fs::write(&path, corrupted).unwrap();
+
+    let report = check_repository(CheckRequest::new(kb.repo())).unwrap();
+
+    assert!(report.has_code("concept_id_invalid"));
+    assert!(report.has_code("concept_invalid"));
+}
+
+#[test]
+fn check_rejects_more_than_one_knowledge_note_for_an_asset() {
+    let kb = knowledge_fixture();
+    let written = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    fs::copy(
+        kb.repo().join(&written.knowledge_path),
+        kb.repo().join("knowledge/duplicate.md"),
+    )
+    .unwrap();
+
+    let report = check_repository(CheckRequest::new(kb.repo())).unwrap();
+
+    assert!(report.has_code("relation_conflict"));
 }
