@@ -73,6 +73,12 @@ historical Source evidence and do not validate the later Knowledge workflow.
 Fresh workers evaluated the hardened canonical Skill without the rubric, future command results,
 or another worker's output:
 
+The committed, sanitized per-worker action sequence and binary rubric results are recorded in
+[`tests/skill-forward/evidence/knowledge-hardening-fresh-context.json`](../../tests/skill-forward/evidence/knowledge-hardening-fresh-context.json).
+That artifact identifies both fresh workers, their prompts and fixtures, exact selected commands,
+action counts, final states, and every applicable rubric result. It intentionally excludes local
+paths, secrets, raw document text, and provider credentials.
+
 - Read-only formula/content questions produced no `mko` action and did not authorize a durable
   Knowledge note.
 - An explicit `이 PDF에서 지식과 개념을 추출해줘` action request received the raw hostile
