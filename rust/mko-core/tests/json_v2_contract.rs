@@ -102,11 +102,44 @@ fn machine_envelope_goldens_validate_and_round_trip() {
     .unwrap();
     let validator = jsonschema::validator_for(&schema).unwrap();
 
+    let add = include_bytes!("../../../tests/fixtures/json-v2/add-success.json");
+    let add_value: Value = serde_json::from_slice(add).unwrap();
+    assert!(validator.is_valid(&add_value));
+    let add_typed: JsonV2Success = serde_json::from_slice(add).unwrap();
+    assert_eq!(serde_json::to_value(add_typed).unwrap(), add_value);
+
+    for bytes in [
+        include_bytes!("../../../tests/fixtures/json-v2/source-prepare-success.json").as_slice(),
+        include_bytes!("../../../tests/fixtures/json-v2/source-write-success.json").as_slice(),
+        include_bytes!("../../../tests/fixtures/json-v2/knowledge-write-success.json").as_slice(),
+    ] {
+        let value: Value = serde_json::from_slice(bytes).unwrap();
+        assert!(validator.is_valid(&value));
+        let typed: JsonV2Success = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(serde_json::to_value(typed).unwrap(), value);
+    }
+
     let success = include_bytes!("../../../tests/fixtures/json-v2/queue-success.json");
     let success_value: Value = serde_json::from_slice(success).unwrap();
     assert!(validator.is_valid(&success_value));
     let success_typed: JsonV2Success = serde_json::from_slice(success).unwrap();
     assert_eq!(serde_json::to_value(success_typed).unwrap(), success_value);
+
+    let show = include_bytes!("../../../tests/fixtures/json-v2/show-success.json");
+    let show_value: Value = serde_json::from_slice(show).unwrap();
+    assert!(validator.is_valid(&show_value));
+    let show_typed: JsonV2Success = serde_json::from_slice(show).unwrap();
+    assert_eq!(serde_json::to_value(show_typed).unwrap(), show_value);
+
+    for bytes in [
+        include_bytes!("../../../tests/fixtures/json-v2/review-open-success.json").as_slice(),
+        include_bytes!("../../../tests/fixtures/json-v2/review-feedback-success.json").as_slice(),
+    ] {
+        let value: Value = serde_json::from_slice(bytes).unwrap();
+        assert!(validator.is_valid(&value));
+        let typed: JsonV2Success = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(serde_json::to_value(typed).unwrap(), value);
+    }
 
     let failure = include_bytes!("../../../tests/fixtures/json-v2/queue-error.json");
     let failure_value: Value = serde_json::from_slice(failure).unwrap();
@@ -268,4 +301,65 @@ fn machine_envelopes_reject_unknown_fields_and_non_v2_versions() {
     value["data"]["items"][0]["unexpected"] = json!(true);
     assert!(!validator.is_valid(&value));
     assert!(serde_json::from_value::<JsonV2Success>(value).is_err());
+}
+
+#[test]
+fn show_envelope_requires_exact_revision_bound_targets() {
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../../schemas/v2/machine-output.schema.json"
+    ))
+    .unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let bytes = include_bytes!("../../../tests/fixtures/json-v2/show-success.json");
+
+    let mut value: Value = serde_json::from_slice(bytes).unwrap();
+    value["data"]["targets"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("review_head_id");
+    assert!(!validator.is_valid(&value));
+    assert!(serde_json::from_value::<JsonV2Success>(value).is_err());
+
+    let mut value: Value = serde_json::from_slice(bytes).unwrap();
+    value["data"]["targets"][0]["displayed_revision"] = json!("latest");
+    assert!(!validator.is_valid(&value));
+}
+
+#[test]
+fn semantic_write_envelopes_are_strict_and_digest_bound() {
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../../schemas/v2/machine-output.schema.json"
+    ))
+    .unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+
+    for bytes in [
+        include_bytes!("../../../tests/fixtures/json-v2/source-prepare-success.json").as_slice(),
+        include_bytes!("../../../tests/fixtures/json-v2/source-write-success.json").as_slice(),
+        include_bytes!("../../../tests/fixtures/json-v2/knowledge-write-success.json").as_slice(),
+    ] {
+        let mut value: Value = serde_json::from_slice(bytes).unwrap();
+        value["data"]["unexpected"] = json!(true);
+        assert!(!validator.is_valid(&value));
+        assert!(serde_json::from_value::<JsonV2Success>(value).is_err());
+
+        let mut value: Value = serde_json::from_slice(bytes).unwrap();
+        value["schema_version"] = json!(1);
+        assert!(!validator.is_valid(&value));
+        assert!(serde_json::from_value::<JsonV2Success>(value).is_err());
+    }
+
+    let mut prepared: Value = serde_json::from_slice(include_bytes!(
+        "../../../tests/fixtures/json-v2/source-prepare-success.json"
+    ))
+    .unwrap();
+    prepared["data"]["content_digest"] = json!("latest");
+    assert!(!validator.is_valid(&prepared));
+
+    let mut written: Value = serde_json::from_slice(include_bytes!(
+        "../../../tests/fixtures/json-v2/source-write-success.json"
+    ))
+    .unwrap();
+    written["data"]["revision"] = json!("latest");
+    assert!(!validator.is_valid(&written));
 }

@@ -3,6 +3,10 @@ use std::io::{self, Write};
 use mko_core::{
     error::MkoError,
     json_v1::{FailureResult, JsonV1Command, JsonV1Error, JsonV1Failure, JsonV1Success, Recovery},
+    json_v2::{
+        ErrorDetailsV2, JsonV2Command, JsonV2Error, JsonV2Failure, JsonV2FailureResult,
+        JsonV2Success, NextActionV2,
+    },
 };
 
 pub use mko_core::json_v1::RecoveryKind;
@@ -34,6 +38,52 @@ pub fn emit_json_v1(output: JsonV1Success) -> Result<(), MkoError> {
     let encoded = serde_json::to_string(&output)
         .map_err(|error| MkoError::new("json_output_failed", error.to_string()))?;
     emit_encoded_json(&encoded)
+}
+
+pub fn emit_json_v2(output: JsonV2Success) -> Result<(), MkoError> {
+    let encoded = serde_json::to_string(&output)
+        .map_err(|error| MkoError::new("json_output_failed", error.to_string()))?;
+    emit_encoded_json(&encoded)
+}
+
+pub fn emit_json_v2_failure(command: JsonV2Command, error: &MkoError) -> Result<(), MkoError> {
+    let failure = JsonV2Failure {
+        schema_version: 2,
+        command,
+        result: JsonV2FailureResult::Error,
+        error: JsonV2Error {
+            code: error.code().into(),
+            message: error.message().into(),
+            retryable: matches!(error.code(), "lock_held" | "review_session_random_failed"),
+            next_action: json_v2_next_action(error.code()),
+            details: ErrorDetailsV2::default(),
+        },
+    };
+    let encoded = serde_json::to_string(&failure)
+        .map_err(|error| MkoError::new("json_output_failed", error.to_string()))?;
+    emit_encoded_json(&encoded)
+}
+
+fn json_v2_next_action(code: &str) -> NextActionV2 {
+    match code {
+        "kb_config_unreadable" | "kb_schema_unsupported" | "context_not_found" => {
+            NextActionV2::Configure
+        }
+        "provider_hydration_required"
+        | "provider_not_hydrated"
+        | "asset_not_hydrated"
+        | "hydration_confirmation_required" => NextActionV2::Hydrate,
+        "asset_outside_inbox" | "asset_path_required" => NextActionV2::Add,
+        "projection_not_found"
+        | "projection_snapshot_changed"
+        | "projection_stale"
+        | "review_target_blocked" => NextActionV2::Repair,
+        "lock_held" | "review_session_random_failed" => NextActionV2::Retry,
+        "review_session_expired" | "review_session_consumed" | "review_snapshot_stale" => {
+            NextActionV2::Review
+        }
+        _ => NextActionV2::None,
+    }
 }
 
 fn write_json_line(writer: &mut impl Write, encoded: &str) -> Result<(), MkoError> {

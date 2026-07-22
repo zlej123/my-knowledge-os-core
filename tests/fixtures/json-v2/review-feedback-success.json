@@ -1,0 +1,11 @@
+{
+  "schema_version": 2,
+  "command": "review.feedback",
+  "result": "ok",
+  "data": {
+    "review_id": "personal-review-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "target_ids": [
+      "personal-source-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ]
+  }
+}

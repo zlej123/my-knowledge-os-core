@@ -18,6 +18,7 @@ const OWNED_DIRECTORIES: &[&str] = &[
     "recovery",
     "recovery/manual-edits",
 ];
+const LOCAL_RUNTIME_IGNORE: &[u8] = b"runtime/\n";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScaffoldOutcomeV2 {
@@ -58,6 +59,29 @@ pub fn scaffold_personal_kb_v2(repository_root: &Path) -> Result<ScaffoldOutcome
     for relative in OWNED_DIRECTORIES {
         repaired |= ensure_owned_directory(repository_root, relative)?;
     }
+
+    let runtime_ignore = repository_root.join(".mko/.gitignore");
+    let ignore_result = write_new(&runtime_ignore, LOCAL_RUNTIME_IGNORE, |path| {
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| MkoError::new("kb_runtime_policy_invalid", error.to_string()))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(MkoError::new(
+                "kb_runtime_policy_invalid",
+                ".mko/.gitignore must be a regular file",
+            ));
+        }
+        let existing = fs::read(path)
+            .map_err(|error| MkoError::new("kb_runtime_policy_invalid", error.to_string()))?;
+        if existing == LOCAL_RUNTIME_IGNORE {
+            Ok(())
+        } else {
+            Err(MkoError::new(
+                "kb_runtime_policy_invalid",
+                ".mko/.gitignore must exclude the local runtime directory",
+            ))
+        }
+    })?;
+    repaired |= ignore_result == AtomicWriteResult::Created;
 
     let desired = KnowledgeConfigV2::personal_default().render()?;
     let marker_result = write_new(&marker, &desired, |path| {

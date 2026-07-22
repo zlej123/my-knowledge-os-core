@@ -8,10 +8,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::KnowledgeConfig,
+    config_v2::KnowledgeConfigV2,
     error::MkoError,
     path_policy::canonical_directory,
     profile::{PersonalProfile, ProfileStore},
 };
+
+struct PersonalKnowledgeDescriptor {
+    provider_type: String,
+    root_env: String,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -189,7 +195,7 @@ fn resolve_unprofiled_context(
     Ok(ResolvedPersonalContext {
         repository_root,
         provider_root,
-        provider_type: knowledge.provider.r#type,
+        provider_type: knowledge.provider_type,
         profile_name: UNPROFILED_CONTEXT_NAME.into(),
         scope: Scope::Personal,
         source,
@@ -207,14 +213,22 @@ fn resolve_profile_context(
     Ok(ResolvedPersonalContext {
         repository_root,
         provider_root,
-        provider_type: knowledge.provider.r#type,
+        provider_type: knowledge.provider_type,
         profile_name: profile_name.into(),
         scope: Scope::Personal,
         source: ContextSource::Profile,
     })
 }
 
-fn validated_personal_knowledge(repository_root: &Path) -> Result<KnowledgeConfig, MkoError> {
+fn validated_personal_knowledge(
+    repository_root: &Path,
+) -> Result<PersonalKnowledgeDescriptor, MkoError> {
+    if let Ok(knowledge) = KnowledgeConfigV2::read(repository_root) {
+        return Ok(PersonalKnowledgeDescriptor {
+            provider_type: knowledge.provider.r#type,
+            root_env: knowledge.provider.root_env,
+        });
+    }
     let knowledge = KnowledgeConfig::read(repository_root)?;
     if knowledge.scope != Scope::Personal.as_str() {
         return Err(MkoError::new(
@@ -222,7 +236,10 @@ fn validated_personal_knowledge(repository_root: &Path) -> Result<KnowledgeConfi
             "resolved knowledge base is not Personal scope",
         ));
     }
-    Ok(knowledge)
+    Ok(PersonalKnowledgeDescriptor {
+        provider_type: knowledge.provider.r#type,
+        root_env: knowledge.provider.root_env,
+    })
 }
 
 fn ancestor_knowledge_base(current_dir: &Path) -> Result<Option<PathBuf>, MkoError> {
@@ -231,7 +248,7 @@ fn ancestor_knowledge_base(current_dir: &Path) -> Result<Option<PathBuf>, MkoErr
         let marker = ancestor.join("knowledge-os.yaml");
         match std::fs::symlink_metadata(&marker) {
             Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-                KnowledgeConfig::read(ancestor)?;
+                validated_personal_knowledge(ancestor)?;
                 return Ok(Some(ancestor.to_path_buf()));
             }
             Ok(_) => {
@@ -257,17 +274,17 @@ fn profile_provider_root(profile: &PersonalProfile) -> Result<PathBuf, MkoError>
 }
 
 fn provider_root_from_environment(
-    knowledge: &KnowledgeConfig,
+    knowledge: &PersonalKnowledgeDescriptor,
     platform: &dyn PlatformEnvironment,
 ) -> Result<PathBuf, MkoError> {
     let value = platform
-        .environment_value(OsStr::new(&knowledge.provider.root_env))
+        .environment_value(OsStr::new(&knowledge.root_env))
         .ok_or_else(|| {
             MkoError::new(
                 "provider_root_missing",
                 format!(
                     "set {} or select a machine profile for this repository",
-                    knowledge.provider.root_env
+                    knowledge.root_env
                 ),
             )
         })?;

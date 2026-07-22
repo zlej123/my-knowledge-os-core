@@ -91,6 +91,29 @@ fn rejects_symlinked_managed_paths() {
     assert!(directory_is_empty(&outside));
 }
 
+#[cfg(unix)]
+#[test]
+fn config_reader_rejects_a_symlink_without_following_it() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("personal-kb");
+    scaffold_personal_kb_v2(&root).unwrap();
+    let outside = temp.path().join("outside.yaml");
+    fs::write(
+        &outside,
+        KnowledgeConfigV2::personal_default().render().unwrap(),
+    )
+    .unwrap();
+    fs::remove_file(root.join("knowledge-os.yaml")).unwrap();
+    symlink(&outside, root.join("knowledge-os.yaml")).unwrap();
+
+    assert_eq!(
+        KnowledgeConfigV2::read(&root).unwrap_err().code(),
+        "kb_config_unreadable"
+    );
+}
+
 fn directory_is_empty(path: &Path) -> bool {
     fs::read_dir(path).unwrap().next().is_none()
 }

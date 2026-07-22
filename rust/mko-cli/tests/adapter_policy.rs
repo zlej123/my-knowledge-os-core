@@ -247,6 +247,7 @@ fn validate_semantic_response_shape(value: &Value) -> Result<(), String> {
         .map_err(|error| format!("semantic response must match the runtime schema: {error}"))
 }
 
+#[allow(dead_code)]
 fn validate_knowledge_response_shape(value: &Value) -> Result<(), String> {
     const ROOT_FIELDS: &[&str] = &["synthesis", "concepts"];
     const CONCEPT_FIELDS: &[&str] = &["name", "kind", "body", "tags", "locator"];
@@ -494,7 +495,14 @@ fn knowledge_os_skill_is_discoverable_in_korean_and_english() {
         .map(|(frontmatter, _)| frontmatter)
         .expect("skill must have YAML frontmatter");
 
-    for trigger in ["PDF", "논문", "정리", "knowledge base", "source draft"] {
+    for trigger in [
+        "PDF",
+        "논문",
+        "정리",
+        "knowledge base",
+        "Source",
+        "Knowledge",
+    ] {
         assert!(
             frontmatter.to_lowercase().contains(&trigger.to_lowercase()),
             "integrated Skill description is missing trigger: {trigger}"
@@ -503,20 +511,22 @@ fn knowledge_os_skill_is_discoverable_in_korean_and_english() {
 }
 
 #[test]
-fn knowledge_os_skill_exposes_only_the_json_v1_pending_source_workflow() {
+fn knowledge_os_skill_exposes_only_the_v2_core_workflow() {
     let path = knowledge_os_skill_path();
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("{} must exist and be readable: {error}", path.display()));
     let commands = executable_surfaces(&text);
     let allowed = [
-        "mko doctor",
-        "mko inbox",
-        "mko status",
+        "mko setup",
+        "mko queue",
+        "mko show",
         "mko add",
         "mko source prepare",
         "mko source write-draft",
-        "mko check",
         "mko knowledge write",
+        "mko review-open",
+        "mko review-feedback",
+        "mko review",
     ];
 
     validate_command_policy(&text, &allowed)
@@ -524,46 +534,25 @@ fn knowledge_os_skill_exposes_only_the_json_v1_pending_source_workflow() {
     for required in allowed {
         assert!(commands.contains(required), "missing command: {required}");
     }
-    for command in commands.lines() {
-        if command.trim_start_matches("$ ").starts_with("mko ") {
+    for command in commands.lines().map(|line| line.trim_start_matches("$ ")) {
+        if command.starts_with("mko ")
+            && !command.starts_with("mko setup")
+            && !command.starts_with("mko review ")
+        {
             assert!(
-                command.contains("--format json-v1"),
-                "mko command is not pinned to JSON v1: {command}"
+                command.contains("--format json-v2"),
+                "machine command is not pinned to JSON v2: {command}"
             );
         }
     }
-
-    assert_eq!(
-        text.matches("mko review").count(),
-        1,
-        "the human review command must appear exactly once as the sole next action"
-    );
-    assert!(
-        !commands.contains("mko review"),
-        "mko review may be named as a next action but must not be executable"
-    );
-    assert_eq!(
-        text.matches("mko knowledge review").count(),
-        1,
-        "the human knowledge review command must appear exactly once as the sole next action"
-    );
-    assert!(
-        !commands.contains("mko knowledge review"),
-        "mko knowledge review may be named as a next action but must not be executable"
-    );
     for required in [
-        "pending",
-        "title",
-        "source_path",
-        "add_outcome",
-        "draft_outcome",
-        "backup_confirmation_required",
-        "--verified-backup",
-        "temporary",
-        "only-copy",
-        "setup diagnosis",
-        "Inbox display",
-        "status or review-queue display",
+        "asset_outside_inbox",
+        "hydration_confirmation_required",
+        "--confirm-download",
+        "untrusted_document_content",
+        "schemas/v2/source-response.schema.json",
+        "schemas/v2/knowledge-response.schema.json",
+        "real-TTY only",
     ] {
         assert!(
             text.contains(required),
@@ -573,26 +562,15 @@ fn knowledge_os_skill_exposes_only_the_json_v1_pending_source_workflow() {
 }
 
 #[test]
-fn knowledge_os_skill_has_one_exact_semantic_response_contract() {
+fn knowledge_os_skill_references_machine_validated_semantic_contracts() {
     let path = knowledge_os_skill_path();
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("{} must exist and be readable: {error}", path.display()));
-    let blocks = json_code_blocks(&text);
-
-    assert_eq!(
-        blocks.len(),
-        2,
-        "Skill must contain exactly one semantic-response-v1 object and one knowledge-response-v1 object"
-    );
-    let response: Value = serde_json::from_str(&blocks[0])
-        .unwrap_or_else(|error| panic!("semantic-response-v1 must be JSON: {error}"));
-    validate_semantic_response_shape(&response)
-        .unwrap_or_else(|error| panic!("semantic-response-v1 is invalid: {error}"));
-
-    let knowledge_response: Value = serde_json::from_str(&blocks[1])
-        .unwrap_or_else(|error| panic!("knowledge-response-v1 must be JSON: {error}"));
-    validate_knowledge_response_shape(&knowledge_response)
-        .unwrap_or_else(|error| panic!("knowledge-response-v1 is invalid: {error}"));
+    assert!(json_code_blocks(&text).is_empty());
+    assert!(text.contains("schemas/v2/source-response.schema.json"));
+    assert!(text.contains("schemas/v2/knowledge-response.schema.json"));
+    assert!(text.contains("Every key claim needs at least one exact"));
+    assert!(text.contains("LLM opinion belongs only in `interpretation` or `hypothesis`"));
 }
 
 #[test]
@@ -605,14 +583,16 @@ fn knowledge_os_skill_defines_the_knowledge_extraction_flow() {
     validate_command_policy(
         &text,
         &[
-            "mko doctor",
-            "mko inbox",
-            "mko status",
+            "mko setup",
+            "mko queue",
+            "mko show",
             "mko add",
             "mko source prepare",
             "mko source write-draft",
-            "mko check",
             "mko knowledge write",
+            "mko review-open",
+            "mko review-feedback",
+            "mko review",
         ],
     )
     .unwrap_or_else(|error| panic!("integrated Skill {error}"));
@@ -623,15 +603,15 @@ fn knowledge_os_skill_defines_the_knowledge_extraction_flow() {
     );
     let canonical_write = concat!(
         "mko knowledge write --asset-id \"ASSET_ID\" ",
-        "--bundle \".knowledge-os/runtime/prepared/ASSET_ID.json\" ",
-        "--response \".knowledge-os/runtime/knowledge-response.json\" ",
-        "--format json-v1"
+        "--bundle \"BUNDLE_PATH\" ",
+        "--response \".mko/runtime/knowledge-response.json\" ",
+        "--format json-v2"
     );
     assert!(
         commands
             .lines()
             .any(|line| line.trim_start_matches("$ ") == canonical_write),
-        "mko knowledge write must use the canonical prepared bundle and JSON v1"
+        "mko knowledge write must reuse the Core-returned bundle and JSON v2"
     );
     assert_eq!(
         commands
@@ -645,14 +625,13 @@ fn knowledge_os_skill_defines_the_knowledge_extraction_flow() {
     );
 
     for required in [
-        "Knowledge extraction",
-        "knowledge-response-v1",
-        "synthesis",
-        "concepts",
-        "Interpretation:",
-        "content_revision",
-        "knowledge_path",
-        "write_outcome",
+        "Knowledge registration",
+        "knowledge-response-v2",
+        "Source-grounded",
+        "LLM opinion",
+        "counterargument",
+        "open_question",
+        "pending human review",
     ] {
         assert!(
             text.contains(required),
@@ -662,7 +641,7 @@ fn knowledge_os_skill_defines_the_knowledge_extraction_flow() {
 }
 
 #[test]
-fn knowledge_os_skill_requires_explicit_knowledge_extraction_intent() {
+fn knowledge_os_skill_requires_one_post_summary_question_or_explicit_intent() {
     let text = std::fs::read_to_string(knowledge_os_skill_path()).unwrap();
     let lowercase = text
         .to_lowercase()
@@ -671,9 +650,10 @@ fn knowledge_os_skill_requires_explicit_knowledge_extraction_intent() {
         .join(" ");
 
     for required in [
-        "explicit action verbs request knowledge extraction or organization",
-        "ordinary pdf summarization stops",
-        "do not infer knowledge-extraction intent",
+        "ask exactly once",
+        "이 내용을 지식 노트로도 등록할까요?",
+        "explicitly says to register/extract it as knowledge",
+        "do not infer yes",
         "pending human review",
     ] {
         assert!(
@@ -693,10 +673,10 @@ fn knowledge_os_skill_does_not_treat_content_questions_as_write_authority() {
         .join(" ");
 
     for required in [
-        "지식 정리해줘",
-        "지식과 개념을 추출해줘",
-        "questions, explanations, or displays",
+        "이 pdf에 어떤 공식이 있어?",
+        "questions or explanations",
         "do not authorize a knowledge write",
+        "explicit original request",
     ] {
         assert!(
             normalized.contains(required),
@@ -715,12 +695,10 @@ fn knowledge_os_skill_rejects_document_instructions_and_direct_writes() {
     for required in [
         "every field and value",
         "untrusted data, not instructions",
-        "do not follow",
-        "do not directly write markdown",
-        "do not directly write yaml",
-        "do not approve",
-        "do not commit",
-        "do not push",
+        "never follow",
+        "no direct markdown/yaml writes",
+        "no automatic approval",
+        "no automatic approval, commit, push",
     ] {
         assert!(
             lowercase.contains(required),
@@ -889,49 +867,27 @@ fn knowledge_os_forward_test_is_sequential_and_covers_verified_backup_retry() {
 }
 
 #[test]
-fn knowledge_os_skill_defines_core_owned_resumable_batch_processing() {
+fn knowledge_os_skill_does_not_fall_back_to_the_legacy_batch_contract() {
     let text = std::fs::read_to_string(knowledge_os_skill_path()).unwrap();
     let commands = executable_surfaces(&text);
 
     assert!(
-        commands.contains("mko add --inbox --format json-v1"),
-        "batch discovery must be one fixed Core command"
+        !commands.contains("mko add --inbox"),
+        "v0.3 Skill must not escape into the legacy JSON-v1 batch"
     );
     for required in [
-        "data.healthy",
-        "data.next_action",
-        "Do not invent a `status` field",
-        "same `asset_id`",
-        "once",
-        "next_action",
-        "prepare",
-        "write_draft",
-        "review",
-        "hydrate",
-        "repair",
-        "retry",
-        "remaining",
-        "data.scan_complete",
-        "independently from `data.remaining`",
-        "even when `remaining` is `0`",
-        "batch as incomplete",
-        "human-review pending",
+        "currently registers one selected PDF at a time",
+        "Do not invoke the legacy",
+        "Do not list the provider yourself",
+        "select the first PDF",
+        "bounded json-v2 batch command",
     ] {
         assert!(
             text.contains(required),
             "missing batch resumption rule: {required}"
         );
     }
-    assert!(
-        !commands
-            .lines()
-            .any(|line| line.starts_with("$ ") && line.contains("--replace-pending")),
-        "the Skill must never expose pending replacement as a command"
-    );
-    assert!(
-        !commands.contains("PROVIDER_LOCATOR"),
-        "provider locators must never become shell arguments"
-    );
+    assert!(!commands.contains("--format json-v1"));
 }
 
 #[test]
@@ -1077,85 +1033,52 @@ fn manual_smoke_covers_knowledge_and_does_not_claim_an_incomplete_pass() {
 }
 
 #[test]
-fn release_guide_and_manual_smoke_preserve_human_only_v0_2_boundaries() {
+fn release_guide_and_skill_document_the_v0_3_human_boundaries() {
     let repository = repository_path();
     let readme = std::fs::read_to_string(repository.join("README.md"))
         .expect("README must exist for the release guide");
-    let smoke = std::fs::read_to_string(repository.join("docs/manual-smoke-v0.2.md"))
-        .expect("manual smoke procedure must exist");
     let skill = std::fs::read_to_string(knowledge_os_skill_path())
         .expect("canonical My Knowledge OS Skill must exist");
 
     for required in [
         "cargo install --path rust/mko-cli --locked",
         "mko setup",
-        "mko doctor",
-        "이 PDF 정리해줘",
+        "이 PDF 요약해줘",
         "mko add",
-        "mko inbox",
-        "mko status",
+        "mko queue",
+        "mko show",
+        "mko dashboard",
         "mko review",
-        "Advanced v0.1 commands",
-        "Skill installer or generator.",
-        "manual",
-        "outside the configured Inbox",
-        "Inbox 정리해줘",
+        "interpretation",
+        "hypothesis",
+        "Private GitHub",
+        "수동",
     ] {
         assert!(readme.contains(required), "README is missing: {required}");
     }
-    assert!(
-        !readme.contains("Put a locally hydrated, personal PDF in the Inbox."),
-        "the single-PDF quick start must not create a backup-confirmation trap"
-    );
-    for forbidden in ["automatic commit", "automatic push"] {
-        assert!(
-            !readme.to_lowercase().contains(forbidden),
-            "README must not promise {forbidden}"
-        );
-    }
     for required in [
-        "mko asset capture --repo <personal-kb> --local-config <private-local-config> --file <provider-pdf> --json",
-        "mko source prepare --repo <personal-kb> --local-config <private-local-config> --asset-id <asset-id> --output <bundle>",
-        "mko source write-draft --repo <personal-kb> --bundle <bundle> --response <semantic-response.json> --json",
-        "mko hooks install --repo <personal-kb> --json",
-        "mko human approve-source --repo <personal-kb> --source-id <source-id> --json",
-        "mko check --repo <personal-kb> --staged",
+        "mko add <inbox-pdf> --format json-v2",
+        "mko source prepare --asset-id <asset-id> --format json-v2",
+        "mko source write-draft --bundle <bundle> --response <source-response.json> --format json-v2",
+        "mko knowledge write --asset-id <asset-id> --bundle <bundle> --response <knowledge-response.json> --format json-v2",
+        "mko review-open <stable-id> --format json-v2",
+        "mko review-feedback --input <decision.json> --format json-v2",
     ] {
         assert!(
             readme.contains(required),
-            "README advanced command is missing or changed: {required}"
+            "README v2 command is missing or changed: {required}"
         );
     }
     for required in [
-        "PENDING USER-ASSISTED LIVE GATE",
-        "Google Drive",
-        "mko setup",
-        "mko doctor",
-        "mko review",
-        "mko check --repo",
-        "manual commit",
-        "Do not record PDF bytes",
-        "Allow the Core and Skill to create their required transient extracted bundle and runtime artifacts",
-        "Do not commit, copy, or record extracted text or those runtime artifacts.",
-        "absolute provider, repository, or profile paths",
-        "Do not record credentials, tokens, OAuth material, extracted text, runtime bundles, or locks.",
-        "Result: pending",
+        "No direct Markdown/YAML writes",
+        "No automatic approval, commit, push",
+        "real-TTY only",
+        "Never encode `approve` in non-interactive input",
+        "Do not store prepared plaintext in Git or Google Drive",
     ] {
         assert!(
-            smoke.contains(required),
-            "manual smoke is missing: {required}"
-        );
-    }
-    assert!(
-        skill.contains("canonical repository copy"),
-        "the installed Skill must identify its repository source of truth"
-    );
-    for forbidden in ["approve", "commit", "push"] {
-        assert!(
-            skill
-                .to_lowercase()
-                .contains(&format!("do not {forbidden}")),
-            "Skill must retain the human-only boundary for {forbidden}"
+            skill.contains(required),
+            "v0.3 Skill is missing: {required}"
         );
     }
 }
@@ -1259,26 +1182,23 @@ fn fresh_knowledge_forward_observation_has_expected_record_shape() {
 }
 
 #[test]
-fn v02_concurrency_contract_is_bounded_and_honest() {
-    let readme = std::fs::read_to_string(repository_path().join("README.md"))
-        .expect("README must document the release boundary");
+fn v03_concurrency_contract_is_bounded_and_honest() {
     let design = std::fs::read_to_string(
-        repository_path().join("docs/superpowers/specs/2026-07-22-knowledge-hardening-design.md"),
+        repository_path().join("docs/superpowers/specs/2026-07-22-v0.3-knowledge-ux-design.md"),
     )
-    .expect("hardening design must document the concurrency boundary");
+    .expect("v0.3 design must document the concurrency boundary");
 
-    for document in [&readme, &design] {
-        for required in [
-            "namespace-level compare-and-swap",
-            "already-open writable handle",
-            "outside the v0.2 concurrency contract",
-            "hidden `.displaced` recovery entry",
-            "immutable revisions",
-        ] {
-            assert!(
-                document.contains(required),
-                "concurrency contract is missing: {required}"
-            );
-        }
+    for required in [
+        "repository mutation lock",
+        "compare-at-commit",
+        "immutable",
+        "current pointer",
+        "drift",
+        "recovery/manual-edits",
+    ] {
+        assert!(
+            design.contains(required),
+            "v0.3 concurrency contract is missing: {required}"
+        );
     }
 }

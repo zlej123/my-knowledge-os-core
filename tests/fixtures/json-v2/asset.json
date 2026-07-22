@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "id": "personal-asset-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "record_type": "asset",
+  "fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "title_fallback": "example.pdf",
+  "media_type": "application/pdf",
+  "provider": {
+    "provider_type": "google-drive-filesystem",
+    "logical_locator": "Inbox/example.pdf",
+    "size_bytes": 1024,
+    "modified_at": null
+  }
+}

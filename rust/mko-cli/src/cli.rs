@@ -7,12 +7,17 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use mko_core::{
     add::{AddInput, AddRequest, AddRunResult, BackupAttestation, add as add_input},
     approve::{ApproveSourceRequest, approve_source},
+    asset_v2::{
+        AssetRegistrationOutcomeV2, HydrationConfirmationV2, RegisterAssetRequestV2,
+        register_pdf_asset_v2,
+    },
     check::{CheckReport, CheckRequest, check_repository},
     clock::SystemClock,
     context::{
         ResolveContextRequest, ResolvedPersonalContext, SystemPlatformEnvironment,
         resolve_personal_context,
     },
+    dashboard_v2::{DashboardOutcomeV2, ensure_dashboard_v2},
     doctor::{DoctorRequest, SystemDoctorEnvironment, diagnose},
     error::MkoError,
     hooks::install_hooks,
@@ -25,6 +30,7 @@ use mko_core::{
         KnowledgeWriteData, KnowledgeWriteOutcome, NextAction, PrepareData, Recovery,
         SuccessResult, UserState, WriteDraftData,
     },
+    json_v2::{AddDataV2, AddOutcomeV2, JsonV2Command, JsonV2Success},
     knowledge::{
         ConceptKind, ConceptMatch, KnowledgeSearchQuery, WriteKnowledgeRequest, approve_knowledge,
         list_knowledge, list_unreviewed_knowledge, search_knowledge, write_knowledge_note,
@@ -41,6 +47,7 @@ use mko_core::{
     setup::{
         SetupRequest, SystemSetupWriter, apply_setup, detect_google_drive_roots, preflight_setup,
     },
+    setup_v2::{SetupPersonalV2Request, setup_personal_v2},
     source::{
         RepairSourceStateRequest, WriteSourceRequest, repair_source_state, write_source_draft,
     },
@@ -50,8 +57,8 @@ use mko_core::{
 use crate::{
     batch_add_data,
     output::{
-        emit_encoded_json, emit_json_v1, emit_json_v1_failure, emit_json_value,
-        emit_legacy_json_error,
+        emit_encoded_json, emit_json_v1, emit_json_v1_failure, emit_json_v2_failure,
+        emit_json_value, emit_legacy_json_error,
     },
 };
 
@@ -59,6 +66,7 @@ use crate::{
 pub enum OutputFormat {
     Human,
     JsonV1,
+    JsonV2,
 }
 
 #[derive(Parser)]
@@ -245,7 +253,14 @@ enum Command {
     Doctor(DoctorArgs),
     Inbox(InboxArgs),
     Status(StatusArgs),
+    Queue(QueueArgs),
+    Show(ShowArgs),
+    #[command(name = "review-open", hide = true)]
+    ReviewOpen(ReviewOpenArgs),
+    #[command(name = "review-feedback", hide = true)]
+    ReviewFeedback(ReviewFeedbackArgs),
     Review(ReviewArgs),
+    Dashboard(DashboardArgs),
     Knowledge {
         #[command(subcommand)]
         command: KnowledgeCommand,
@@ -298,6 +313,8 @@ struct SetupArgs {
     repo: Option<PathBuf>,
     #[arg(long)]
     drive_root: Option<PathBuf>,
+    #[arg(long)]
+    replace_profile: bool,
 }
 #[derive(Args)]
 struct AddArgs {
@@ -309,6 +326,15 @@ struct AddArgs {
     verified_backup: bool,
     #[arg(long)]
     temporary_source: bool,
+    #[arg(long)]
+    confirm_download: bool,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
+}
+#[derive(Args)]
+struct DashboardArgs {
+    #[arg(long)]
+    repo: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
 }
@@ -379,7 +405,40 @@ struct StatusArgs {
     format: OutputFormat,
 }
 #[derive(Args)]
+struct QueueArgs {
+    #[arg(long)]
+    repo: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
+}
+#[derive(Args)]
+struct ShowArgs {
+    stable_id: String,
+    #[arg(long)]
+    repo: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
+}
+#[derive(Args)]
+struct ReviewOpenArgs {
+    stable_id: String,
+    #[arg(long)]
+    repo: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::JsonV2)]
+    format: OutputFormat,
+}
+#[derive(Args)]
+struct ReviewFeedbackArgs {
+    #[arg(long)]
+    input: PathBuf,
+    #[arg(long)]
+    repo: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::JsonV2)]
+    format: OutputFormat,
+}
+#[derive(Args)]
 struct ReviewArgs {
+    stable_id: Option<String>,
     #[arg(long)]
     repo: Option<PathBuf>,
 }
@@ -418,6 +477,8 @@ struct KnowledgeWriteArgs {
     response: PathBuf,
     #[arg(long)]
     replace: bool,
+    #[arg(long)]
+    expected_revision: Option<String>,
     #[arg(long, value_enum)]
     format: Option<OutputFormat>,
 }
@@ -503,7 +564,9 @@ struct PrepareArgs {
     #[arg(long)]
     asset_id: String,
     #[arg(long)]
-    output: PathBuf,
+    output: Option<PathBuf>,
+    #[arg(long)]
+    confirm_download: bool,
     #[arg(long)]
     clear_stale_lock: bool,
     #[arg(long, value_enum)]
@@ -525,6 +588,8 @@ struct WriteDraftArgs {
     slug: Option<String>,
     #[arg(long)]
     replace_pending: bool,
+    #[arg(long)]
+    expected_revision: Option<String>,
     #[arg(long)]
     clear_stale_lock: bool,
     #[arg(long, conflicts_with = "format")]
@@ -549,6 +614,7 @@ pub fn entry() {
     match Cli::try_parse_from(&args) {
         Ok(cli) => {
             let json_v1_command = json_v1_command(&cli);
+            let json_v2_command = json_v2_command(&cli);
             let legacy_check_requested = matches!(
                 &cli.command,
                 Command::Check(CheckArgs {
@@ -560,7 +626,9 @@ pub fn entry() {
                 Ok(Exit::Success) => {}
                 Ok(Exit::ValidationFailed) => std::process::exit(1),
                 Err(error) => {
-                    if let Some(command) = json_v1_command {
+                    if let Some(command) = json_v2_command {
+                        emit_json_v2_failure_or_stderr(command, &error);
+                    } else if let Some(command) = json_v1_command {
                         emit_json_v1_failure_or_stderr(command, &error);
                     } else {
                         emit_legacy_error(
@@ -584,7 +652,9 @@ pub fn entry() {
         Err(error) => {
             let usage = legacy_usage_error(&args)
                 .unwrap_or_else(|| MkoError::new("usage", error.to_string()));
-            if let Some(command) = json_v1_command_from_invalid_arguments(&args) {
+            if let Some(command) = json_v2_command_from_invalid_arguments(&args) {
+                emit_json_v2_failure_or_stderr(command, &usage);
+            } else if let Some(command) = json_v1_command_from_invalid_arguments(&args) {
                 emit_json_v1_failure_or_stderr(command, &usage);
             } else {
                 emit_legacy_error(
@@ -623,7 +693,12 @@ fn run(cli: Cli) -> Result<Exit, MkoError> {
         Command::Doctor(arguments) => doctor(arguments).map(|_| Exit::Success),
         Command::Inbox(arguments) => inbox(arguments).map(|_| Exit::Success),
         Command::Status(arguments) => status(arguments).map(|_| Exit::Success),
+        Command::Queue(arguments) => queue_v2(arguments).map(|_| Exit::Success),
+        Command::Show(arguments) => show_v2(arguments).map(|_| Exit::Success),
+        Command::ReviewOpen(arguments) => review_open_v2(arguments).map(|_| Exit::Success),
+        Command::ReviewFeedback(arguments) => review_feedback_v2(arguments).map(|_| Exit::Success),
         Command::Review(arguments) => review(arguments).map(|_| Exit::Success),
+        Command::Dashboard(arguments) => dashboard(arguments).map(|_| Exit::Success),
         Command::Knowledge {
             command: KnowledgeCommand::Write(arguments),
         } => knowledge_write(arguments).map(|_| Exit::Success),
@@ -666,6 +741,9 @@ fn add(arguments: AddArgs) -> Result<(), MkoError> {
             error
         }
     })?;
+    if crate::cli_v2::is_v2_repository(&context.repository_root)? {
+        return add_v2(arguments, &context);
+    }
     let input = if arguments.inbox {
         AddInput::InboxScan
     } else {
@@ -734,16 +812,130 @@ fn add(arguments: AddArgs) -> Result<(), MkoError> {
     }
 }
 
+fn add_v2(arguments: AddArgs, context: &ResolvedPersonalContext) -> Result<(), MkoError> {
+    if arguments.inbox {
+        return Err(MkoError::new(
+            "inbox_batch_not_implemented",
+            "v0.3 batch registration is not available yet; pass one PDF path",
+        ));
+    }
+    if arguments.temporary_source || arguments.verified_backup {
+        return Err(MkoError::new(
+            "option_unsupported",
+            "v0.3 registration preserves Inbox files and does not use legacy backup options",
+        ));
+    }
+    let file = arguments
+        .file
+        .as_deref()
+        .ok_or_else(|| MkoError::new("asset_path_required", "pass one PDF path"))?;
+    let logical_locator = provider_logical_locator(&context.provider_root, file)?;
+    let result = register_pdf_asset_v2(RegisterAssetRequestV2 {
+        repository_root: &context.repository_root,
+        provider_root: &context.provider_root,
+        logical_locator: &logical_locator,
+        hydration_confirmation: if arguments.confirm_download {
+            HydrationConfirmationV2::Confirmed
+        } else {
+            HydrationConfirmationV2::NotConfirmed
+        },
+    })?;
+    match arguments.format {
+        OutputFormat::Human => {
+            let outcome = match result.outcome {
+                AssetRegistrationOutcomeV2::Created => "등록 완료",
+                AssetRegistrationOutcomeV2::Existing => "이미 등록됨",
+            };
+            println!("{outcome}: {}", result.asset.id);
+            println!("다음: 이 PDF를 요약해 달라고 요청하세요.");
+            Ok(())
+        }
+        OutputFormat::JsonV2 => crate::output::emit_json_v2(JsonV2Success::add(AddDataV2 {
+            asset_id: result.asset.id,
+            outcome: match result.outcome {
+                AssetRegistrationOutcomeV2::Created => AddOutcomeV2::Created,
+                AssetRegistrationOutcomeV2::Existing => AddOutcomeV2::Existing,
+            },
+            registry_path: result.registry_path.display().to_string(),
+            logical_locator,
+        })),
+        OutputFormat::JsonV1 => Err(MkoError::new(
+            "format_unsupported",
+            "a v0.3 KB requires json-v2 output",
+        )),
+    }
+}
+
+fn provider_logical_locator(provider_root: &Path, file: &Path) -> Result<String, MkoError> {
+    let provider_root = provider_root
+        .canonicalize()
+        .map_err(|error| MkoError::new("provider_root_invalid", error.to_string()))?;
+    let candidate = if file.is_absolute() {
+        file.to_path_buf()
+    } else {
+        let provider_candidate = provider_root.join(file);
+        if provider_candidate.exists() {
+            provider_candidate
+        } else {
+            std::env::current_dir()
+                .map_err(|error| MkoError::new("current_directory_unavailable", error.to_string()))?
+                .join(file)
+        }
+    };
+    let candidate = candidate
+        .canonicalize()
+        .map_err(|error| MkoError::new("asset_not_found", error.to_string()))?;
+    let relative = candidate.strip_prefix(&provider_root).map_err(|_| {
+        MkoError::new(
+            "asset_outside_inbox",
+            "move or copy the PDF into the configured Personal Inbox, then run mko add again",
+        )
+    })?;
+    let mut components = Vec::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(value) => components.push(
+                value
+                    .to_str()
+                    .ok_or_else(|| MkoError::new("asset_path_invalid", "PDF path must be UTF-8"))?,
+            ),
+            _ => {
+                return Err(MkoError::new(
+                    "asset_path_invalid",
+                    "PDF path must be a portable relative path",
+                ));
+            }
+        }
+    }
+    if components.is_empty() {
+        return Err(MkoError::new("asset_path_invalid", "PDF path is empty"));
+    }
+    Ok(components.join("/"))
+}
+
 fn prepare(arguments: PrepareArgs) -> Result<(), MkoError> {
+    if arguments.format == Some(OutputFormat::JsonV2) {
+        let context = resolve_context(arguments.repo.clone())?;
+        return crate::cli_v2::prepare_source_json_v2(
+            &context.repository_root,
+            &context.provider_root,
+            &arguments.asset_id,
+            arguments.confirm_download,
+            &worker_executable()?,
+        );
+    }
     if !format_is_json_v1(arguments.format) {
         return prepare_legacy(arguments);
     }
     let context = resolve_context(arguments.repo)?;
-    let runtime_output = normalized_runtime_output(
-        &context.repository_root,
-        &arguments.asset_id,
-        &arguments.output,
-    )?;
+    let output = arguments.output.as_ref().ok_or_else(|| {
+        MkoError::new(
+            "runtime_output_required",
+            "json-v1 source preparation requires --output",
+        )
+    })?;
+    let runtime_output =
+        normalized_runtime_output(&context.repository_root, &arguments.asset_id, output)?;
     let request = PrepareRequest::new(
         &context.repository_root,
         &arguments.asset_id,
@@ -773,10 +965,16 @@ fn prepare(arguments: PrepareArgs) -> Result<(), MkoError> {
 }
 
 fn prepare_legacy(arguments: PrepareArgs) -> Result<(), MkoError> {
+    let output = arguments.output.as_ref().ok_or_else(|| {
+        MkoError::new(
+            "runtime_output_required",
+            "legacy source preparation requires --output",
+        )
+    })?;
     let mut request = PrepareRequest::new(
         arguments.repo.as_ref().unwrap(),
         &arguments.asset_id,
-        &arguments.output,
+        output,
     )
     .with_clear_stale_lock(arguments.clear_stale_lock);
     if let Some(config) = arguments.local_config {
@@ -788,6 +986,16 @@ fn prepare_legacy(arguments: PrepareArgs) -> Result<(), MkoError> {
 }
 
 fn write_draft(arguments: WriteDraftArgs) -> Result<(), MkoError> {
+    if arguments.format == Some(OutputFormat::JsonV2) {
+        let context = resolve_context(arguments.repo.clone())?;
+        return crate::cli_v2::write_source_json_v2(
+            &context.repository_root,
+            &arguments.bundle,
+            &arguments.response,
+            arguments.expected_revision.as_deref(),
+            &SystemClock,
+        );
+    }
     let json_v1 = format_is_json_v1(arguments.format);
     let repository = if json_v1 {
         resolve_context(arguments.repo.clone())?.repository_root
@@ -941,10 +1149,10 @@ fn status(arguments: StatusArgs) -> Result<(), MkoError> {
 }
 
 fn review(arguments: ReviewArgs) -> Result<(), MkoError> {
-    let repository = match arguments.repo {
-        Some(repository) => repository,
-        None => resolve_context(None)?.repository_root,
-    };
+    let repository = setup_repository(arguments.repo)?;
+    if crate::cli_v2::is_v2_repository(&repository)? {
+        return crate::cli_v2::review(&repository, arguments.stable_id.as_deref(), &SystemClock);
+    }
     match review_pending(&repository)? {
         ReviewOutcome::Deferred => println!("deferred"),
         ReviewOutcome::Approved(result) => {
@@ -954,7 +1162,63 @@ fn review(arguments: ReviewArgs) -> Result<(), MkoError> {
     Ok(())
 }
 
+fn queue_v2(arguments: QueueArgs) -> Result<(), MkoError> {
+    let repository = setup_repository(arguments.repo)?;
+    match arguments.format {
+        OutputFormat::Human => crate::cli_v2::queue(&repository),
+        OutputFormat::JsonV2 => crate::cli_v2::queue_json_v2(&repository),
+        OutputFormat::JsonV1 => Err(MkoError::new(
+            "format_unsupported",
+            "mko queue supports human or json-v2 output",
+        )),
+    }
+}
+
+fn show_v2(arguments: ShowArgs) -> Result<(), MkoError> {
+    let repository = setup_repository(arguments.repo)?;
+    match arguments.format {
+        OutputFormat::Human => crate::cli_v2::show(&repository, &arguments.stable_id),
+        OutputFormat::JsonV2 => crate::cli_v2::show_json_v2(&repository, &arguments.stable_id),
+        OutputFormat::JsonV1 => Err(MkoError::new(
+            "format_unsupported",
+            "mko show supports human or json-v2 output",
+        )),
+    }
+}
+
+fn review_open_v2(arguments: ReviewOpenArgs) -> Result<(), MkoError> {
+    if arguments.format != OutputFormat::JsonV2 {
+        return Err(MkoError::new(
+            "format_unsupported",
+            "mko review-open requires json-v2 output",
+        ));
+    }
+    let repository = setup_repository(arguments.repo)?;
+    crate::cli_v2::review_open_json_v2(&repository, &arguments.stable_id, &SystemClock)
+}
+
+fn review_feedback_v2(arguments: ReviewFeedbackArgs) -> Result<(), MkoError> {
+    if arguments.format != OutputFormat::JsonV2 {
+        return Err(MkoError::new(
+            "format_unsupported",
+            "mko review-feedback requires json-v2 output",
+        ));
+    }
+    let repository = setup_repository(arguments.repo)?;
+    crate::cli_v2::review_feedback_json_v2(&repository, &arguments.input, &SystemClock)
+}
+
 fn knowledge_write(arguments: KnowledgeWriteArgs) -> Result<(), MkoError> {
+    if arguments.format == Some(OutputFormat::JsonV2) {
+        let context = resolve_context(arguments.repo.clone())?;
+        return crate::cli_v2::write_knowledge_json_v2(
+            &context.repository_root,
+            &arguments.bundle,
+            &arguments.response,
+            arguments.expected_revision.as_deref(),
+            &SystemClock,
+        );
+    }
     let json_v1 = format_is_json_v1(arguments.format);
     let repository = if json_v1 {
         resolve_context(arguments.repo.clone())?.repository_root
@@ -1433,55 +1697,144 @@ fn setup(arguments: SetupArgs) -> Result<(), MkoError> {
             "setup requires an interactive terminal",
         ));
     }
-    let repository = setup_repository(arguments.repo)?;
     let platform = SystemPlatformEnvironment;
-    let drive_root = match arguments.drive_root {
-        Some(root) => root,
-        None => {
-            let roots = detect_google_drive_roots(&platform)?;
-            if roots.len() == 1 {
-                roots[0].path.clone()
-            } else if roots.is_empty() {
-                return Err(MkoError::new(
-                    "drive_root_not_found",
-                    "no platform-known Google Drive account root was found",
-                ));
-            } else {
-                for (index, root) in roots.iter().enumerate() {
-                    println!("{}: {}", index + 1, root.path.display());
-                }
-                print!("Select Google Drive account: ");
-                std::io::stdout()
-                    .flush()
-                    .map_err(|error| MkoError::new("terminal_write_failed", error.to_string()))?;
-                let mut choice = String::new();
-                std::io::stdin()
-                    .read_line(&mut choice)
-                    .map_err(|error| MkoError::new("terminal_read_failed", error.to_string()))?;
-                let selected = choice
-                    .trim()
-                    .parse::<usize>()
-                    .ok()
-                    .and_then(|number| roots.get(number.saturating_sub(1)))
-                    .ok_or_else(|| {
-                        MkoError::new(
-                            "drive_root_ambiguous",
-                            "select a listed Google Drive account",
-                        )
-                    })?;
-                selected.path.clone()
-            }
-        }
-    };
+    let repository = setup_destination(arguments.repo, &platform)?;
+    let drive_root = select_drive_root(arguments.drive_root, &platform)?;
+    let marker_exists = repository.join("knowledge-os.yaml").exists();
+    if marker_exists && !crate::cli_v2::is_v2_repository(&repository)? {
+        return setup_legacy(repository, drive_root);
+    }
+
+    let inbox = drive_root.join("My-Knowledge-OS-Assets/personal/inbox");
+    println!("Personal KB: {}", repository.display());
+    println!("Personal Inbox: {}", inbox.display());
+    print!("이 위치로 설정할까요? [y/N]: ");
+    std::io::stdout()
+        .flush()
+        .map_err(|error| MkoError::new("terminal_write_failed", error.to_string()))?;
+    let mut confirmation = String::new();
+    std::io::stdin()
+        .read_line(&mut confirmation)
+        .map_err(|error| MkoError::new("terminal_read_failed", error.to_string()))?;
+    if !matches!(
+        confirmation.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ) {
+        return Err(MkoError::new(
+            "setup_cancelled",
+            "setup was cancelled before mutation",
+        ));
+    }
+    let result = setup_personal_v2(
+        SetupPersonalV2Request {
+            repository_root: &repository,
+            drive_account_root: &drive_root,
+            replace_profile: arguments.replace_profile,
+        },
+        &platform,
+    )?;
+    println!();
+    println!("My Knowledge OS 준비 완료");
+    println!("✓ Personal KB 연결: {}", result.repository_root.display());
+    println!(
+        "✓ Google Drive Inbox 연결: {}",
+        result.provider_root.display()
+    );
+    println!("✓ Obsidian 보기 파일 생성");
+    println!("PDF를 Inbox에 넣고 `mko add <PDF 경로>`를 실행하세요.");
+    Ok(())
+}
+
+fn setup_legacy(repository: PathBuf, drive_root: PathBuf) -> Result<(), MkoError> {
     let preflight = preflight_setup(
         SetupRequest::new(repository).with_drive_root(drive_root),
-        &platform,
+        &SystemPlatformEnvironment,
     )?;
     let outcome = apply_setup(preflight, &SystemSetupWriter)?;
     if let Some(failure) = outcome.failure {
         return Err(MkoError::new(failure.code, failure.message));
     }
     println!("setup complete");
+    Ok(())
+}
+
+fn setup_destination(
+    explicit: Option<PathBuf>,
+    platform: &dyn mko_core::context::PlatformEnvironment,
+) -> Result<PathBuf, MkoError> {
+    if let Some(repository) = explicit {
+        return Ok(repository);
+    }
+    if let Ok(repository) = setup_repository(None) {
+        return Ok(repository);
+    }
+    Ok(platform.home_dir()?.join("My-Knowledge-OS"))
+}
+
+fn select_drive_root(
+    explicit: Option<PathBuf>,
+    platform: &dyn mko_core::context::PlatformEnvironment,
+) -> Result<PathBuf, MkoError> {
+    if let Some(root) = explicit {
+        return Ok(root);
+    }
+    let roots = detect_google_drive_roots(platform)?;
+    if roots.len() == 1 {
+        return Ok(roots[0].path.clone());
+    }
+    if roots.is_empty() {
+        return Err(MkoError::new(
+            "drive_root_not_found",
+            "no platform-known Google Drive account root was found",
+        ));
+    }
+    for (index, root) in roots.iter().enumerate() {
+        println!("{}: {}", index + 1, root.path.display());
+    }
+    print!("Select Google Drive account: ");
+    std::io::stdout()
+        .flush()
+        .map_err(|error| MkoError::new("terminal_write_failed", error.to_string()))?;
+    let mut choice = String::new();
+    std::io::stdin()
+        .read_line(&mut choice)
+        .map_err(|error| MkoError::new("terminal_read_failed", error.to_string()))?;
+    choice
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .and_then(|number| roots.get(number.saturating_sub(1)))
+        .map(|selected| selected.path.clone())
+        .ok_or_else(|| {
+            MkoError::new(
+                "drive_root_ambiguous",
+                "select a listed Google Drive account",
+            )
+        })
+}
+
+fn dashboard(arguments: DashboardArgs) -> Result<(), MkoError> {
+    let repository = setup_repository(arguments.repo)?;
+    if !crate::cli_v2::is_v2_repository(&repository)? {
+        return Err(MkoError::new(
+            "kb_schema_unsupported",
+            "mko dashboard requires a v0.3 Personal KB",
+        ));
+    }
+    if arguments.format != OutputFormat::Human {
+        return Err(MkoError::new(
+            "format_unsupported",
+            "mko dashboard machine output is not available yet",
+        ));
+    }
+    let result = ensure_dashboard_v2(&repository)?;
+    match result.outcome {
+        DashboardOutcomeV2::Created => println!("Obsidian 보기 파일을 생성했습니다."),
+        DashboardOutcomeV2::Existing => println!("Obsidian 보기 파일이 정상입니다."),
+    }
+    for path in result.generated_files {
+        println!("- {path}");
+    }
     Ok(())
 }
 
@@ -1702,6 +2055,59 @@ fn emit_json_v1_failure_or_stderr(command: JsonV1Command, error: &MkoError) {
     }
 }
 
+fn emit_json_v2_failure_or_stderr(command: JsonV2Command, error: &MkoError) {
+    if let Err(output_error) = emit_json_v2_failure(command, error) {
+        eprintln!("{}: {}", output_error.code(), output_error.message());
+    }
+}
+
+fn json_v2_command(cli: &Cli) -> Option<JsonV2Command> {
+    match &cli.command {
+        Command::Add(AddArgs {
+            format: OutputFormat::JsonV2,
+            ..
+        }) => Some(JsonV2Command::Add),
+        Command::Queue(QueueArgs {
+            format: OutputFormat::JsonV2,
+            ..
+        }) => Some(JsonV2Command::Queue),
+        Command::Show(ShowArgs {
+            format: OutputFormat::JsonV2,
+            ..
+        }) => Some(JsonV2Command::Show),
+        Command::ReviewOpen(ReviewOpenArgs {
+            format: OutputFormat::JsonV2,
+            ..
+        }) => Some(JsonV2Command::ReviewOpen),
+        Command::ReviewFeedback(ReviewFeedbackArgs {
+            format: OutputFormat::JsonV2,
+            ..
+        }) => Some(JsonV2Command::ReviewFeedback),
+        Command::Source {
+            command:
+                SourceCommand::Prepare(PrepareArgs {
+                    format: Some(OutputFormat::JsonV2),
+                    ..
+                }),
+        } => Some(JsonV2Command::SourcePrepare),
+        Command::Source {
+            command:
+                SourceCommand::WriteDraft(WriteDraftArgs {
+                    format: Some(OutputFormat::JsonV2),
+                    ..
+                }),
+        } => Some(JsonV2Command::SourceWrite),
+        Command::Knowledge {
+            command:
+                KnowledgeCommand::Write(KnowledgeWriteArgs {
+                    format: Some(OutputFormat::JsonV2),
+                    ..
+                }),
+        } => Some(JsonV2Command::KnowledgeWrite),
+        _ => None,
+    }
+}
+
 fn json_v1_command(cli: &Cli) -> Option<JsonV1Command> {
     match &cli.command {
         Command::Add(AddArgs {
@@ -1802,6 +2208,31 @@ fn json_v1_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option
         ("knowledge", Some("search")) => Some(JsonV1Command::KnowledgeSearch),
         ("knowledge", Some("show")) => Some(JsonV1Command::KnowledgeShow),
         ("knowledge", Some("list")) => Some(JsonV1Command::KnowledgeList),
+        _ => None,
+    }
+}
+
+fn json_v2_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option<JsonV2Command> {
+    let args = arguments_before_terminator(args);
+    let json_v2 = args
+        .windows(2)
+        .any(|pair| pair[0] == "--format" && pair[1] == "json-v2")
+        || args.iter().any(|argument| argument == "--format=json-v2");
+    if !json_v2 {
+        return None;
+    }
+    match (
+        args.get(1)?.to_str()?,
+        args.get(2).and_then(|argument| argument.to_str()),
+    ) {
+        ("add", _) => Some(JsonV2Command::Add),
+        ("queue", _) => Some(JsonV2Command::Queue),
+        ("show", _) => Some(JsonV2Command::Show),
+        ("review-open", _) => Some(JsonV2Command::ReviewOpen),
+        ("review-feedback", _) => Some(JsonV2Command::ReviewFeedback),
+        ("source", Some("prepare")) => Some(JsonV2Command::SourcePrepare),
+        ("source", Some("write-draft")) => Some(JsonV2Command::SourceWrite),
+        ("knowledge", Some("write")) => Some(JsonV2Command::KnowledgeWrite),
         _ => None,
     }
 }

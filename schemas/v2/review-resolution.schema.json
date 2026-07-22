@@ -9,8 +9,10 @@
     "id",
     "record_type",
     "review_id",
-    "target",
+    "target_record_id",
+    "requested_revision",
     "resulting_revision",
+    "bundle_id",
     "created_at"
   ],
   "properties": {
@@ -21,22 +23,16 @@
     },
     "record_type": { "const": "review_resolution" },
     "review_id": { "type": "string", "pattern": "^personal-review-[a-f0-9]{64}$" },
-    "target": { "$ref": "#/$defs/target" },
+    "target_record_id": {
+      "type": "string",
+      "pattern": "^personal-(source|knowledge)-[a-f0-9]{64}$"
+    },
+    "requested_revision": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
     "resulting_revision": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "bundle_id": {
+      "type": "string",
+      "pattern": "^prepared-content-sha256-[a-f0-9]{64}$"
+    },
     "created_at": { "type": "string", "format": "date-time" }
-  },
-  "$defs": {
-    "target": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["record_type", "record_id"],
-      "properties": {
-        "record_type": { "enum": ["source", "knowledge"] },
-        "record_id": {
-          "type": "string",
-          "pattern": "^personal-(source|knowledge)-[a-f0-9]{64}$"
-        }
-      }
-    }
   }
 }

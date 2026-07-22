@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "command": "show",
+  "result": "ok",
+  "data": {
+    "item_id": "personal-queue-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "card_markdown": "# Review card\n\nGrounded summary.\n",
+    "card_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "effect_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "targets": [
+      {
+        "record_id": "personal-source-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "displayed_revision": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "review_head_id": null,
+        "state": "unreviewed"
+      }
+    ]
+  }
+}

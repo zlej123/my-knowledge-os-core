@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "command": "knowledge.write",
+  "result": "ok",
+  "data": {
+    "record_id": "personal-knowledge-456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123",
+    "revision": "sha256:56789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234",
+    "revision_path": "/kb/knowledge/personal-knowledge-456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123/revisions/sha256-56789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234.md",
+    "current_path": "/kb/knowledge/personal-knowledge-456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123/current.yaml",
+    "outcome": "replaced",
+    "projection_state": "repair_required"
+  }
+}

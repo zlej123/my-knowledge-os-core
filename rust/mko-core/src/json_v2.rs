@@ -1,5 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::review_session_v2::ReviewOpenDataV2;
+
 fn deserialize_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: Deserializer<'de>,
@@ -116,6 +118,104 @@ pub struct QueueDataV2 {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ReviewTargetStateV2 {
+    Unreviewed,
+    Deferred,
+    ChangesRequested,
+    RevisedUnreviewed,
+    Approved,
+    Blocked,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShowTargetV2 {
+    pub record_id: String,
+    pub displayed_revision: String,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub review_head_id: Option<String>,
+    pub state: ReviewTargetStateV2,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShowDataV2 {
+    pub item_id: String,
+    pub card_markdown: String,
+    pub card_digest: String,
+    pub effect_digest: String,
+    pub targets: Vec<ShowTargetV2>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewFeedbackDataV2 {
+    pub review_id: String,
+    pub target_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddOutcomeV2 {
+    Created,
+    Existing,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddDataV2 {
+    pub asset_id: String,
+    pub outcome: AddOutcomeV2,
+    pub registry_path: String,
+    pub logical_locator: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourcePrepareOutcomeV2 {
+    Created,
+    Existing,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePrepareDataV2 {
+    pub asset_id: String,
+    pub bundle_id: String,
+    pub content_digest: String,
+    pub bundle_path: String,
+    pub outcome: SourcePrepareOutcomeV2,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticWriteOutcomeV2 {
+    Created,
+    Existing,
+    Replaced,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionStateV2 {
+    Current,
+    RepairRequired,
+    Stale,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordWriteDataV2 {
+    pub record_id: String,
+    pub revision: String,
+    pub revision_path: String,
+    pub current_path: String,
+    pub outcome: SemanticWriteOutcomeV2,
+    pub projection_state: ProjectionStateV2,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NextActionV2 {
     None,
     Configure,
@@ -148,6 +248,34 @@ pub struct JsonV2Error {
 #[serde(tag = "command")]
 #[serde(deny_unknown_fields)]
 pub enum JsonV2Success {
+    #[serde(rename = "add")]
+    Add {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: AddDataV2,
+    },
+    #[serde(rename = "source.prepare")]
+    SourcePrepare {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: SourcePrepareDataV2,
+    },
+    #[serde(rename = "source.write")]
+    SourceWrite {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: RecordWriteDataV2,
+    },
+    #[serde(rename = "knowledge.write")]
+    KnowledgeWrite {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: RecordWriteDataV2,
+    },
     #[serde(rename = "queue")]
     Queue {
         #[serde(deserialize_with = "deserialize_schema_version")]
@@ -155,6 +283,93 @@ pub enum JsonV2Success {
         result: JsonV2SuccessResult,
         data: QueueDataV2,
     },
+    #[serde(rename = "show")]
+    Show {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: ShowDataV2,
+    },
+    #[serde(rename = "review.open")]
+    ReviewOpen {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: ReviewOpenDataV2,
+    },
+    #[serde(rename = "review.feedback")]
+    ReviewFeedback {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: ReviewFeedbackDataV2,
+    },
+}
+
+impl JsonV2Success {
+    pub fn add(data: AddDataV2) -> Self {
+        Self::Add {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
+    pub fn source_prepare(data: SourcePrepareDataV2) -> Self {
+        Self::SourcePrepare {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
+    pub fn source_write(data: RecordWriteDataV2) -> Self {
+        Self::SourceWrite {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
+    pub fn knowledge_write(data: RecordWriteDataV2) -> Self {
+        Self::KnowledgeWrite {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
+    pub fn queue(data: QueueDataV2) -> Self {
+        Self::Queue {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
+    pub fn show(data: ShowDataV2) -> Self {
+        Self::Show {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
+    pub fn review_open(data: ReviewOpenDataV2) -> Self {
+        Self::ReviewOpen {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
+    pub fn review_feedback(data: ReviewFeedbackDataV2) -> Self {
+        Self::ReviewFeedback {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

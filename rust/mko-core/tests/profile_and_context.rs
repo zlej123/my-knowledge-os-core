@@ -10,6 +10,7 @@ use mko_core::{
         ContextSource, PlatformEnvironment, ResolveContextRequest, Scope, resolve_personal_context,
     },
     profile::{MachineProfileFile, PersonalProfile, ProfileStore},
+    scaffold_v2::scaffold_personal_kb_v2,
 };
 use tempfile::TempDir;
 
@@ -238,6 +239,25 @@ fn explicit_context_wins_without_mutating_the_profile() {
         explicit_provider.canonicalize().unwrap()
     );
     assert_eq!(fs::read(fixture.store().path()).unwrap(), before);
+}
+
+#[test]
+fn machine_profile_resolves_a_v2_repository_without_environment_editing() {
+    let fixture = Fixture::new();
+    let repository = fixture.root.join("v2 repository");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    let provider = fixture.provider("Google Drive Personal Inbox");
+    fixture
+        .store()
+        .write(&fixture.profile(&repository, &provider))
+        .unwrap();
+
+    let result = resolve_personal_context(ResolveContextRequest::new(), &fixture.platform).unwrap();
+
+    assert_eq!(result.source, ContextSource::Profile);
+    assert_eq!(result.repository_root, repository.canonicalize().unwrap());
+    assert_eq!(result.provider_root, provider.canonicalize().unwrap());
+    assert_eq!(result.provider_type, "google-drive-filesystem");
 }
 
 #[test]

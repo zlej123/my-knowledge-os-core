@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "command": "source.write",
+  "result": "ok",
+  "data": {
+    "record_id": "personal-source-23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01",
+    "revision": "sha256:3456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef012",
+    "revision_path": "/kb/sources/personal-source-23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01/revisions/sha256-3456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef012.md",
+    "current_path": "/kb/sources/personal-source-23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01/current.yaml",
+    "outcome": "created",
+    "projection_state": "current"
+  }
+}

@@ -330,20 +330,15 @@ pub enum ReviewResolutionRecordTypeV2 {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ReviewResolutionTargetV2 {
-    pub record_type: ReviewTargetTypeV2,
-    pub record_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct ReviewResolutionV2 {
     #[serde(deserialize_with = "deserialize_schema_version")]
     pub schema_version: u32,
     pub id: String,
     pub record_type: ReviewResolutionRecordTypeV2,
     pub review_id: String,
-    pub target: ReviewResolutionTargetV2,
+    pub target_record_id: String,
+    pub requested_revision: String,
     pub resulting_revision: String,
+    pub bundle_id: String,
     pub created_at: DateTime<Utc>,
 }

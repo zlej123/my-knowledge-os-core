@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod cli_v2;
 pub mod output;
 
 use mko_core::{

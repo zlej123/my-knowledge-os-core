@@ -3,10 +3,9 @@
   "id": "personal-review-resolution-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "record_type": "review_resolution",
   "review_id": "personal-review-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "target": {
-    "record_type": "source",
-    "record_id": "personal-source-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-  },
+  "target_record_id": "personal-source-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "requested_revision": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
   "resulting_revision": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "bundle_id": "prepared-content-sha256-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
   "created_at": "2026-07-22T00:01:00Z"
 }

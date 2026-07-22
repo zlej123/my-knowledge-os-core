@@ -1,0 +1,11 @@
+{
+  "schema_version": 2,
+  "command": "add",
+  "result": "ok",
+  "data": {
+    "asset_id": "personal-asset-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "outcome": "created",
+    "registry_path": "/kb/assets/registry/personal-asset-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.json",
+    "logical_locator": "papers/example.pdf"
+  }
+}

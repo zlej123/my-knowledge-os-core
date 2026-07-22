@@ -1,0 +1,37 @@
+{
+  "schema_version": 2,
+  "record_type": "knowledge",
+  "record_id": "personal-knowledge-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "asset_id": "personal-asset-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "asset_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "evidence_basis": {
+    "bundle_id": "prepared-content-sha256-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "content_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "asset_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "extractor_name": "pdf-text",
+    "extractor_version": "2.0.0"
+  },
+  "domain_policy": "standard",
+  "response": {
+    "schema_version": 2,
+    "synthesis": "A grounded synthesis.",
+    "units": [
+      {
+        "kind": "fact",
+        "title": "Reported result",
+        "body": "The document reports an example result.",
+        "confidence": "high",
+        "basis": "evidence",
+        "evidence_refs": [
+          {
+            "block_id": "block-0001",
+            "locator": "page:1",
+            "text_span_utf8": {"start": 0, "end": 8},
+            "table_range": null
+          }
+        ],
+        "tags": ["example"]
+      }
+    ]
+  }
+}

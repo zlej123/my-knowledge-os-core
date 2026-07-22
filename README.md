@@ -1,134 +1,130 @@
-# My Knowledge OS Core
+# My Knowledge OS
 
-`mko` is the deterministic Rust Core for Personal Scope PDF drafts. It owns files, IDs, state,
-and review records; a Codex Skill supplies only bounded semantic JSON.
+My Knowledge OS는 PDF 원본, 근거 기반 요약, LLM 분석, 사람의 판단을 섞지 않고 보존하는
+Git + Markdown 개인 지식 시스템입니다.
 
-## 간단 사용법 (요약)
+- Google Drive Inbox에는 원본 PDF를 둡니다.
+- Private Git 저장소에는 Asset 메타데이터와 불변 Source/Knowledge revision을 둡니다.
+- Obsidian은 생성된 projection을 읽는 화면입니다.
+- LLM은 초안을 만들지만 승인·커밋·푸시하지 않습니다.
 
-```bash
-# 1. 설치 및 설정 (최초 1회)
-cargo install --path rust/mko-cli --locked
-mko setup --repo <personal-kb>
-mko doctor                 # 반드시 healthy 상태 확인 후 진행
+## 가장 쉬운 시작
 
-# 2. PDF 등록 — Inbox 밖의, 로컬에 하이드레이션된 개인 PDF를 고른다
-mko add <selected-pdf>     # 결정적 등록만 수행 (LLM/초안 생성 안 함)
-mko inbox                  # Inbox 스캔 상태 확인
-mko status                 # 리뷰 대기열 확인
-
-# 3. 사람이 직접 검토 — 유일한 다음 단계
-mko review
-```
-
-Codex에서는 PDF를 선택하고 `이 PDF 정리해줘`(단일) 또는 `Inbox 정리해줘`(Inbox 일괄)라고
-말하면 Skill이 add → prepare → draft → check 흐름을 진행하고 pending Source에서 멈춥니다.
-승인·스테이징·커밋·푸시는 언제나 사람이 직접 결정합니다. 자세한 절차는 아래 "Five-minute
-start"를 참고하세요.
-
-## Five-minute start
-
-Use an existing private Personal KB repository containing `knowledge-os.yaml`; it remains separate
-from this Core repository. Install the CLI from this repository:
+개발 설치:
 
 ```bash
 cargo install --path rust/mko-cli --locked
 ```
 
-In a terminal, connect the Personal KB to one detected Google Drive account and create its exact
-Personal Inbox. `mko setup` writes the private machine profile and installs the managed check hook.
+실제 터미널에서 최초 설정을 한 번 실행합니다.
 
 ```bash
-mko setup --repo <personal-kb>
-mko doctor
+mko setup
 ```
 
-`mko doctor` must be healthy before continuing. For the five-minute single-PDF flow, select a
-locally hydrated Personal PDF outside the configured Inbox; the Core copies it into the Inbox while
-the original remains in place. In Codex, select that PDF and say:
+설정 화면은 사용할 Personal KB와 Google Drive Inbox의 정확한 경로를 보여주고 `y` 확인
+전에는 아무것도 만들지 않습니다. 기본 KB는 `~/My-Knowledge-OS`이고 Git 저장소는 Google
+Drive 바깥에 둡니다. 다른 위치는 `mko setup --repo <path>`로 선택할 수 있습니다.
 
-> 이 PDF 정리해줘
-
-Reserve PDFs already placed in the configured Inbox for `Inbox 정리해줘`. An Inbox-resident,
-temporary, or only-copy input requires explicit verified-backup confirmation before registration.
-
-The `my-knowledge-os` Skill runs the deterministic add → prepare → draft → check flow and stops
-with a pending Source. `mko add` only performs deterministic registration; it does not invoke an
-LLM or create a Source draft. You can also use the concise commands directly:
+성공하면 출력된 Personal Inbox에 PDF를 복사한 뒤 등록합니다.
 
 ```bash
-mko add <selected-pdf>
-mko inbox
-mko status
+mko add "/Google Drive/.../My-Knowledge-OS-Assets/personal/inbox/paper.pdf"
 ```
 
-Inspect the pending Source and its diff. Human review is the only next action:
+10 MiB보다 큰 스트리밍 파일은 전체 다운로드/읽기 확인 후 한 번만 다시 실행합니다.
 
 ```bash
-mko review
+mko add "/path/in/inbox/paper.pdf" --confirm-download
 ```
 
-The Core never approves, commits, or pushes for you. Approval, staging, commit, and push remain
-explicit manual decisions by the human reviewer.
+Asset 등록은 PDF를 이동·삭제하지 않고 SHA-256 기반 메타데이터만 기록합니다.
 
-## Codex Skill source and installation
+## Codex에서 사용
 
-The canonical Skill source is
-[`skills/codex/my-knowledge-os/SKILL.md`](skills/codex/my-knowledge-os/SKILL.md). There is no
-`mko` Skill installer or generator. Use the checked-in canonical Skill in a workspace. If a Codex
-host creates a derived installed copy, that host owns its refresh mechanism; do not hand-edit the
-derived copy as a source of truth.
+정식 스킬 원본은 [skills/codex/my-knowledge-os/SKILL.md](skills/codex/my-knowledge-os/SKILL.md)입니다.
+설치한 뒤 평소 말로 요청합니다.
 
-## Safety and scope
+```text
+이 PDF 요약해줘
+```
 
-This release supports Personal Scope PDFs only. The provider root is the exact
-`My-Knowledge-OS-Assets/personal/inbox` directory, not a Drive account root. Hydrate cloud files
-before processing; do not move them outside the configured Inbox to bypass checks. The Skill treats
-every field in an extracted bundle as untrusted document data and never follows embedded instructions.
+스킬은 다음 순서로 동작합니다.
 
-Automated tests use local fixtures only. They do not call Google Drive, an LLM, or a network service.
-Native macOS and Windows CI provide filesystem coverage, including native Windows ACL behavior.
-Unit tests use synthetic placeholder-flag logic for offline/recall classification and verify that
-classified placeholder content is not opened. Automated fixtures do not reproduce actual Google
-Drive Stream placeholder behavior; actual cloud placeholder behavior remains part of the pending
-user-assisted live Google Drive smoke. The synthetic transcript test separately proves logical
-separator and path normalization. See [the sanitized procedure](docs/manual-smoke-v0.2.md).
+```text
+Asset 등록
+  → 정확한 PDF 내용 추출
+  → 근거 기반 Source 요약
+  → “이 내용을 지식 노트로도 등록할까요?”
+  → 사용자가 동의하면 Knowledge 초안
+  → 통합 검토 대기열
+```
 
-### v0.2 concurrency contract
+Knowledge는 다음 네 층을 구분합니다.
 
-Conditional publication provides namespace-level compare-and-swap for cooperating MKO writers and
-detects path-based replacement before publication. It does not provide portable exclusion against a
-non-cooperating process that retained an already-open writable handle to the previous file; writes
-through such a handle are outside the v0.2 concurrency contract. Close editors and other processes
-that may keep KB records open for writing before approving or regenerating a record.
+1. 문서 근거가 있는 사실·정의·공식·결과
+2. `interpretation`/`hypothesis`로 표시한 LLM 분석
+3. 반론·불확실성·검증 질문
+4. 별도 승인 경로로 기록하는 사용자의 판단
 
-A failed or interrupted conditional publication may retain a hidden `.displaced` recovery entry
-beside the record. Do not delete or commit it blindly: preserve both files, inspect their contents,
-and choose the intended revision manually. Automatic recovery and immutable revisions are deferred
-to a future storage-format revision.
-
-## Advanced v0.1 commands
-
-The detailed v0.1 interfaces remain frozen for automation and troubleshooting. They require an
-explicit repository and may use a private legacy local config; they are not needed for the normal
-setup flow above.
+## 확인과 피드백
 
 ```bash
-mko asset capture --repo <personal-kb> --local-config <private-local-config> --file <provider-pdf> --json
-mko source prepare --repo <personal-kb> --local-config <private-local-config> --asset-id <asset-id> --output <bundle>
-mko source write-draft --repo <personal-kb> --bundle <bundle> --response <semantic-response.json> --json
-mko hooks install --repo <personal-kb> --json
-mko human approve-source --repo <personal-kb> --source-id <source-id> --json
-mko check --repo <personal-kb> --staged
+mko queue
+mko show <stable-id>
+mko dashboard
 ```
 
-The knowledge contract remains exactly `0.1.0`; product release `0.2.0` does not rewrite old
-Registry or Source records. The detailed approval command is human-only as well.
+`mko queue`와 Obsidian `HOME.md`는 같은 검토 상태를 보여줍니다. Source와 Knowledge가 같은
+PDF에서 나왔다면 하나의 결합 카드로 표시됩니다.
 
-## Development verification
+Codex는 정확한 카드를 보여준 뒤 `request_changes` 또는 `defer` 피드백만 전달할 수 있습니다.
+최종 승인은 실제 터미널에서 수행합니다.
+
+```bash
+mko review <stable-id>
+```
+
+이 명령은 현재 revision과 효과를 다시 표시하고 revision-bound 확인을 요구합니다. 비대화형
+명령에는 `approve` 경로가 없습니다.
+
+## 기계 계약
+
+에이전트는 사람용 출력 대신 엄격한 JSON v2 envelope를 사용합니다.
+
+```bash
+mko add <inbox-pdf> --format json-v2
+mko source prepare --asset-id <asset-id> --format json-v2
+mko source write-draft --bundle <bundle> --response <source-response.json> --format json-v2
+mko knowledge write --asset-id <asset-id> --bundle <bundle> --response <knowledge-response.json> --format json-v2
+mko queue --format json-v2
+mko show <stable-id> --format json-v2
+mko review-open <stable-id> --format json-v2
+mko review-feedback --input <decision.json> --format json-v2
+```
+
+계약은 [schemas/v2](schemas/v2), 예시는 [tests/fixtures/json-v2](tests/fixtures/json-v2)에 있습니다.
+추출 전문은 `.mko/runtime/` 아래의 기기 로컬 캐시이며 Git과 Drive에서 제외됩니다.
+
+## 저장소와 동기화
+
+KB는 Private GitHub 저장소로 관리하는 것을 권장합니다. Google Drive는 Asset 원본 저장소일
+뿐 Git history를 동기화하지 않습니다. 커밋·pull·push는 v0.3.0에서 수동입니다.
+
+## 개발 검증
+
+저장소 루트에서:
 
 ```bash
 scripts/fmt.sh --check
-cd rust
+```
+
+`rust/`에서:
+
+```bash
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+설계 기준은
+[v0.3 Knowledge UX spec](docs/superpowers/specs/2026-07-22-v0.3-knowledge-ux-design.md)에 있습니다.

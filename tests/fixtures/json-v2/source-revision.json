@@ -1,0 +1,54 @@
+{
+  "schema_version": 2,
+  "record_type": "source",
+  "record_id": "personal-source-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "asset_id": "personal-asset-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "asset_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "evidence_basis": {
+    "bundle_id": "prepared-content-sha256-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "content_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "asset_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "extractor_name": "pdf-text",
+    "extractor_version": "2.0.0"
+  },
+  "response": {
+    "schema_version": 2,
+    "title": "Example paper",
+    "authors": ["Example Author"],
+    "publication_date": "2026-07-22",
+    "one_sentence_summary": "The document presents an example result.",
+    "general_summary": "A bounded summary grounded in prepared content.",
+    "key_claims": [
+      {
+        "text": "The reported result is supported by evidence.",
+        "evidence_refs": [
+          {
+            "block_id": "block-0001",
+            "locator": "page:1",
+            "text_span_utf8": {"start": 0, "end": 8},
+            "table_range": null
+          }
+        ]
+      }
+    ],
+    "limitations": [
+      {
+        "text": "The evaluation is limited.",
+        "basis": "stated",
+        "evidence_refs": [
+          {
+            "block_id": "block-0001",
+            "locator": "page:1",
+            "text_span_utf8": null,
+            "table_range": null
+          }
+        ]
+      }
+    ],
+    "tags": ["example"],
+    "knowledge_recommendation": {
+      "outcome": "recommend",
+      "reasons": ["Contains a reusable grounded result."]
+    }
+  }
+}

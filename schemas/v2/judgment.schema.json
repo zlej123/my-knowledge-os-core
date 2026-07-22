@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-knowledge-os.local/schemas/v2/judgment.schema.json",
+  "title": "My Knowledge OS judgment annotation v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "record_type",
+    "id",
+    "knowledge_id",
+    "knowledge_revision",
+    "text",
+    "text_digest",
+    "authorship",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "record_type": { "const": "judgment" },
+    "id": { "type": "string", "pattern": "^personal-judgment-[a-f0-9]{64}$" },
+    "knowledge_id": { "type": "string", "pattern": "^personal-knowledge-[a-f0-9]{64}$" },
+    "knowledge_revision": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "text": { "type": "string", "minLength": 1, "maxLength": 32768 },
+    "text_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "authorship": {
+      "enum": ["user_confirmed_via_conversation", "user_confirmed_via_tty"]
+    },
+    "created_at": { "type": "string", "format": "date-time" }
+  }
+}
+
