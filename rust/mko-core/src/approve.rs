@@ -53,7 +53,15 @@ pub trait ApprovalTerminal {
 }
 
 pub trait ApprovalObserver {
+    fn before_source_cas_entry_validation(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
     fn before_publication(&mut self) -> io::Result<()>;
+
+    fn before_asset_cas_entry_validation(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -296,6 +304,9 @@ pub(crate) fn publish_approved_source_under_lock(
     request.source.updated_at = clock.now_utc();
     let document = render_markdown(&request.source, &request.source_body)?;
 
+    observer
+        .before_source_cas_entry_validation()
+        .map_err(terminal_error)?;
     write_replace_capability_compare_exchange_validated_at_commit(
         &request.sources,
         Path::new(&request.source_filename),
@@ -304,7 +315,7 @@ pub(crate) fn publish_approved_source_under_lock(
         || observer.before_publication().map_err(terminal_error),
         || validate_locked_snapshot(&request, git),
     )
-    .map_err(map_publication_error)?;
+    .map_err(map_source_publication_error)?;
 
     let public_sources =
         open_sources_directory(&request.repository).map_err(|_| source_changed_error())?;
@@ -342,6 +353,9 @@ pub(crate) fn publish_approved_source_under_lock(
         clock.now_utc(),
     )?;
     let processed_document = render_markdown(&processed_asset, &request.asset_body)?;
+    observer
+        .before_asset_cas_entry_validation()
+        .map_err(terminal_error)?;
     write_replace_capability_compare_exchange_validated_at_commit(
         &request.registry,
         Path::new(&request.asset_filename),
@@ -363,13 +377,7 @@ pub(crate) fn publish_approved_source_under_lock(
             }
         },
     )
-    .map_err(|error| {
-        if error.code() == "registry_snapshot_changed" {
-            asset_changed_error()
-        } else {
-            error
-        }
-    })?;
+    .map_err(map_asset_publication_error)?;
     Ok(ApproveSourceResult {
         source_id,
         revision,
@@ -447,15 +455,27 @@ fn bytes_digest(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
-fn map_publication_error(error: MkoError) -> MkoError {
-    if matches!(
-        error.code(),
-        "registry_destination_invalid" | "registry_snapshot_changed"
-    ) {
+fn map_source_publication_error(error: MkoError) -> MkoError {
+    if is_cas_entry_change(&error) {
         source_changed_error()
     } else {
         error
     }
+}
+
+fn map_asset_publication_error(error: MkoError) -> MkoError {
+    if is_cas_entry_change(&error) {
+        asset_changed_error()
+    } else {
+        error
+    }
+}
+
+fn is_cas_entry_change(error: &MkoError) -> bool {
+    matches!(
+        error.code(),
+        "registry_not_found" | "registry_destination_invalid" | "registry_snapshot_changed"
+    )
 }
 
 fn asset_changed_error() -> MkoError {
