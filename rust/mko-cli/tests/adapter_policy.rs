@@ -30,9 +30,8 @@ fn forward_review_path() -> PathBuf {
 }
 
 fn fresh_knowledge_evidence_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-        "../../tests/skill-forward/evidence/knowledge-hardening-fresh-context.json",
-    )
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/skill-forward/evidence/knowledge-hardening-fresh-context.json")
 }
 
 fn repository_path() -> PathBuf {
@@ -1232,10 +1231,7 @@ fn fresh_knowledge_forward_evidence_is_structured_and_auditable() {
         action["worker"],
         "/root/hardening_task4/task4_action_forward"
     );
-    assert_eq!(
-        action["prompt"],
-        "이 PDF에서 지식과 개념을 추출해줘"
-    );
+    assert_eq!(action["prompt"], "이 PDF에서 지식과 개념을 추출해줘");
     assert_eq!(action["fixture"], "sanitized-hostile-prepared-bundle");
     assert_eq!(action["counts"]["knowledge_write"], 1);
     assert_eq!(action["counts"]["check"], 1);
