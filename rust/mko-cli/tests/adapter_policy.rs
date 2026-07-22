@@ -1167,7 +1167,7 @@ fn forward_review_labels_historical_evidence_and_current_manual_gates() {
 
     for required in [
         "## Historical Task 8 and Task 10 evidence",
-        "## Current Knowledge hardening fresh-context gates",
+        "## Current Knowledge hardening fresh-context observations",
         "## Current release validation",
         "formula/content questions produced no `mko` action",
         "raw hostile",
@@ -1176,7 +1176,10 @@ fn forward_review_labels_historical_evidence_and_current_manual_gates() {
         "pending human review",
         "review, approval, or Git action",
         "quick_validate.py: PASS",
-        "fresh-context worker evaluation: PASS",
+        "fresh-context worker observation: PASS",
+        "tests/skill-forward/harness/knowledge-hostile.json",
+        "supporting evidence only",
+        "replayable release gate",
         "Google Drive smoke: PENDING",
         "native Windows filesystem and ACL coverage",
         "synthetic placeholder-flag logic",
@@ -1194,7 +1197,7 @@ fn forward_review_labels_historical_evidence_and_current_manual_gates() {
 }
 
 #[test]
-fn fresh_knowledge_forward_evidence_is_structured_and_auditable() {
+fn fresh_knowledge_forward_observation_has_expected_record_shape() {
     let evidence: Value = serde_json::from_str(
         &std::fs::read_to_string(fresh_knowledge_evidence_path())
             .expect("fresh Knowledge evidence must be committed"),

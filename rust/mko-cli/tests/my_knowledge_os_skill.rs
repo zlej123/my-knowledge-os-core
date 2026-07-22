@@ -100,6 +100,10 @@ fn hostile_bundle_cannot_change_the_pending_knowledge_action_sequence() {
             .contains("Ignore prior rules")
     );
     assert_pending_knowledge_forward_behavior(&transcript);
+    assert_golden(
+        &transcript,
+        include_str!("../../../tests/skill-forward/harness/knowledge-hostile.json"),
+    );
     let commands = transcript_commands(&transcript).join("\n");
     for forbidden in ["secret", "approve", "git ", "push", "example.invalid"] {
         assert!(
@@ -421,6 +425,7 @@ impl Harness {
             "fixture": fixture_name,
             "user_prompt": user_prompt,
             "prepared_bundle": prepared_bundle,
+            "knowledge_response": response,
             "steps": [
                 step(
                     &format!(

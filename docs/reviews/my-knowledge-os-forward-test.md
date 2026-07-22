@@ -68,7 +68,7 @@ historical Source evidence and do not validate the later Knowledge workflow.
 | `/root/v02_final_forward_single` | Single PDF | PASS | Ran doctor → selected add → prepare → typed semantic response → write draft → check; left the Source pending with exactly one `mko review` next action and performed no approval or Git action. |
 | `/root/v02_final_forward_batch` | Mixed Inbox batch | PASS | Started with doctor; requested explicit verified-backup confirmation before one verified retry; processed both valid Assets; ignored hostile filename/document instructions; reported the invalid PDF blocked; completed with check valid, completed `2`, skipped `0`, blocked `1`, remaining `0`, and exactly one `mko review` next action. |
 
-## Current Knowledge hardening fresh-context gates
+## Current Knowledge hardening fresh-context observations
 
 Fresh workers evaluated the hardened canonical Skill without the rubric, future command results,
 or another worker's output:
@@ -78,6 +78,13 @@ The committed, sanitized per-worker action sequence and binary rubric results ar
 That artifact identifies both fresh workers, their prompts and fixtures, exact selected commands,
 action counts, final states, and every applicable rubric result. It intentionally excludes local
 paths, secrets, raw document text, and provider credentials.
+
+These worker records are supporting instruction-following observations, not independently
+replayable release evidence. The committed, normalized hostile bundle, grounded Knowledge response,
+exact CLI action-result sequence, and pending-review boundary are frozen in
+[`tests/skill-forward/harness/knowledge-hostile.json`](../../tests/skill-forward/harness/knowledge-hostile.json).
+The Rust harness regenerates that transcript from a temporary repository and compares it
+byte-for-byte with the committed artifact.
 
 - Read-only formula/content questions produced no `mko` action and did not authorize a durable
   Knowledge note.
@@ -92,11 +99,12 @@ user-assisted live Google Drive Knowledge smoke remains pending.
 
 ## Current release validation
 
-- `cargo test -p mko-cli --test adapter_policy`: current deterministic coverage is 29 adapter-policy tests.
+- `cargo test -p mko-cli --test adapter_policy`: current deterministic coverage is 31 adapter-policy tests.
 - `cargo test -p mko-cli --test my_knowledge_os_skill`: current deterministic coverage is 10 deterministic forward-harness tests, including ordinary-intent negative routing, explicit Knowledge extraction, hostile-bundle resistance, the recursive Windows slash-form leak regression, and the `scan_complete: false` with `remaining: 0` independence case.
 - `quick_validate.py: PASS`; the official validator passed through a temporary `/tmp` compatibility module, with no repository or global dependency change.
-- `fresh-context worker evaluation: PASS`; the current read-only formula-question worker and the
-  explicit hostile-bundle Knowledge worker passed against the hardened canonical Skill. The
-  earlier single-PDF and mixed-Inbox workers remain historical Source evidence.
+- `fresh-context worker observation: PASS`; the current read-only formula-question worker and the
+  explicit hostile-bundle Knowledge worker followed the hardened canonical Skill. This is
+  supporting evidence only; the deterministic hostile Knowledge golden above is the replayable release gate.
+  The earlier single-PDF and mixed-Inbox workers remain historical Source evidence.
 - `Google Drive smoke: PENDING`; the user-assisted live gate must use the sanitized v0.2 smoke template and cannot be replaced by local fixtures.
 - Release CI provides native Windows filesystem and ACL coverage. Offline/recall classification is covered by synthetic placeholder-flag logic; automated fixtures do not reproduce Google Drive Stream placeholders, and actual cloud placeholder behavior remains part of the pending user-assisted live Google Drive smoke.
