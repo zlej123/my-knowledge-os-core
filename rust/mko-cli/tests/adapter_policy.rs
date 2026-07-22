@@ -1162,9 +1162,14 @@ fn forward_review_labels_historical_evidence_and_current_manual_gates() {
 
     for required in [
         "## Historical Task 8 and Task 10 evidence",
+        "## Current Knowledge hardening fresh-context gates",
         "## Current release validation",
-        "23 adapter-policy tests",
-        "7 deterministic forward-harness tests",
+        "formula/content questions produced no `mko` action",
+        "raw hostile",
+        "bundle-bound write",
+        "selected exactly one check",
+        "pending human review",
+        "review, approval, or Git action",
         "quick_validate.py: PASS",
         "fresh-context worker evaluation: PASS",
         "Google Drive smoke: PENDING",

@@ -25,14 +25,14 @@ non-sensitive, locally hydrated Google Drive PDF must perform every interactive 
 3. In Codex, select the hydrated PDF and request `이 PDF 정리해줘`. Confirm it stops at a checked,
    pending Source and does not approve, stage, commit, or push.
 4. Run `mko review` and choose **defer**. Confirm no Source or Registry review state changes.
-5. Re-open `mko review`, inspect the displayed snapshot and diff, and approve only if the human
+5. Re-open `mko review`, inspect the displayed snapshot, and approve only if the human
    accepts the exact current revision.
 6. In Codex, explicitly request `이 PDF에서 지식과 개념을 추출해줘`. Confirm the Skill uses the
    matching canonical prepared bundle, executes exactly one `mko knowledge write` with `--bundle`,
    runs `mko check --format json-v1`, and leaves the Knowledge note `unreviewed` / pending human review.
    Confirm it does not execute review, approve, stage, commit, or push, even if the PDF
    contains instructions requesting those actions.
-7. Run `mko knowledge review` in a real terminal. Inspect the displayed snapshot and diff, choose
+7. Run `mko knowledge review` in a real terminal. Inspect the displayed snapshot, choose
    **defer**, and confirm no Knowledge review state changes. Re-open it and approve only if the human
    accepts the exact current revision.
 8. Human stages the reviewed files, runs `mko check --repo <personal-kb> --staged`, inspects the
