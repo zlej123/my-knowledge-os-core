@@ -17,7 +17,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::model::AssetRecord;
 use crate::{
-    atomic::{AtomicWriteResult, write_replace_capability_validated_at_commit},
+    atomic::{AtomicWriteResult, write_replace_capability_compare_exchange_validated_at_commit},
     clock::{Clock, SystemClock},
     error::MkoError,
     front_matter::{parse_markdown, render_markdown},
@@ -296,7 +296,18 @@ pub fn write_knowledge_note_with_clock(
 
 pub fn write_knowledge_note_with_clock_and_observer(
     request: WriteKnowledgeRequest,
+    clock: &dyn Clock,
+    observer: &mut dyn KnowledgeMutationObserver,
+) -> Result<WriteKnowledgeResult, MkoError> {
+    let scan_clock = MonotonicElapsedClock::start();
+    write_knowledge_note_with_clocks_and_observer(request, clock, &scan_clock, observer)
+}
+
+#[doc(hidden)]
+pub fn write_knowledge_note_with_clocks_and_observer(
+    request: WriteKnowledgeRequest,
     _clock: &dyn Clock,
+    scan_clock: &dyn ElapsedClock,
     observer: &mut dyn KnowledgeMutationObserver,
 ) -> Result<WriteKnowledgeResult, MkoError> {
     let repository_root = canonical_directory(&request.repository_root, "repository_root_invalid")?;
@@ -321,10 +332,13 @@ pub fn write_knowledge_note_with_clock_and_observer(
     })?;
     let expected_id = format!("personal-knowledge-{hash}");
 
+    let scan_deadline = ScanDeadline::start(scan_clock, DEFAULT_KNOWLEDGE_SCAN_LIMITS);
     let knowledge = existing_knowledge_directory_with_observer(&repository_root, observer)?;
     let existing = knowledge
         .as_ref()
-        .map(|knowledge| find_knowledge_in_directory(knowledge, &expected_id))
+        .map(|knowledge| {
+            find_knowledge_in_directory_with_deadline(knowledge, &expected_id, &scan_deadline)
+        })
         .transpose()?
         .flatten();
     let approved_revision = existing
@@ -373,9 +387,10 @@ pub fn write_knowledge_note_with_clock_and_observer(
         let document = render_markdown(&record, &body)?;
         let knowledge = knowledge.as_ref().ok_or_else(knowledge_changed_error)?;
         observer.before_publication()?;
-        write_replace_capability_validated_at_commit(
+        write_replace_capability_compare_exchange_validated_at_commit(
             &knowledge.directory,
             Path::new(&existing.filename),
+            &existing.snapshot,
             document.as_bytes(),
             || Ok(()),
             || {
@@ -696,7 +711,7 @@ fn knowledge_directory_with_observer(
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(_) => return Err(knowledge_path_error()),
     }
-    open_knowledge_directory(repository_root, &repository, observer, true)?
+    open_knowledge_directory(repository_root, &repository, observer)?
         .ok_or_else(knowledge_path_error)
 }
 
@@ -706,14 +721,13 @@ fn existing_knowledge_directory_with_observer(
 ) -> Result<Option<KnowledgeDirectory>, MkoError> {
     let repository = Dir::open_ambient_dir(repository_root, ambient_authority())
         .map_err(|_| knowledge_path_error())?;
-    open_knowledge_directory(repository_root, &repository, observer, true)
+    open_knowledge_directory(repository_root, &repository, observer)
 }
 
 fn open_knowledge_directory(
     repository_root: &Path,
     repository: &Dir,
     observer: &mut dyn KnowledgeMutationObserver,
-    reject_collisions: bool,
 ) -> Result<Option<KnowledgeDirectory>, MkoError> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -740,9 +754,6 @@ fn open_knowledge_directory(
         return Err(knowledge_path_error());
     }
     let directory = Dir::from_std_file(file.into_std());
-    if reject_collisions {
-        reject_knowledge_collisions(&directory)?;
-    }
     Ok(Some(KnowledgeDirectory {
         path: repository_root.join("knowledge"),
         repository: repository.try_clone().map_err(|_| knowledge_path_error())?,
@@ -798,34 +809,19 @@ fn stable_knowledge_directory_identity(
     Err(knowledge_path_error())
 }
 
-fn reject_knowledge_collisions(knowledge: &Dir) -> Result<(), MkoError> {
-    let mut names = HashSet::new();
-    for entry in knowledge.entries().map_err(|_| knowledge_path_error())? {
-        let entry = entry.map_err(|_| knowledge_path_error())?;
-        let name = entry
-            .file_name()
-            .to_str()
-            .ok_or_else(knowledge_path_error)?
-            .nfc()
-            .collect::<String>()
-            .to_lowercase();
-        if !names.insert(name) {
-            return Err(MkoError::new(
-                "path_collision",
-                "knowledge contains a case or Unicode-normalization collision",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn find_knowledge_in_directory(
+fn find_knowledge_in_directory_with_deadline(
     knowledge: &KnowledgeDirectory,
     knowledge_id: &str,
+    deadline: &ScanDeadline<'_>,
 ) -> Result<Option<KnowledgeDocument>, MkoError> {
-    let mut matches = read_knowledge_documents_from_directory(knowledge)?
-        .into_iter()
-        .filter(|document| document.record.id == knowledge_id);
+    let mut matches = read_knowledge_documents_from_directory_with_scan(
+        knowledge,
+        DEFAULT_KNOWLEDGE_SCAN_LIMITS,
+        deadline,
+        &mut (),
+    )?
+    .into_iter()
+    .filter(|document| document.record.id == knowledge_id);
     let found = matches.next();
     if matches.next().is_some() {
         return Err(MkoError::new(
@@ -846,19 +842,6 @@ fn read_knowledge_documents(repository_root: &Path) -> Result<Vec<KnowledgeDocum
     )
 }
 
-fn read_knowledge_documents_from_directory(
-    knowledge: &KnowledgeDirectory,
-) -> Result<Vec<KnowledgeDocument>, MkoError> {
-    let clock = MonotonicElapsedClock::start();
-    let deadline = ScanDeadline::start(&clock, DEFAULT_KNOWLEDGE_SCAN_LIMITS);
-    read_knowledge_documents_from_directory_with_scan(
-        knowledge,
-        DEFAULT_KNOWLEDGE_SCAN_LIMITS,
-        &deadline,
-        &mut (),
-    )
-}
-
 fn read_knowledge_documents_with_scan(
     repository_root: &Path,
     limits: ScanLimits,
@@ -873,7 +856,6 @@ fn read_knowledge_documents_with_scan(
         repository_root,
         &repository,
         &mut NoopKnowledgeMutationObserver,
-        false,
     )?
     else {
         deadline.check()?;
@@ -1014,12 +996,24 @@ fn read_knowledge_snapshot_for_scan(
 }
 
 fn read_knowledge_snapshot(directory: &Dir, filename: &Path) -> Result<Vec<u8>, MkoError> {
+    read_knowledge_snapshot_with_before_open(directory, filename, || {})
+}
+
+fn read_knowledge_snapshot_with_before_open<F>(
+    directory: &Dir,
+    filename: &Path,
+    before_open: F,
+) -> Result<Vec<u8>, MkoError>
+where
+    F: FnOnce(),
+{
     let path_metadata = directory
         .symlink_metadata(filename)
         .map_err(|_| knowledge_scan_error())?;
     if path_metadata.file_type().is_symlink() || !path_metadata.is_file() {
         return Err(knowledge_path_error());
     }
+    before_open();
     let mut options = OpenOptions::new();
     options.read(true);
     configure_nofollow(&mut options, false);
@@ -1027,7 +1021,10 @@ fn read_knowledge_snapshot(directory: &Dir, filename: &Path) -> Result<Vec<u8>, 
         .open_with(filename, &options)
         .map_err(|error| MkoError::new("knowledge_unreadable", error.to_string()))?;
     let metadata = file.metadata().map_err(|_| knowledge_scan_error())?;
-    if !metadata.is_file() || metadata.len() > MAX_KNOWLEDGE_SCAN_BYTES {
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > MAX_KNOWLEDGE_SCAN_BYTES
+    {
         return Err(knowledge_scan_error());
     }
     let mut bytes = Vec::new();
@@ -1072,16 +1069,18 @@ fn verify_public_knowledge_publication(
 
 #[cfg(target_os = "linux")]
 fn configure_nofollow(options: &mut OpenOptions, directory: bool) {
+    const O_NONBLOCK: i32 = 0x800;
     const O_NOFOLLOW: i32 = 0x20_000;
     const O_DIRECTORY: i32 = 0x10_000;
-    options.custom_flags(O_NOFOLLOW | if directory { O_DIRECTORY } else { 0 });
+    options.custom_flags(O_NOFOLLOW | O_NONBLOCK | if directory { O_DIRECTORY } else { 0 });
 }
 
 #[cfg(target_os = "macos")]
 fn configure_nofollow(options: &mut OpenOptions, directory: bool) {
+    const O_NONBLOCK: i32 = 0x4;
     const O_NOFOLLOW: i32 = 0x100;
     const O_DIRECTORY: i32 = 0x10_0000;
-    options.custom_flags(O_NOFOLLOW | if directory { O_DIRECTORY } else { 0 });
+    options.custom_flags(O_NOFOLLOW | O_NONBLOCK | if directory { O_DIRECTORY } else { 0 });
 }
 
 #[cfg(windows)]
@@ -1160,11 +1159,25 @@ fn write_new_knowledge_capability(
     result
 }
 
+#[cfg(unix)]
 fn sync_knowledge_directory(directory: &Dir) -> Result<(), MkoError> {
     directory
         .try_clone()
         .and_then(|directory| directory.into_std_file().sync_all())
         .map_err(|error| MkoError::new("knowledge_write_failed", error.to_string()))
+}
+
+#[cfg(windows)]
+fn sync_knowledge_directory(_directory: &Dir) -> Result<(), MkoError> {
+    // Windows has no supported POSIX-equivalent parent-directory fsync in this safe API layer.
+    // File content is flushed before linking the public entry, but parent-entry crash durability
+    // is not claimed. This matches the shared capability publisher's platform contract.
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn sync_knowledge_directory(_directory: &Dir) -> Result<(), MkoError> {
+    Ok(())
 }
 
 fn validate_existing_knowledge(
@@ -1227,7 +1240,7 @@ fn validate_expected_knowledge_snapshot(
 fn map_knowledge_publication_error(error: MkoError) -> MkoError {
     if matches!(
         error.code(),
-        "registry_destination_invalid" | "registry_not_found"
+        "registry_destination_invalid" | "registry_not_found" | "registry_snapshot_changed"
     ) {
         knowledge_changed_error()
     } else {
@@ -1384,20 +1397,43 @@ pub fn approve_knowledge_with_clock_and_observer(
     clock: &dyn Clock,
     observer: &mut dyn KnowledgeMutationObserver,
 ) -> Result<(), MkoError> {
+    let scan_clock = MonotonicElapsedClock::start();
+    approve_knowledge_with_clocks_and_observer(
+        repository_root,
+        knowledge_id,
+        content_revision,
+        clock,
+        &scan_clock,
+        observer,
+    )
+}
+
+#[doc(hidden)]
+pub fn approve_knowledge_with_clocks_and_observer(
+    repository_root: &Path,
+    knowledge_id: &str,
+    content_revision: &str,
+    clock: &dyn Clock,
+    scan_clock: &dyn ElapsedClock,
+    observer: &mut dyn KnowledgeMutationObserver,
+) -> Result<(), MkoError> {
     let repository_root = canonical_directory(repository_root, "repository_root_invalid")?;
+    let scan_deadline = ScanDeadline::start(scan_clock, DEFAULT_KNOWLEDGE_SCAN_LIMITS);
     let knowledge = existing_knowledge_directory_with_observer(&repository_root, observer)?
         .ok_or_else(|| MkoError::new("knowledge_not_found", "no knowledge note has this ID"))?;
-    let mut document = find_knowledge_in_directory(&knowledge, knowledge_id)?
-        .ok_or_else(|| MkoError::new("knowledge_not_found", "no knowledge note has this ID"))?;
+    let mut document =
+        find_knowledge_in_directory_with_deadline(&knowledge, knowledge_id, &scan_deadline)?
+            .ok_or_else(|| MkoError::new("knowledge_not_found", "no knowledge note has this ID"))?;
     validate_document_revision(&document, content_revision)?;
     document.record.review.status = ReviewState::Reviewed;
     document.record.review.reviewed_at = Some(clock.now_utc());
     document.record.approved_revision = Some(content_revision.to_owned());
     let rendered = render_markdown(&document.record, &document.body)?;
     observer.before_publication()?;
-    write_replace_capability_validated_at_commit(
+    write_replace_capability_compare_exchange_validated_at_commit(
         &knowledge.directory,
         Path::new(&document.filename),
+        &document.snapshot,
         rendered.as_bytes(),
         || Ok(()),
         || {
@@ -1659,4 +1695,71 @@ fn is_sha256_revision(value: &str) -> bool {
                 .bytes()
                 .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
     })
+}
+
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use std::{fs, path::Path, sync::mpsc, thread, time::Duration};
+
+    use cap_std::{ambient_authority, fs::Dir};
+
+    use super::read_knowledge_snapshot_with_before_open;
+
+    #[test]
+    fn mutation_snapshot_rejects_a_fifo_swap_without_blocking() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("record.md");
+        let saved = root.path().join("record.saved");
+        fs::write(&path, b"snapshot").unwrap();
+        let directory = Dir::open_ambient_dir(root.path(), ambient_authority()).unwrap();
+        let fifo = path.clone();
+        let (sender, receiver) = mpsc::channel();
+
+        let worker = thread::spawn(move || {
+            let result = read_knowledge_snapshot_with_before_open(
+                &directory,
+                Path::new("record.md"),
+                || {
+                    fs::rename(&path, &saved).unwrap();
+                    assert!(
+                        std::process::Command::new("mkfifo")
+                            .arg(&path)
+                            .status()
+                            .unwrap()
+                            .success()
+                    );
+                },
+            );
+            sender.send(result).unwrap();
+        });
+
+        let result = match receiver.recv_timeout(Duration::from_millis(250)) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                drop(fs::OpenOptions::new().write(true).open(&fifo).unwrap());
+                let _ = receiver.recv_timeout(Duration::from_secs(1));
+                worker.join().unwrap();
+                panic!("mutation snapshot blocked while opening a FIFO replacement");
+            }
+            Err(error) => panic!("mutation snapshot worker disconnected: {error}"),
+        };
+        worker.join().unwrap();
+
+        assert_eq!(result.unwrap_err().code(), "knowledge_scan_limit");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use cap_std::{ambient_authority, fs::Dir};
+
+    use super::sync_knowledge_directory;
+
+    #[test]
+    fn first_create_directory_sync_uses_the_documented_windows_noop_contract() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = Dir::open_ambient_dir(root.path(), ambient_authority()).unwrap();
+
+        sync_knowledge_directory(&directory).unwrap();
+    }
 }

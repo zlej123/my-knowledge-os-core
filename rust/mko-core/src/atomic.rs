@@ -194,6 +194,38 @@ where
     )
 }
 
+/// Replaces a capability-relative regular file only if the entry displaced after final
+/// validation still matches the caller's exact selected bytes.
+///
+/// Unlike an overwrite-capable rename, this protocol moves the public entry aside, validates the
+/// displaced bytes, then publishes with create-new semantics. A mismatching or failed publication
+/// restores the displaced entry when the public name remains vacant and otherwise preserves both
+/// entries without overwriting either one.
+pub fn write_replace_capability_compare_exchange_validated_at_commit<B, V>(
+    directory: &Dir,
+    filename: &Path,
+    expected_current: &[u8],
+    bytes: &[u8],
+    before_final_validation: B,
+    validate_current: V,
+) -> Result<(), MkoError>
+where
+    B: FnOnce() -> Result<(), MkoError>,
+    V: FnOnce() -> Result<(), MkoError>,
+{
+    let filename = capability_filename(filename)?;
+    let _lock = CapabilityPublicationLock::acquire(directory, filename)?;
+    validate_capability_destination(directory, filename)?;
+    write_capability_temp_and_compare_exchange(
+        directory,
+        filename,
+        expected_current,
+        bytes,
+        before_final_validation,
+        validate_current,
+    )
+}
+
 fn validate_capability_destination(directory: &Dir, filename: &str) -> Result<(), MkoError> {
     match directory.symlink_metadata(filename) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
@@ -253,6 +285,148 @@ where
             Err(error)
         }
     }
+}
+
+fn write_capability_temp_and_compare_exchange<B, V>(
+    directory: &Dir,
+    filename: &str,
+    expected_current: &[u8],
+    bytes: &[u8],
+    before_final_validation: B,
+    validate_current: V,
+) -> Result<(), MkoError>
+where
+    B: FnOnce() -> Result<(), MkoError>,
+    V: FnOnce() -> Result<(), MkoError>,
+{
+    let token = secure_cleanup_token()?;
+    let temporary = format!(".{filename}.{token}.tmp");
+    let displaced = format!(".{filename}.{token}.displaced");
+    let mut file = directory
+        .open_with(
+            &temporary,
+            CapOpenOptions::new().write(true).create_new(true),
+        )
+        .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+    let temporary_identity = stable_capability_identity(&file)?;
+    let result = (|| {
+        file.write_all(bytes)
+            .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+        file.sync_all()
+            .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+        drop(file);
+        before_final_validation()?;
+        validate_current()?;
+
+        directory
+            .rename(filename, directory, &displaced)
+            .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+        if let Err(error) = sync_capability_directory(directory) {
+            return restore_displaced_after_error(directory, &displaced, filename, error);
+        }
+        match capability_entry_matches(directory, &displaced, expected_current) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => {
+                return restore_displaced_after_error(
+                    directory,
+                    &displaced,
+                    filename,
+                    registry_snapshot_changed_error(),
+                );
+            }
+        }
+
+        match directory.hard_link(&temporary, directory, filename) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(registry_snapshot_changed_error());
+            }
+            Err(error) => {
+                return restore_displaced_after_error(
+                    directory,
+                    &displaced,
+                    filename,
+                    MkoError::new("registry_write_failed", error.to_string()),
+                );
+            }
+        }
+        sync_capability_directory(directory)?;
+        directory
+            .remove_file(&temporary)
+            .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+        directory
+            .remove_file(&displaced)
+            .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+        sync_capability_directory(directory)
+    })();
+    if result.is_err() {
+        cleanup_capability_entry(directory, &temporary, temporary_identity, None);
+    }
+    result
+}
+
+fn capability_entry_matches(
+    directory: &Dir,
+    filename: &str,
+    expected: &[u8],
+) -> Result<bool, MkoError> {
+    let mut options = CapOpenOptions::new();
+    options.read(true);
+    configure_publication_open(&mut options);
+    let mut file = directory
+        .open_with(filename, &options)
+        .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    let expected_len = u64::try_from(expected.len())
+        .map_err(|_| MkoError::new("registry_write_failed", "expected snapshot is too large"))?;
+    if metadata.len() != expected_len {
+        return Ok(false);
+    }
+    let mut current = Vec::with_capacity(expected.len());
+    Read::by_ref(&mut file)
+        .take(expected_len.saturating_add(1))
+        .read_to_end(&mut current)
+        .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+    Ok(current == expected)
+}
+
+fn restore_displaced_after_error(
+    directory: &Dir,
+    displaced: &str,
+    filename: &str,
+    original_error: MkoError,
+) -> Result<(), MkoError> {
+    match directory.hard_link(displaced, directory, filename) {
+        Ok(()) => {
+            sync_capability_directory(directory)?;
+            directory
+                .remove_file(displaced)
+                .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+            sync_capability_directory(directory)?;
+            Err(original_error)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // A non-cooperating writer filled the public name. Preserve both it and the displaced
+            // entry rather than overwriting or deleting either set of bytes.
+            Err(original_error)
+        }
+        Err(error) => Err(MkoError::new(
+            "registry_write_failed",
+            format!("publication failed and the displaced entry could not be restored: {error}"),
+        )),
+    }
+}
+
+fn registry_snapshot_changed_error() -> MkoError {
+    MkoError::new(
+        "registry_snapshot_changed",
+        "destination changed before conditional publication; newer bytes were preserved",
+    )
 }
 
 fn capability_filename(path: &Path) -> Result<&str, MkoError> {

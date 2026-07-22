@@ -5,8 +5,10 @@ use std::{
     sync::{
         Arc, Barrier,
         atomic::{AtomicU64, Ordering},
+        mpsc,
     },
     thread,
+    time::Duration,
 };
 
 use chrono::{DateTime, Utc};
@@ -16,9 +18,11 @@ use mko_core::{
     knowledge::{
         ConceptKind, KnowledgeMutationObserver, KnowledgeScanObserver, KnowledgeSearchQuery,
         WriteKnowledgeRequest, approve_knowledge, approve_knowledge_with_clock_and_observer,
-        list_knowledge, list_unreviewed_knowledge, normalize_and_validate_knowledge,
-        parse_knowledge_response, search_knowledge, search_knowledge_with_scan,
-        write_knowledge_note_with_clock, write_knowledge_note_with_clock_and_observer,
+        approve_knowledge_with_clocks_and_observer, list_knowledge, list_unreviewed_knowledge,
+        normalize_and_validate_knowledge, parse_knowledge_response, search_knowledge,
+        search_knowledge_with_scan, write_knowledge_note_with_clock,
+        write_knowledge_note_with_clock_and_observer,
+        write_knowledge_note_with_clocks_and_observer,
     },
     prepare::{PrepareRequest, prepare_source_with_extractor},
     provider_scan::{ElapsedClock, ScanLimits},
@@ -248,6 +252,21 @@ impl ElapsedClock for ManualElapsedClock {
     }
 }
 
+struct ExpireMutationAfterDirectoryMetadata {
+    elapsed_ms: Arc<AtomicU64>,
+}
+
+impl KnowledgeMutationObserver for ExpireMutationAfterDirectoryMetadata {
+    fn after_knowledge_directory_metadata(&mut self) -> Result<(), mko_core::error::MkoError> {
+        self.elapsed_ms.store(5_000, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn before_publication(&mut self) -> Result<(), mko_core::error::MkoError> {
+        Ok(())
+    }
+}
+
 struct ExpireAfterFirstReadChunk {
     elapsed_ms: Arc<AtomicU64>,
     chunks_read: Arc<AtomicU64>,
@@ -277,6 +296,31 @@ struct SwapKnowledgeEntryObserver {
     retained: PathBuf,
     outside: PathBuf,
     swapped: bool,
+}
+
+#[cfg(unix)]
+struct SwapKnowledgeEntryToFifoObserver {
+    entry: PathBuf,
+    retained: PathBuf,
+    swapped: bool,
+}
+
+#[cfg(unix)]
+impl KnowledgeScanObserver for SwapKnowledgeEntryToFifoObserver {
+    fn before_entry_open(&mut self, _: &std::path::Path) -> Result<(), mko_core::error::MkoError> {
+        if !self.swapped {
+            fs::rename(&self.entry, &self.retained).unwrap();
+            assert!(
+                std::process::Command::new("mkfifo")
+                    .arg(&self.entry)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            self.swapped = true;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
@@ -631,6 +675,71 @@ fn concurrent_first_creation_reports_created_then_existing() {
     assert_eq!(outcomes, ["created", "existing"]);
 }
 
+#[test]
+fn create_mutation_is_bounded_by_the_knowledge_entry_limit() {
+    let kb = knowledge_fixture();
+    let knowledge = kb.repo().join("knowledge");
+    fs::create_dir(&knowledge).unwrap();
+    for index in 0..1025 {
+        fs::write(knowledge.join(format!("noise-{index:05}")), b"noise").unwrap();
+    }
+
+    let error = kb
+        .write(kb.asset_id(), VALID.as_bytes(), false)
+        .unwrap_err();
+
+    assert_eq!(error.code(), "knowledge_scan_limit");
+}
+
+#[test]
+fn replace_mutation_deadline_preempts_an_unbounded_collision_prescan() {
+    let kb = knowledge_fixture();
+    kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    fs::write(kb.repo().join("knowledge/Collision"), b"noise").unwrap();
+    fs::write(kb.repo().join("knowledge/collision"), b"noise").unwrap();
+    let elapsed_ms = Arc::new(AtomicU64::new(0));
+    let scan_clock = ManualElapsedClock(elapsed_ms.clone());
+    let mut observer = ExpireMutationAfterDirectoryMetadata { elapsed_ms };
+    let changed = VALID.replace(
+        "LTI systems and transforms",
+        "LTI systems, transforms, and sampling",
+    );
+
+    let error = write_knowledge_note_with_clocks_and_observer(
+        WriteKnowledgeRequest::new(kb.repo(), kb.asset_id(), changed.into_bytes())
+            .with_bundle(kb.bundle_path())
+            .with_replace(true),
+        &kb.clock,
+        &scan_clock,
+        &mut observer,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "scan_time_limit");
+}
+
+#[test]
+fn approve_mutation_is_bounded_by_the_knowledge_entry_limit() {
+    let kb = knowledge_fixture();
+    let written = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let knowledge = kb.repo().join("knowledge");
+    for index in 0..1024 {
+        fs::write(knowledge.join(format!("noise-{index:05}")), b"noise").unwrap();
+    }
+
+    let error = approve_knowledge_with_clocks_and_observer(
+        kb.repo(),
+        &written.knowledge_id,
+        &written.content_revision,
+        &kb.clock,
+        &IncrementingElapsedClock::new(),
+        &mut BarrierObserver(Arc::new(Barrier::new(1))),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "knowledge_scan_limit");
+}
+
 #[cfg(unix)]
 #[test]
 fn knowledge_directory_acquisition_rejects_a_symlink_swap_after_metadata_validation() {
@@ -940,6 +1049,52 @@ fn knowledge_scan_does_not_follow_an_entry_swapped_to_a_symlink() {
 
     assert_eq!(error.code(), "knowledge_path_invalid");
     assert_eq!(fs::read(&outside).unwrap(), outside_bytes);
+}
+
+#[cfg(unix)]
+#[test]
+fn knowledge_scan_rejects_an_entry_swapped_to_a_fifo_without_blocking() {
+    let kb = knowledge_fixture();
+    let written = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let entry = kb.repo().join(&written.knowledge_path);
+    let retained = entry.with_extension("retained");
+    let repository = kb.repository.clone();
+    let fifo = entry.clone();
+    let (sender, receiver) = mpsc::channel();
+
+    let worker = thread::spawn(move || {
+        let mut observer = SwapKnowledgeEntryToFifoObserver {
+            entry,
+            retained,
+            swapped: false,
+        };
+        let result = search_knowledge_with_scan(
+            &repository,
+            &KnowledgeSearchQuery {
+                term: String::new(),
+                kind: None,
+                tag: None,
+            },
+            knowledge_scan_limits(1024 * 1024, 5_000),
+            &IncrementingElapsedClock::new(),
+            &mut observer,
+        );
+        sender.send(result).unwrap();
+    });
+
+    let result = match receiver.recv_timeout(Duration::from_millis(250)) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            drop(fs::OpenOptions::new().write(true).open(&fifo).unwrap());
+            let _ = receiver.recv_timeout(Duration::from_secs(1));
+            worker.join().unwrap();
+            panic!("knowledge scan blocked while opening a FIFO replacement");
+        }
+        Err(error) => panic!("knowledge scan worker disconnected: {error}"),
+    };
+    worker.join().unwrap();
+
+    assert_eq!(result.unwrap_err().code(), "knowledge_scan_limit");
 }
 
 #[test]

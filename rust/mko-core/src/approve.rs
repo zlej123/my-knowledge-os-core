@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    atomic::write_replace_capability_validated_at_commit,
+    atomic::write_replace_capability_compare_exchange_validated_at_commit,
     canonical_source::validate_canonical_source,
     clock::{Clock, SystemClock},
     error::MkoError,
@@ -296,9 +296,10 @@ pub(crate) fn publish_approved_source_under_lock(
     request.source.updated_at = clock.now_utc();
     let document = render_markdown(&request.source, &request.source_body)?;
 
-    write_replace_capability_validated_at_commit(
+    write_replace_capability_compare_exchange_validated_at_commit(
         &request.sources,
         Path::new(&request.source_filename),
+        &request.source_snapshot.bytes,
         document.as_bytes(),
         || observer.before_publication().map_err(terminal_error),
         || validate_locked_snapshot(&request, git),
@@ -341,9 +342,10 @@ pub(crate) fn publish_approved_source_under_lock(
         clock.now_utc(),
     )?;
     let processed_document = render_markdown(&processed_asset, &request.asset_body)?;
-    write_replace_capability_validated_at_commit(
+    write_replace_capability_compare_exchange_validated_at_commit(
         &request.registry,
         Path::new(&request.asset_filename),
+        &request.asset_bytes,
         processed_document.as_bytes(),
         || Ok(()),
         || {
@@ -360,7 +362,14 @@ pub(crate) fn publish_approved_source_under_lock(
                 Err(asset_changed_error())
             }
         },
-    )?;
+    )
+    .map_err(|error| {
+        if error.code() == "registry_snapshot_changed" {
+            asset_changed_error()
+        } else {
+            error
+        }
+    })?;
     Ok(ApproveSourceResult {
         source_id,
         revision,
@@ -439,7 +448,10 @@ fn bytes_digest(bytes: &[u8]) -> String {
 }
 
 fn map_publication_error(error: MkoError) -> MkoError {
-    if error.code() == "registry_destination_invalid" {
+    if matches!(
+        error.code(),
+        "registry_destination_invalid" | "registry_snapshot_changed"
+    ) {
         source_changed_error()
     } else {
         error

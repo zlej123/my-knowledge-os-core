@@ -1,7 +1,13 @@
 use std::{fs, path::Path};
 
 use cap_std::{ambient_authority, fs::Dir};
-use mko_core::{atomic::write_replace_capability_validated_at_commit, error::MkoError};
+use mko_core::{
+    atomic::{
+        write_replace_capability_compare_exchange_validated_at_commit,
+        write_replace_capability_validated_at_commit,
+    },
+    error::MkoError,
+};
 
 #[test]
 fn final_validation_rejects_destination_mutation_and_cleans_owned_temp() {
@@ -10,9 +16,10 @@ fn final_validation_rejects_destination_mutation_and_cleans_owned_temp() {
     fs::write(&path, "original\n").unwrap();
     let directory = Dir::open_ambient_dir(root.path(), ambient_authority()).unwrap();
 
-    let error = write_replace_capability_validated_at_commit(
+    let error = write_replace_capability_compare_exchange_validated_at_commit(
         &directory,
         Path::new("record.md"),
+        b"original\n",
         b"approved\n",
         || fs::write(&path, "concurrent\n").map_err(io_error),
         || {
@@ -34,6 +41,32 @@ fn final_validation_rejects_destination_mutation_and_cleans_owned_temp() {
             .collect::<Vec<_>>(),
         vec!["record.md"]
     );
+}
+
+#[test]
+fn mutation_after_the_validation_check_is_not_overwritten() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("record.md");
+    fs::write(&path, "original\n").unwrap();
+    let directory = Dir::open_ambient_dir(root.path(), ambient_authority()).unwrap();
+    let mutation_path = path.clone();
+
+    let error = write_replace_capability_compare_exchange_validated_at_commit(
+        &directory,
+        Path::new("record.md"),
+        b"original\n",
+        b"approved\n",
+        || Ok(()),
+        move || {
+            assert_eq!(fs::read(&mutation_path).unwrap(), b"original\n");
+            fs::write(&mutation_path, b"non-cooperating change\n").map_err(io_error)
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "registry_snapshot_changed");
+    assert_eq!(fs::read(&path).unwrap(), b"non-cooperating change\n");
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
 }
 
 fn io_error(error: std::io::Error) -> MkoError {

@@ -137,7 +137,10 @@ where
         .open_with(&runtime.output_name, &options)
         .map_err(|_| runtime_publication_error())?;
     let metadata = file.metadata().map_err(|_| runtime_publication_error())?;
-    if !metadata.is_file() || metadata.len() > MAX_PREPARED_BUNDLE_BYTES {
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > MAX_PREPARED_BUNDLE_BYTES
+    {
         return Err(runtime_publication_error());
     }
     let mut bytes = Vec::new();
@@ -158,14 +161,16 @@ where
 
 #[cfg(target_os = "linux")]
 fn configure_bundle_nofollow(options: &mut OpenOptions) {
+    const O_NONBLOCK: i32 = 0x800;
     const O_NOFOLLOW: i32 = 0x20_000;
-    options.custom_flags(O_NOFOLLOW);
+    options.custom_flags(O_NOFOLLOW | O_NONBLOCK);
 }
 
 #[cfg(target_os = "macos")]
 fn configure_bundle_nofollow(options: &mut OpenOptions) {
+    const O_NONBLOCK: i32 = 0x4;
     const O_NOFOLLOW: i32 = 0x100;
-    options.custom_flags(O_NOFOLLOW);
+    options.custom_flags(O_NOFOLLOW | O_NONBLOCK);
 }
 
 #[cfg(windows)]
@@ -677,7 +682,12 @@ impl Drop for Snapshot {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::Arc};
+    use std::{
+        fs,
+        sync::{Arc, mpsc},
+        thread,
+        time::Duration,
+    };
 
     use cap_std::{ambient_authority, fs::Dir};
 
@@ -890,5 +900,61 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.code(), "runtime_publication_invalid");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_loader_rejects_entry_fifo_swapped_after_path_validation_without_blocking() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = root.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        let asset_id = format!("personal-asset-{}", "e".repeat(64));
+        let output = repository
+            .join(".knowledge-os/runtime/prepared")
+            .join(format!("{asset_id}.json"));
+        let runtime = runtime_paths(&repository, &repository, &asset_id, &output).unwrap();
+        write_runtime(
+            &runtime.prepared,
+            &runtime.output_name,
+            &serde_json::to_vec(&bundle(&asset_id, "Expected bundle")).unwrap(),
+        )
+        .unwrap();
+        let saved = output.with_extension("saved");
+        let repository_for_worker = repository.clone();
+        let output_for_worker = output.clone();
+        let fifo = output.clone();
+        let (sender, receiver) = mpsc::channel();
+
+        let worker = thread::spawn(move || {
+            let result = load_prepared_source_bundle_with_before_open(
+                &repository_for_worker,
+                &output_for_worker,
+                || {
+                    fs::rename(&output_for_worker, &saved).unwrap();
+                    assert!(
+                        std::process::Command::new("mkfifo")
+                            .arg(&output_for_worker)
+                            .status()
+                            .unwrap()
+                            .success()
+                    );
+                },
+            );
+            sender.send(result).unwrap();
+        });
+
+        let result = match receiver.recv_timeout(Duration::from_millis(250)) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                drop(fs::OpenOptions::new().write(true).open(&fifo).unwrap());
+                let _ = receiver.recv_timeout(Duration::from_secs(1));
+                worker.join().unwrap();
+                panic!("prepared bundle loader blocked while opening a FIFO replacement");
+            }
+            Err(error) => panic!("prepared bundle loader disconnected: {error}"),
+        };
+        worker.join().unwrap();
+
+        assert_eq!(result.unwrap_err().code(), "runtime_publication_invalid");
     }
 }
