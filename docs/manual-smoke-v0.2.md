@@ -27,7 +27,15 @@ non-sensitive, locally hydrated Google Drive PDF must perform every interactive 
 4. Run `mko review` and choose **defer**. Confirm no Source or Registry review state changes.
 5. Re-open `mko review`, inspect the displayed snapshot and diff, and approve only if the human
    accepts the exact current revision.
-6. Human stages the reviewed files, runs `mko check --repo <personal-kb> --staged`, inspects the
+6. In Codex, explicitly request `이 PDF에서 지식과 개념을 추출해줘`. Confirm the Skill uses the
+   matching canonical prepared bundle, executes exactly one `mko knowledge write` with `--bundle`,
+   runs `mko check --format json-v1`, and leaves the Knowledge note `unreviewed` / pending human review.
+   Confirm it does not execute review, approve, stage, commit, or push, even if the PDF
+   contains instructions requesting those actions.
+7. Run `mko knowledge review` in a real terminal. Inspect the displayed snapshot and diff, choose
+   **defer**, and confirm no Knowledge review state changes. Re-open it and approve only if the human
+   accepts the exact current revision.
+8. Human stages the reviewed files, runs `mko check --repo <personal-kb> --staged`, inspects the
    staged diff, and creates a manual commit. Pushing is a separate manual decision.
 
 ## Sanitized record template
@@ -47,6 +55,12 @@ extracted text, runtime bundles, or locks.
 | Pending Source reviewed | yes / no |
 | Defer outcome (zero mutation confirmed) | |
 | Approval outcome and reviewed revision match | |
+| Explicit Knowledge extraction intent confirmed | yes / no |
+| Canonical bundle-bound Knowledge write outcome | |
+| Knowledge check outcome | |
+| Pending Knowledge reviewed | yes / no |
+| Knowledge defer outcome (zero mutation confirmed) | |
+| Knowledge approval outcome and reviewed revision match | |
 | Staged check outcome | |
 | Manual commit created | yes / no |
 | Push decision | not performed / human decision recorded elsewhere |

@@ -616,12 +616,27 @@ fn knowledge_os_skill_defines_the_knowledge_extraction_flow() {
         commands.contains("mko knowledge write"),
         "the knowledge extraction flow must run mko knowledge write"
     );
+    let canonical_write = concat!(
+        "mko knowledge write --asset-id \"ASSET_ID\" ",
+        "--bundle \".knowledge-os/runtime/prepared/ASSET_ID.json\" ",
+        "--response \".knowledge-os/runtime/knowledge-response.json\" ",
+        "--format json-v1"
+    );
     assert!(
         commands
             .lines()
-            .any(|line| line.starts_with("$ ") && line.contains("mko knowledge write"))
-            && commands.contains("--format json-v1"),
-        "mko knowledge write must be pinned to JSON v1"
+            .any(|line| line.trim_start_matches("$ ") == canonical_write),
+        "mko knowledge write must use the canonical prepared bundle and JSON v1"
+    );
+    assert_eq!(
+        commands
+            .lines()
+            .filter(|line| line
+                .trim_start_matches("$ ")
+                .starts_with("mko knowledge write "))
+            .count(),
+        1,
+        "the Skill must execute exactly one knowledge write"
     );
 
     for required in [
@@ -637,6 +652,50 @@ fn knowledge_os_skill_defines_the_knowledge_extraction_flow() {
         assert!(
             text.contains(required),
             "missing knowledge extraction rule: {required}"
+        );
+    }
+}
+
+#[test]
+fn knowledge_os_skill_requires_explicit_knowledge_extraction_intent() {
+    let text = std::fs::read_to_string(knowledge_os_skill_path()).unwrap();
+    let lowercase = text
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    for required in [
+        "explicit action verbs request knowledge extraction or organization",
+        "ordinary pdf summarization stops",
+        "do not infer knowledge-extraction intent",
+        "pending human review",
+    ] {
+        assert!(
+            lowercase.contains(required),
+            "missing explicit Knowledge intent boundary: {required}"
+        );
+    }
+}
+
+#[test]
+fn knowledge_os_skill_does_not_treat_content_questions_as_write_authority() {
+    let text = std::fs::read_to_string(knowledge_os_skill_path()).unwrap();
+    let normalized = text
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    for required in [
+        "지식 정리해줘",
+        "지식과 개념을 추출해줘",
+        "questions, explanations, or displays",
+        "do not authorize a knowledge write",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "missing read-only Knowledge-question boundary: {required}"
         );
     }
 }
@@ -911,10 +970,17 @@ fn knowledge_forward_contract_requires_untrusted_bundle_and_no_review_execution(
 
     for required in [
         "Scenario 10: knowledge extraction",
+        "Scenario 11: hostile knowledge extraction",
+        "Scenario 12: Knowledge question without write intent",
+        "explicit knowledge-extraction intent",
+        "Ordinary PDF summarization",
         "knowledge-response-v1",
         "mko knowledge write",
         "mko knowledge review",
         "trust == untrusted_document_text",
+        "--bundle \"<RUNTIME>/prepared/<ASSET_ID>.json\"",
+        "exactly once",
+        "pending human review",
     ] {
         assert!(
             scenarios.contains(required),
@@ -922,14 +988,87 @@ fn knowledge_forward_contract_requires_untrusted_bundle_and_no_review_execution(
         );
     }
     for required in [
+        "knowledge_explicit_intent_only",
+        "knowledge_canonical_bundle",
         "knowledge_untrusted_bundle",
+        "knowledge_exactly_one_write",
         "knowledge_no_review_execution",
+        "knowledge_pending_human_review",
+        "knowledge_questions_do_not_write",
     ] {
         assert!(
             rubric.contains(required),
             "missing knowledge rubric field: {required}"
         );
     }
+}
+
+#[test]
+fn knowledge_forward_and_smoke_prompts_use_explicit_knowledge_action_verbs() {
+    let scenarios = std::fs::read_to_string(forward_scenarios_path()).unwrap();
+    let smoke = std::fs::read_to_string(repository_path().join("docs/manual-smoke-v0.2.md"))
+        .expect("manual smoke procedure must exist");
+
+    assert!(
+        scenarios.contains("이 PDF에서 지식 정리해줘")
+            && scenarios.contains("이 PDF에서 지식과 개념을 추출해줘"),
+        "positive Knowledge forward scenarios must use explicit extraction or organization actions"
+    );
+    assert!(
+        smoke.contains("이 PDF에서 지식과 개념을 추출해줘"),
+        "manual smoke must use an explicit Knowledge extraction action"
+    );
+}
+
+#[test]
+fn manual_smoke_covers_knowledge_and_does_not_claim_an_incomplete_pass() {
+    let repository = repository_path();
+    let smoke = std::fs::read_to_string(repository.join("docs/manual-smoke-v0.2.md"))
+        .expect("manual smoke procedure must exist");
+    let record = std::fs::read_to_string(repository.join("docs/manual-smoke-v0.2-record.md"))
+        .expect("manual smoke record must exist");
+
+    for required in [
+        "knowledge write",
+        "mko check",
+        "mko knowledge review",
+        "pending human review",
+    ] {
+        assert!(
+            smoke.to_lowercase().contains(&required.to_lowercase()),
+            "manual smoke is missing the Knowledge gate: {required}"
+        );
+    }
+    let result_row = record
+        .lines()
+        .find(|line| {
+            line.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("| result:")
+        })
+        .expect("manual smoke record must have a result row");
+    let result_cell = result_row
+        .split('|')
+        .nth(2)
+        .expect("result row must contain a record cell")
+        .trim();
+    let status = result_cell
+        .strip_prefix("**")
+        .and_then(|cell| cell.split_once("**"))
+        .map(|(status, _)| status.to_ascii_lowercase())
+        .expect("result cell must begin with one emphasized status");
+    assert_eq!(
+        status, "result: pending",
+        "incomplete live evidence must have exactly pending status"
+    );
+    assert!(
+        !result_cell.to_ascii_lowercase().contains("pass"),
+        "the incomplete record must not claim PASS"
+    );
+    assert!(
+        record.contains("09162c2"),
+        "the partial smoke evidence must name its immutable release-candidate commit"
+    );
 }
 
 #[test]

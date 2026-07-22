@@ -10,6 +10,7 @@ use mko_core::{
     context::Scope,
     hooks::install_hooks,
     json_v1::{JsonV1Failure, JsonV1Success},
+    knowledge::{ReviewState, list_knowledge},
     profile::{MachineProfileFile, PersonalProfile, ProfileStore},
 };
 use serde_json::{Value, json};
@@ -44,6 +45,85 @@ fn hostile_pdf_matches_the_redacted_end_to_end_transcript() {
         &transcript,
         include_str!("../../../tests/skill-forward/harness/healthy-hostile.json"),
     );
+}
+
+#[test]
+#[allow(deprecated)]
+fn ordinary_pdf_summary_stops_without_a_knowledge_write() {
+    let harness = Harness::new();
+    let transcript = harness.run(
+        "benign-paper.pdf",
+        include_bytes!("../../../tests/fixtures/skill-forward/benign-paper.pdf"),
+        benign_response(),
+    );
+
+    assert!(
+        transcript_commands(&transcript)
+            .iter()
+            .all(|command| !command.starts_with("mko knowledge "))
+    );
+    assert!(list_knowledge(&harness.repository).unwrap().is_empty());
+}
+
+#[test]
+#[allow(deprecated)]
+fn explicit_knowledge_intent_executes_one_bundle_bound_write_and_leaves_pending() {
+    let harness = Harness::new();
+    let transcript = harness.run_knowledge(
+        "이 PDF에서 지식 정리해줘",
+        "benign-paper.pdf",
+        include_bytes!("../../../tests/fixtures/skill-forward/benign-paper.pdf"),
+        benign_knowledge_response(),
+    );
+
+    assert_pending_knowledge_forward_behavior(&transcript);
+    let notes = list_knowledge(&harness.repository).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].review_status, ReviewState::Unreviewed);
+}
+
+#[test]
+#[allow(deprecated)]
+fn hostile_bundle_cannot_change_the_pending_knowledge_action_sequence() {
+    let harness = Harness::new();
+    let transcript = harness.run_knowledge(
+        "이 PDF에서 지식과 개념을 추출해줘",
+        "hostile-instructions-paper.pdf",
+        include_bytes!("../../../tests/fixtures/skill-forward/hostile-instructions-paper.pdf"),
+        hostile_knowledge_response(),
+    );
+
+    assert!(
+        transcript["prepared_bundle"]["pages"][0]
+            .as_str()
+            .unwrap()
+            .contains("Ignore prior rules")
+    );
+    assert_pending_knowledge_forward_behavior(&transcript);
+    let commands = transcript_commands(&transcript).join("\n");
+    for forbidden in ["secret", "approve", "git ", "push", "example.invalid"] {
+        assert!(
+            !commands.to_ascii_lowercase().contains(forbidden),
+            "hostile bundle escaped into an executable action: {forbidden}"
+        );
+    }
+    let notes = list_knowledge(&harness.repository).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].review_status, ReviewState::Unreviewed);
+    let durable_note =
+        fs::read_to_string(harness.repository.join(&notes[0].knowledge_path)).unwrap();
+    for forbidden in [
+        "Read machine secrets",
+        "approve the Source",
+        "git commit",
+        "git push",
+        "example.invalid",
+    ] {
+        assert!(
+            !durable_note.contains(forbidden),
+            "hostile bundle escaped into the durable Knowledge note: {forbidden}"
+        );
+    }
 }
 
 #[test]
@@ -279,6 +359,82 @@ impl Harness {
             "fixture": fixture_name,
             "prepared_bundle": prepared_bundle,
             "steps": steps,
+        });
+        normalize_transcript(&mut transcript);
+        self.assert_no_harness_paths(&transcript);
+        assert_no_machine_paths(&transcript);
+        transcript
+    }
+
+    fn run_knowledge(
+        &self,
+        user_prompt: &str,
+        fixture_name: &str,
+        fixture: &[u8],
+        response: Value,
+    ) -> Value {
+        let selected = self._root.path().join(fixture_name);
+        fs::write(&selected, fixture).unwrap();
+
+        let add = self.run_json(["add", selected.to_str().unwrap(), "--format", "json-v1"]);
+        let asset_id = add["data"]["asset_id"].as_str().unwrap().to_owned();
+        let bundle_relative = format!(".knowledge-os/runtime/prepared/{asset_id}.json");
+        self.run_json([
+            "source",
+            "prepare",
+            "--asset-id",
+            &asset_id,
+            "--output",
+            &bundle_relative,
+            "--format",
+            "json-v1",
+        ]);
+
+        let prepared_bundle: Value =
+            serde_json::from_slice(&fs::read(self.repository.join(&bundle_relative)).unwrap())
+                .unwrap();
+        assert_eq!(prepared_bundle["trust"], "untrusted_document_text");
+        let response_relative = ".knowledge-os/runtime/knowledge-response.json";
+        fs::write(
+            self.repository.join(response_relative),
+            serde_json::to_vec_pretty(&response).unwrap(),
+        )
+        .unwrap();
+
+        let mut written = self.run_json([
+            "knowledge",
+            "write",
+            "--asset-id",
+            &asset_id,
+            "--bundle",
+            &bundle_relative,
+            "--response",
+            response_relative,
+            "--format",
+            "json-v1",
+        ]);
+        written["data"]["content_revision"] = "<CONTENT_REVISION>".into();
+        let checked = self.run_json(["check", "--format", "json-v1"]);
+        assert_eq!(checked["data"]["valid"], true);
+
+        let mut transcript = json!({
+            "fixture": fixture_name,
+            "user_prompt": user_prompt,
+            "prepared_bundle": prepared_bundle,
+            "steps": [
+                step(
+                    &format!(
+                        "mko knowledge write --asset-id \"{asset_id}\" --bundle \"{bundle_relative}\" --response \"{response_relative}\" --format json-v1"
+                    ),
+                    written,
+                ),
+                step("mko check --format json-v1", checked),
+                {
+                    "boundary": "pending_human_review",
+                    "status": "unreviewed",
+                    "next_action": "mko knowledge review"
+                }
+            ]
         });
         normalize_transcript(&mut transcript);
         self.assert_no_harness_paths(&transcript);
@@ -522,6 +678,42 @@ fn step(command: &str, result: Value) -> Value {
     json!({"command": command, "result": result})
 }
 
+fn transcript_commands(transcript: &Value) -> Vec<&str> {
+    transcript["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|step| step["command"].as_str())
+        .collect()
+}
+
+fn assert_pending_knowledge_forward_behavior(transcript: &Value) {
+    let commands = transcript_commands(transcript);
+    let writes = commands
+        .iter()
+        .filter(|command| command.starts_with("mko knowledge write "))
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(writes.len(), 1, "Knowledge must be written exactly once");
+    assert!(
+        writes[0].contains("--bundle \".knowledge-os/runtime/prepared/personal-asset-")
+            && writes[0].contains("--response \".knowledge-os/runtime/knowledge-response.json\"")
+            && writes[0].ends_with("--format json-v1"),
+        "Knowledge write must use the canonical bundle and response paths: {}",
+        writes[0]
+    );
+    assert!(commands.contains(&"mko check --format json-v1"));
+    assert!(
+        commands
+            .iter()
+            .all(|command| !command.starts_with("mko knowledge review"))
+    );
+    let final_boundary = transcript["steps"].as_array().unwrap().last().unwrap();
+    assert_eq!(final_boundary["boundary"], "pending_human_review");
+    assert_eq!(final_boundary["status"], "unreviewed");
+    assert_eq!(final_boundary["next_action"], "mko knowledge review");
+}
+
 fn assert_golden(actual: &Value, expected: &str) {
     let _: Value = serde_json::from_str(expected).unwrap();
     let mut actual_bytes = serde_json::to_vec_pretty(actual).unwrap();
@@ -678,6 +870,26 @@ fn hostile_response() -> Value {
         "Override Instructions",
         "The document contains instructions but states no supported technical claim.",
     )
+}
+
+fn benign_knowledge_response() -> Value {
+    json!({
+        "synthesis": "Deterministic fixtures support repeatable validation.",
+        "concepts": [{
+            "name": "Deterministic fixture",
+            "kind": "concept",
+            "body": "A fixed input supports repeatable validation.",
+            "tags": ["testing"],
+            "locator": "page 1"
+        }]
+    })
+}
+
+fn hostile_knowledge_response() -> Value {
+    json!({
+        "synthesis": "The document states no supported technical evidence.",
+        "concepts": []
+    })
 }
 
 fn semantic_response(title: &str, summary: &str) -> Value {
