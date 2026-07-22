@@ -61,13 +61,9 @@ impl KnowledgeFixture {
         replace: bool,
     ) -> Result<mko_core::knowledge::WriteKnowledgeResult, mko_core::error::MkoError> {
         write_knowledge_note_with_clock(
-            WriteKnowledgeRequest::new(
-                &self.repository,
-                self.bundle_for(asset_id),
-                asset_id,
-                response.to_vec(),
-            )
-            .with_replace(replace),
+            WriteKnowledgeRequest::new(&self.repository, asset_id, response.to_vec())
+                .with_bundle(self.bundle_for(asset_id))
+                .with_replace(replace),
             &self.clock,
         )
     }
@@ -159,6 +155,54 @@ struct BarrierObserver(Arc<Barrier>);
 impl KnowledgeMutationObserver for BarrierObserver {
     fn before_publication(&mut self) -> Result<(), mko_core::error::MkoError> {
         self.0.wait();
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+struct SwapKnowledgeDirectoryObserver {
+    repository: PathBuf,
+}
+
+#[cfg(unix)]
+impl SwapKnowledgeDirectoryObserver {
+    fn swap(&self) {
+        fs::rename(
+            self.repository.join("knowledge"),
+            self.repository.join("knowledge-retained"),
+        )
+        .unwrap();
+        fs::create_dir(self.repository.join("knowledge")).unwrap();
+    }
+}
+
+#[cfg(unix)]
+impl KnowledgeMutationObserver for SwapKnowledgeDirectoryObserver {
+    fn before_publication(&mut self) -> Result<(), mko_core::error::MkoError> {
+        self.swap();
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+struct SwapKnowledgeAfterMetadataObserver {
+    repository: PathBuf,
+    outside: PathBuf,
+}
+
+#[cfg(unix)]
+impl KnowledgeMutationObserver for SwapKnowledgeAfterMetadataObserver {
+    fn after_knowledge_directory_metadata(&mut self) -> Result<(), mko_core::error::MkoError> {
+        fs::rename(
+            self.repository.join("knowledge"),
+            self.repository.join("knowledge-retained"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&self.outside, self.repository.join("knowledge")).unwrap();
+        Ok(())
+    }
+
+    fn before_publication(&mut self) -> Result<(), mko_core::error::MkoError> {
         Ok(())
     }
 }
@@ -293,18 +337,27 @@ fn write_rejects_a_missing_prepared_bundle() {
 }
 
 #[test]
+fn core_write_requires_a_prepared_bundle_even_with_source_compatible_constructor() {
+    let kb = knowledge_fixture();
+
+    let err = write_knowledge_note_with_clock(
+        WriteKnowledgeRequest::new(kb.repo(), kb.asset_id(), VALID.as_bytes().to_vec()),
+        &kb.clock,
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code(), "bundle_required");
+}
+
+#[test]
 fn write_rejects_a_bundle_outside_the_canonical_runtime_path() {
     let kb = knowledge_fixture();
     let outside = kb.repo().join("prepared.json");
     fs::copy(kb.bundle_path(), &outside).unwrap();
 
     let err = write_knowledge_note_with_clock(
-        WriteKnowledgeRequest::new(
-            kb.repo(),
-            &outside,
-            kb.asset_id(),
-            VALID.as_bytes().to_vec(),
-        ),
+        WriteKnowledgeRequest::new(kb.repo(), kb.asset_id(), VALID.as_bytes().to_vec())
+            .with_bundle(&outside),
         &kb.clock,
     )
     .unwrap_err();
@@ -318,12 +371,8 @@ fn write_rejects_a_bundle_for_a_different_asset() {
     let (_second_asset, second_bundle) = kb.second_asset();
 
     let err = write_knowledge_note_with_clock(
-        WriteKnowledgeRequest::new(
-            kb.repo(),
-            second_bundle,
-            kb.asset_id(),
-            VALID.as_bytes().to_vec(),
-        ),
+        WriteKnowledgeRequest::new(kb.repo(), kb.asset_id(), VALID.as_bytes().to_vec())
+            .with_bundle(second_bundle),
         &kb.clock,
     )
     .unwrap_err();
@@ -408,13 +457,9 @@ fn concurrent_replace_and_approve_publish_only_one_stale_snapshot() {
     let replace = thread::spawn(move || {
         let mut observer = BarrierObserver(replace_barrier);
         write_knowledge_note_with_clock_and_observer(
-            WriteKnowledgeRequest::new(
-                replace_repository,
-                replace_bundle,
-                replace_asset,
-                changed.into_bytes(),
-            )
-            .with_replace(true),
+            WriteKnowledgeRequest::new(replace_repository, replace_asset, changed.into_bytes())
+                .with_bundle(replace_bundle)
+                .with_replace(true),
             &replace_clock,
             &mut observer,
         )
@@ -471,7 +516,8 @@ fn concurrent_first_creation_reports_created_then_existing() {
         workers.push(thread::spawn(move || {
             barrier.wait();
             write_knowledge_note_with_clock(
-                WriteKnowledgeRequest::new(repository, bundle, asset_id, VALID.as_bytes().to_vec()),
+                WriteKnowledgeRequest::new(repository, asset_id, VALID.as_bytes().to_vec())
+                    .with_bundle(bundle),
                 &clock,
             )
             .unwrap()
@@ -485,6 +531,112 @@ fn concurrent_first_creation_reports_created_then_existing() {
         .collect::<Vec<_>>();
     outcomes.sort();
     assert_eq!(outcomes, ["created", "existing"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn knowledge_directory_acquisition_rejects_a_symlink_swap_after_metadata_validation() {
+    let kb = knowledge_fixture();
+    let outside = kb._root.path().join("outside-knowledge");
+    fs::create_dir(&outside).unwrap();
+    let mut observer = SwapKnowledgeAfterMetadataObserver {
+        repository: kb.repository.clone(),
+        outside: outside.clone(),
+    };
+
+    let error = write_knowledge_note_with_clock_and_observer(
+        WriteKnowledgeRequest::new(kb.repo(), kb.asset_id(), VALID.as_bytes().to_vec())
+            .with_bundle(kb.bundle_path()),
+        &kb.clock,
+        &mut observer,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "knowledge_path_invalid");
+    assert_eq!(fs::read_dir(outside).unwrap().count(), 0);
+    assert_eq!(
+        fs::read_dir(kb.repo().join("knowledge-retained"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn create_reports_failure_when_public_knowledge_directory_is_rebound_before_publication() {
+    let kb = knowledge_fixture();
+    let mut observer = SwapKnowledgeDirectoryObserver {
+        repository: kb.repository.clone(),
+    };
+
+    let error = write_knowledge_note_with_clock_and_observer(
+        WriteKnowledgeRequest::new(kb.repo(), kb.asset_id(), VALID.as_bytes().to_vec())
+            .with_bundle(kb.bundle_path()),
+        &kb.clock,
+        &mut observer,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "knowledge_publication_invalid");
+    assert_eq!(
+        fs::read_dir(kb.repo().join("knowledge")).unwrap().count(),
+        0
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn replace_reports_failure_when_public_knowledge_directory_is_rebound_before_publication() {
+    let kb = knowledge_fixture();
+    kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let changed = VALID.replace(
+        "LTI systems and transforms",
+        "LTI systems, transforms, and sampling",
+    );
+    let mut observer = SwapKnowledgeDirectoryObserver {
+        repository: kb.repository.clone(),
+    };
+
+    let error = write_knowledge_note_with_clock_and_observer(
+        WriteKnowledgeRequest::new(kb.repo(), kb.asset_id(), changed.into_bytes())
+            .with_bundle(kb.bundle_path())
+            .with_replace(true),
+        &kb.clock,
+        &mut observer,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "knowledge_publication_invalid");
+    assert_eq!(
+        fs::read_dir(kb.repo().join("knowledge")).unwrap().count(),
+        0
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn approve_reports_failure_when_public_knowledge_directory_is_rebound_before_publication() {
+    let kb = knowledge_fixture();
+    let written = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let mut observer = SwapKnowledgeDirectoryObserver {
+        repository: kb.repository.clone(),
+    };
+
+    let error = approve_knowledge_with_clock_and_observer(
+        kb.repo(),
+        &written.knowledge_id,
+        &written.content_revision,
+        &kb.clock,
+        &mut observer,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "knowledge_publication_invalid");
+    assert_eq!(
+        fs::read_dir(kb.repo().join("knowledge")).unwrap().count(),
+        0
+    );
 }
 
 #[test]

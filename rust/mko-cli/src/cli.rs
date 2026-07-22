@@ -973,7 +973,8 @@ fn knowledge_write(arguments: KnowledgeWriteArgs) -> Result<(), MkoError> {
         )
     })?;
     let result = write_knowledge_note(
-        WriteKnowledgeRequest::new(&repository, bundle, &arguments.asset_id, response)
+        WriteKnowledgeRequest::new(&repository, &arguments.asset_id, response)
+            .with_bundle(bundle)
             .with_replace(arguments.replace),
     )?;
     if json_v1 {
