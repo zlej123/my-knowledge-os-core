@@ -10,11 +10,43 @@ Git + Markdown 개인 지식 시스템입니다.
 
 ## 가장 쉬운 시작
 
-개발 설치:
+현재 v0.3 소스 설치는 CLI와 Codex Skill을 함께 설치합니다. 이 경로는 Rust 1.97 이상이
+필요하며 `mko setup`이나 Knowledge 저장소 변경을 자동 실행하지 않습니다.
+
+Windows PowerShell:
+
+```powershell
+pwsh -File scripts/install.ps1 -PlanOnly
+pwsh -File scripts/install.ps1 -Yes
+```
+
+macOS:
+
+```bash
+./scripts/install.sh --plan
+./scripts/install.sh --yes
+```
+
+설치 후 Codex를 다시 시작하고 다음처럼 요청합니다.
+
+```text
+My Knowledge OS 시작해줘
+```
+
+스크립트는 기존 Skill을 삭제하지 않고 먼저 timestamped backup으로 이동합니다. Windows에서는
+Cargo bin 경로를 사용자 PATH에 중복 없이 추가하며, macOS에서는 PATH에 없을 경우 추가할 정확한
+경로를 안내합니다. Rust가 없는 clean machine용 checksum 고정 릴리스 바이너리 설치는 다음
+배포 절취선이며, 그 전까지 Cargo가 개발 설치 fallback입니다.
+
+수동 개발 설치:
 
 ```bash
 cargo install --path rust/mko-cli --locked
 ```
+
+Skill만 수동 설치해야 한다면 canonical 폴더
+`skills/codex/my-knowledge-os`를 `${CODEX_HOME:-$HOME/.codex}/skills/my-knowledge-os`에
+복사합니다. Windows에서 `CODEX_HOME`이 없다면 `%USERPROFILE%\.codex`를 사용합니다.
 
 실제 터미널에서 최초 설정을 한 번 실행합니다.
 

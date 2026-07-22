@@ -1,12 +1,48 @@
 ---
 name: my-knowledge-os
-description: Use when the user asks to 설정, 등록, 요약, 정리, or review a personal PDF, 논문, or Inbox item as durable Source or Knowledge records in My Knowledge OS or a knowledge base.
+description: Use when the user asks to install, start, 설정, 등록, 요약, 정리, or review a personal PDF, 논문, or Inbox item as durable Source or Knowledge records in My Knowledge OS or a knowledge base.
 ---
 
 # My Knowledge OS
 
 Use the deterministic `mko` Core as the only writer of Asset, Source, Knowledge, Review, projection,
 and profile state. The agent may create bounded semantic JSON only inside the ignored local runtime.
+
+## CLI installation
+
+If `mko --version` is unavailable, do not download or execute a remote script. Locate or clone the
+canonical private `zlej123/my-knowledge-os-core` repository using the host's existing GitHub/Git
+authentication, show the exact clone destination and request host approval for network access.
+Never put a token in an argument, log, KB, or generated file.
+
+From the verified local checkout, inspect the source-install plan first:
+
+```powershell
+pwsh -File scripts/install.ps1 -PlanOnly
+```
+
+```bash
+./scripts/install.sh --plan
+```
+
+The current source fallback requires Rust 1.97 or newer. If Cargo is missing, stop and give the
+official rustup URL; do not install a toolchain without a separate explicit user request. After the
+user asks to install and the host approves the exact command, run the matching local installer:
+
+```powershell
+pwsh -File scripts/install.ps1 -Yes
+```
+
+```bash
+./scripts/install.sh --yes
+```
+
+The script installs the CLI and canonical Skill, preserves the
+previous Skill as a backup, verifies `mko --version`, and intentionally does not run setup. Ask the
+user to restart Codex before continuing.
+
+Do not claim that the Rust-free v0.3 binary bootstrap exists until the Skill contains a pinned
+release manifest with exact URL, size, and SHA-256 and the matching release artifacts are published.
 
 ## User language
 

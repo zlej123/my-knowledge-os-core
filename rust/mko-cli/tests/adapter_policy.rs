@@ -517,6 +517,9 @@ fn knowledge_os_skill_exposes_only_the_v2_core_workflow() {
         .unwrap_or_else(|error| panic!("{} must exist and be readable: {error}", path.display()));
     let commands = executable_surfaces(&text);
     let allowed = [
+        "pwsh",
+        "./scripts/install.sh",
+        "mko --version",
         "mko setup",
         "mko queue",
         "mko show",
@@ -536,6 +539,7 @@ fn knowledge_os_skill_exposes_only_the_v2_core_workflow() {
     }
     for command in commands.lines().map(|line| line.trim_start_matches("$ ")) {
         if command.starts_with("mko ")
+            && !command.starts_with("mko --version")
             && !command.starts_with("mko setup")
             && !command.starts_with("mko review ")
         {
@@ -583,6 +587,9 @@ fn knowledge_os_skill_defines_the_knowledge_extraction_flow() {
     validate_command_policy(
         &text,
         &[
+            "pwsh",
+            "./scripts/install.sh",
+            "mko --version",
             "mko setup",
             "mko queue",
             "mko show",
@@ -1201,6 +1208,67 @@ fn v03_concurrency_contract_is_bounded_and_honest() {
         assert!(
             design.contains(required),
             "v0.3 concurrency contract is missing: {required}"
+        );
+    }
+}
+
+#[test]
+fn source_installers_are_local_bounded_and_setup_free() {
+    let root = repository_path();
+    let powershell = std::fs::read_to_string(
+        root.join("skills/codex/my-knowledge-os/scripts/install-from-source.ps1"),
+    )
+    .expect("Windows source installer must be committed");
+    let shell = std::fs::read_to_string(
+        root.join("skills/codex/my-knowledge-os/scripts/install-from-source.sh"),
+    )
+    .expect("macOS source installer must be committed");
+
+    for (name, script) in [("PowerShell", &powershell), ("shell", &shell)] {
+        for required in ["--locked", "--force", "SKILL.md", "--version"] {
+            assert!(
+                script.contains(required),
+                "{name} installer is missing {required}"
+            );
+        }
+        for forbidden in [
+            "Invoke-Expression",
+            "iex ",
+            "curl |",
+            "curl -s",
+            "wget ",
+            "mko setup plan",
+            "mko setup apply",
+        ] {
+            assert!(
+                !script.contains(forbidden),
+                "{name} installer must not contain {forbidden}"
+            );
+        }
+    }
+
+    assert!(powershell.contains("& $CargoExecutable install --path"));
+    assert!(shell.contains("cargo install --path"));
+    assert!(powershell.contains("[switch]$PlanOnly"));
+    assert!(powershell.contains("[switch]$Yes"));
+    assert!(shell.contains("--plan"));
+    assert!(shell.contains("--yes"));
+}
+
+#[test]
+fn main_skill_routes_missing_cli_to_the_local_source_installer() {
+    let text = std::fs::read_to_string(knowledge_os_skill_path()).unwrap();
+    for required in [
+        "If `mko --version` is unavailable",
+        "scripts/install.ps1 -PlanOnly",
+        "scripts/install.sh --plan",
+        "Rust 1.97",
+        "does not run setup",
+        "restart Codex",
+    ] {
+        assert!(
+            text.contains(required),
+            "main skill is missing installation guidance: {required}"
         );
     }
 }
