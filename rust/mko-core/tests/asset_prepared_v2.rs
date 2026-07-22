@@ -1,24 +1,94 @@
 #[path = "support/pdf_fixture.rs"]
 mod pdf_fixture;
 
-use std::{fs, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
+use chrono::{DateTime, Utc};
 use mko_core::{
     asset_v2::{
         AssetRegistrationOutcomeV2, HydrationConfirmationV2, RegisterAssetRequestV2, read_asset_v2,
         register_pdf_asset_v2,
     },
+    clock::Clock,
     config_v2::{DerivedArtifactsPolicyV2, KnowledgeConfigV2},
     fingerprint::fingerprint_file,
     model_v2::PreparedMetadataV2,
     prepared_v2::{
-        PreparePdfAssetRequestV2, PreparedPersistenceOutcomeV2, prepare_pdf_asset_v2_with_extractor,
+        PreparePdfAssetRequestV2, PreparedPersistenceOutcomeV2,
+        prepare_pdf_asset_v2_with_extractor, prepare_pdf_asset_v2_with_extractor_and_clock,
+        read_prepared_content_v2_with_clock,
     },
+    revision_v2::{canonical_json_bytes, canonical_json_sha256},
     scaffold_v2::scaffold_personal_kb_v2,
 };
 use tempfile::TempDir;
 
 use pdf_fixture::write_pdf;
+
+struct FixedClock(DateTime<Utc>);
+
+impl Clock for FixedClock {
+    fn now_utc(&self) -> DateTime<Utc> {
+        self.0
+    }
+}
+
+fn at(value: &str) -> FixedClock {
+    FixedClock(
+        DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .with_timezone(&Utc),
+    )
+}
+
+fn replace_private_file(source: &Path, destination: &Path, bytes: &[u8]) {
+    fs::copy(source, destination).unwrap();
+    fs::write(destination, bytes).unwrap();
+}
+
+fn regular_file_names(directory: &Path) -> BTreeSet<String> {
+    fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .into_string()
+                .expect("test filenames are Unicode")
+        })
+        .collect()
+}
+
+fn tree_contains_bytes(root: &Path, excluded: Option<&Path>, needle: &[u8]) -> bool {
+    let excluded = excluded.map(|path| fs::canonicalize(path).unwrap());
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let canonical = fs::canonicalize(&path).unwrap();
+        if excluded.as_ref().is_some_and(|value| value == &canonical) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        if metadata.is_dir() {
+            pending.extend(
+                fs::read_dir(path)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path()),
+            );
+        } else if metadata.is_file()
+            && fs::read(&path)
+                .unwrap()
+                .windows(needle.len())
+                .any(|window| window == needle)
+        {
+            return true;
+        }
+    }
+    false
+}
 
 struct TestEnv {
     _root: TempDir,
@@ -72,6 +142,28 @@ impl TestEnv {
                 },
                 hydration_confirmation: HydrationConfirmationV2::Confirmed,
             },
+            |_, _| Ok(vec!["Exact extracted evidence".into()]),
+        )
+    }
+
+    fn prepare_at(
+        &self,
+        asset_id: &str,
+        clock: &dyn Clock,
+    ) -> Result<mko_core::prepared_v2::PreparedPdfResultV2, mko_core::error::MkoError> {
+        prepare_pdf_asset_v2_with_extractor_and_clock(
+            PreparePdfAssetRequestV2 {
+                repository_root: &self.repository,
+                provider_root: &self.provider,
+                asset_id,
+                metadata: PreparedMetadataV2 {
+                    title: Some("Fixture".into()),
+                    authors: vec!["Researcher".into()],
+                    created_at: None,
+                },
+                hydration_confirmation: HydrationConfirmationV2::Confirmed,
+            },
+            clock,
             |_, _| Ok(vec!["Exact extracted evidence".into()]),
         )
     }
@@ -142,7 +234,7 @@ fn changed_registered_provider_snapshot_blocks_preparation_without_cache_output(
 }
 
 #[test]
-fn prepared_plaintext_is_local_only_private_bounded_and_idempotent() {
+fn prepared_plaintext_is_local_only_private_bounded_session_and_idempotent() {
     let env = TestEnv::new();
     env.write_pdf("paper.pdf", "Prepare me");
     let registered = env.register("paper.pdf");
@@ -160,7 +252,7 @@ fn prepared_plaintext_is_local_only_private_bounded_and_idempotent() {
         first.bundle_path.starts_with(
             fs::canonicalize(&env.repository)
                 .unwrap()
-                .join(".mko/runtime/cache/prepared")
+                .join(".mko/runtime/sessions/prepared")
         )
     );
     assert_eq!(
@@ -176,6 +268,16 @@ fn prepared_plaintext_is_local_only_private_bounded_and_idempotent() {
             .unwrap()
             .contains("Exact extracted evidence")
     );
+    assert!(!tree_contains_bytes(
+        &env.provider,
+        None,
+        b"Exact extracted evidence"
+    ));
+    assert!(!tree_contains_bytes(
+        &env.repository,
+        Some(&env.repository.join(".mko/runtime")),
+        b"Exact extracted evidence"
+    ));
 
     #[cfg(unix)]
     {
@@ -197,6 +299,251 @@ fn prepared_plaintext_is_local_only_private_bounded_and_idempotent() {
             0
         );
     }
+}
+
+#[test]
+fn prepare_removes_recognized_crash_temporary_file_without_parsing_it() {
+    let env = TestEnv::new();
+    env.write_pdf("paper.pdf", "Crash cleanup");
+    let registered = env.register("paper.pdf");
+    let prepared = env
+        .prepare_at(&registered.asset.id, &at("2026-07-23T00:00:00Z"))
+        .unwrap();
+    let digest = prepared
+        .bundle
+        .bundle_id
+        .strip_prefix("prepared-content-sha256-")
+        .unwrap();
+    let temporary = prepared
+        .bundle_path
+        .parent()
+        .unwrap()
+        .join(format!(".mko-prepared-session-{digest}-999-1.tmp"));
+    replace_private_file(&prepared.bundle_path, &temporary, b"partial crash artifact");
+
+    let repeated = env
+        .prepare_at(&registered.asset.id, &at("2026-07-23T00:00:01Z"))
+        .unwrap();
+
+    assert_eq!(repeated.outcome, PreparedPersistenceOutcomeV2::Existing);
+    assert!(!temporary.exists());
+}
+
+#[test]
+fn prepare_refuses_unmanaged_and_special_entries_without_deleting_them() {
+    let env = TestEnv::new();
+    env.write_pdf("paper.pdf", "Hostile cleanup entry");
+    let registered = env.register("paper.pdf");
+    let prepared = env
+        .prepare_at(&registered.asset.id, &at("2026-07-23T00:00:00Z"))
+        .unwrap();
+    let directory = prepared.bundle_path.parent().unwrap();
+    let unmanaged = directory.join("notes.txt");
+    replace_private_file(&prepared.bundle_path, &unmanaged, b"not Core managed");
+
+    let error = env
+        .prepare_at(&registered.asset.id, &at("2026-07-23T00:00:01Z"))
+        .unwrap_err();
+    assert_eq!(error.code(), "prepared_session_directory_invalid");
+    assert!(unmanaged.exists());
+
+    fs::remove_file(&unmanaged).unwrap();
+    let digest = prepared
+        .bundle
+        .bundle_id
+        .strip_prefix("prepared-content-sha256-")
+        .unwrap();
+    let special = directory.join(format!(".mko-prepared-session-{digest}-999-2.tmp"));
+    fs::create_dir(&special).unwrap();
+    let error = env
+        .prepare_at(&registered.asset.id, &at("2026-07-23T00:00:02Z"))
+        .unwrap_err();
+    assert_eq!(error.code(), "prepared_session_directory_invalid");
+    assert!(special.is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn prepare_refuses_managed_looking_symlink_without_following_or_deleting_it() {
+    use std::os::unix::fs::symlink;
+
+    let env = TestEnv::new();
+    env.write_pdf("paper.pdf", "Hostile cleanup symlink");
+    let registered = env.register("paper.pdf");
+    let prepared = env
+        .prepare_at(&registered.asset.id, &at("2026-07-23T00:00:00Z"))
+        .unwrap();
+    let digest = prepared
+        .bundle
+        .bundle_id
+        .strip_prefix("prepared-content-sha256-")
+        .unwrap();
+    let outside = env._root.path().join("outside.txt");
+    fs::write(&outside, b"must survive").unwrap();
+    let linked = prepared
+        .bundle_path
+        .parent()
+        .unwrap()
+        .join(format!(".mko-prepared-session-{digest}-999-3.tmp"));
+    symlink(&outside, &linked).unwrap();
+
+    let error = env
+        .prepare_at(&registered.asset.id, &at("2026-07-23T00:00:01Z"))
+        .unwrap_err();
+
+    assert_eq!(error.code(), "prepared_session_directory_invalid");
+    assert_eq!(fs::read(&outside).unwrap(), b"must survive");
+    assert!(
+        fs::symlink_metadata(&linked)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn expired_sessions_are_cleaned_in_deterministic_bounded_batches() {
+    let env = TestEnv::new();
+    env.write_pdf("paper.pdf", "Bounded cleanup");
+    let registered = env.register("paper.pdf");
+    let prepared = env
+        .prepare_at(&registered.asset.id, &at("2026-07-23T00:00:00Z"))
+        .unwrap();
+    let directory = prepared.bundle_path.parent().unwrap();
+    let template: serde_json::Value =
+        serde_json::from_slice(&fs::read(&prepared.bundle_path).unwrap()).unwrap();
+
+    for index in 0..130 {
+        let mut session = template.clone();
+        session["bundle"]["metadata"]["title"] =
+            serde_json::json!(format!("Expired fixture {index:03}"));
+        let mut semantic = session["bundle"].clone();
+        let object = semantic.as_object_mut().unwrap();
+        object.remove("bundle_id");
+        object.remove("content_digest");
+        let digest = canonical_json_sha256(&semantic).unwrap();
+        let bundle_id = format!("prepared-content-{}", digest.replace(':', "-"));
+        session["bundle"]["bundle_id"] = serde_json::json!(bundle_id);
+        session["bundle"]["content_digest"] = serde_json::json!(digest);
+        let filename = format!(
+            "{}.session.json",
+            session["bundle"]["bundle_id"].as_str().unwrap()
+        );
+        replace_private_file(
+            &prepared.bundle_path,
+            &directory.join(filename),
+            &canonical_json_bytes(&session).unwrap(),
+        );
+    }
+
+    let before = regular_file_names(directory);
+    assert_eq!(before.len(), 131);
+    let first_batch = env
+        .prepare_at(&registered.asset.id, &at("2026-07-24T00:00:01Z"))
+        .unwrap();
+    let after_first = regular_file_names(directory);
+    let first_128: BTreeSet<_> = before.iter().take(128).cloned().collect();
+    let current_name = first_batch
+        .bundle_path
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let mut expected_after_first: BTreeSet<_> = before.difference(&first_128).cloned().collect();
+    expected_after_first.insert(current_name.clone());
+    assert_eq!(after_first, expected_after_first);
+
+    let second_batch = env
+        .prepare_at(&registered.asset.id, &at("2026-07-24T00:00:02Z"))
+        .unwrap();
+    assert_eq!(second_batch.outcome, PreparedPersistenceOutcomeV2::Existing);
+    assert_eq!(
+        regular_file_names(directory),
+        BTreeSet::from([current_name])
+    );
+}
+
+#[test]
+fn prepared_session_expires_at_24_hours_and_reprepare_rotates_exact_artifact() {
+    let env = TestEnv::new();
+    env.write_pdf("paper.pdf", "Prepare session expiry");
+    let registered = env.register("paper.pdf");
+    let created = at("2026-07-23T00:00:00Z");
+    let first = env.prepare_at(&registered.asset.id, &created).unwrap();
+    let first_bytes = fs::read(&first.bundle_path).unwrap();
+
+    assert_eq!(first.created_at, created.now_utc());
+    assert_eq!(
+        first.expires_at,
+        DateTime::parse_from_rfc3339("2026-07-24T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    );
+    assert_eq!(
+        read_prepared_content_v2_with_clock(&first.bundle_path, &at("2026-07-23T23:59:59Z"))
+            .unwrap(),
+        first.bundle
+    );
+    let expired =
+        read_prepared_content_v2_with_clock(&first.bundle_path, &at("2026-07-24T00:00:00Z"))
+            .unwrap_err();
+    assert_eq!(expired.code(), "prepared_session_expired");
+    assert!(expired.message().contains("prepare the Asset again"));
+
+    let second = env
+        .prepare_at(&registered.asset.id, &at("2026-07-24T00:00:01Z"))
+        .unwrap();
+    assert_eq!(second.outcome, PreparedPersistenceOutcomeV2::Created);
+    assert_eq!(second.bundle_path, first.bundle_path);
+    assert_ne!(fs::read(&second.bundle_path).unwrap(), first_bytes);
+    assert_eq!(
+        read_prepared_content_v2_with_clock(&second.bundle_path, &at("2026-07-24T00:00:02Z"))
+            .unwrap(),
+        second.bundle
+    );
+}
+
+#[test]
+fn prepared_session_rejects_caller_modified_lifetime_metadata() {
+    let env = TestEnv::new();
+    env.write_pdf("paper.pdf", "Do not extend lifetime");
+    let registered = env.register("paper.pdf");
+    let prepared = env
+        .prepare_at(&registered.asset.id, &at("2026-07-23T00:00:00Z"))
+        .unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&prepared.bundle_path).unwrap()).unwrap();
+    value["expires_at"] = serde_json::json!("2026-07-25T00:00:00Z");
+    fs::write(&prepared.bundle_path, canonical_json_bytes(&value).unwrap()).unwrap();
+
+    let error =
+        read_prepared_content_v2_with_clock(&prepared.bundle_path, &at("2026-07-23T00:00:01Z"))
+            .unwrap_err();
+    assert_eq!(error.code(), "prepared_session_invalid");
+    assert!(error.message().contains("Core-owned lifetime"));
+}
+
+#[cfg(unix)]
+#[test]
+fn prepared_session_read_does_not_follow_replacement_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let env = TestEnv::new();
+    env.write_pdf("paper.pdf", "No follow");
+    let registered = env.register("paper.pdf");
+    let prepared = env
+        .prepare_at(&registered.asset.id, &at("2026-07-23T00:00:00Z"))
+        .unwrap();
+    let outside = env._root.path().join("outside-session.json");
+    fs::copy(&prepared.bundle_path, &outside).unwrap();
+    fs::remove_file(&prepared.bundle_path).unwrap();
+    symlink(&outside, &prepared.bundle_path).unwrap();
+
+    let error =
+        read_prepared_content_v2_with_clock(&prepared.bundle_path, &at("2026-07-23T00:00:01Z"))
+            .unwrap_err();
+    assert_eq!(error.code(), "local_runtime_invalid");
 }
 
 #[test]

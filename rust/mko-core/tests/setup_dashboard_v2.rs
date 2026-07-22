@@ -220,6 +220,6 @@ fn dashboard_drift_refuses_overwrite_and_preserves_edited_bytes() {
 
     let error = ensure_dashboard_v2(&repository).unwrap_err();
 
-    assert_eq!(error.code(), "dashboard_drift");
+    assert_eq!(error.code(), "dashboard_user_modified");
     assert_eq!(fs::read(repository.join("HOME.md")).unwrap(), edited);
 }

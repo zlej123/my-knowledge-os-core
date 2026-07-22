@@ -10,10 +10,14 @@ use assert_cmd::Command;
 use chrono::{DateTime, Utc};
 use mko_core::{
     clock::Clock,
+    config_v2::DomainPolicyV2,
     model_v2::ReviewTargetTypeV2,
-    model_v2::{PreparedContentV2, SourceResponseV2},
-    queue_v2::{derive_queue_v2, show_review_card_v2},
-    records_v2::{AssetRecordV2, WriteSourceRecordRequestV2, write_source_record_v2},
+    model_v2::{KnowledgeResponseV2, PreparedContentV2, SourceResponseV2},
+    queue_v2::{RenderedReviewCardV2, derive_queue_v2, show_review_card_v2},
+    records_v2::{
+        AssetRecordV2, WriteKnowledgeRecordRequestV2, WriteSourceRecordRequestV2,
+        write_knowledge_record_v2, write_source_record_v2,
+    },
     review_v2::{ReviewDerivedStateV2, derive_review_state_v2},
     revision_v2::{canonical_json_bytes, canonical_json_sha256},
     scaffold_v2::scaffold_personal_kb_v2,
@@ -32,6 +36,7 @@ impl Clock for FixedClock {
 struct Environment {
     root: tempfile::TempDir,
     source_id: String,
+    knowledge_id: String,
 }
 
 #[test]
@@ -219,24 +224,212 @@ fn valid_v1_repository_keeps_the_frozen_legacy_review_route() {
 fn real_tty_review_approves_only_the_exact_displayed_revision() {
     let environment = environment();
     let card = show_review_card_v2(environment.root.path(), &environment.source_id).unwrap();
-    let targets = card
+    let (confirmation, effect_digest) = approval_confirmation(&card, &environment.source_id);
+    let transcript = run_tty_review(&environment, &environment.source_id, &confirmation);
+    assert!(transcript.contains("# Review card"));
+    assert!(transcript.contains(&environment.source_id));
+    assert!(transcript.contains(&environment.knowledge_id));
+    assert!(transcript.contains("Approval selection: selected record only"));
+    assert!(transcript.contains(&effect_digest));
+    assert!(transcript.contains("approved personal-review-"));
+    assert_eq!(
+        fs::read_dir(environment.root.path().join("reviews"))
+            .unwrap()
+            .count(),
+        1
+    );
+    let state = derive_review_state_v2(
+        environment.root.path(),
+        ReviewTargetTypeV2::Source,
+        &environment.source_id,
+    )
+    .unwrap();
+    assert_eq!(state.state, ReviewDerivedStateV2::Approved);
+    let knowledge_state = derive_review_state_v2(
+        environment.root.path(),
+        ReviewTargetTypeV2::Knowledge,
+        &environment.knowledge_id,
+    )
+    .unwrap();
+    assert_eq!(knowledge_state.state, ReviewDerivedStateV2::Unreviewed);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[allow(deprecated)]
+fn real_tty_knowledge_selection_approves_only_knowledge_with_domain_confirmation() {
+    let environment = environment();
+    let card = show_review_card_v2(environment.root.path(), &environment.knowledge_id).unwrap();
+    let (confirmation, effect_digest) = approval_confirmation(&card, &environment.knowledge_id);
+
+    let transcript = run_tty_review(&environment, &environment.knowledge_id, &confirmation);
+
+    assert!(transcript.contains(&environment.source_id));
+    assert!(transcript.contains(&environment.knowledge_id));
+    assert!(transcript.contains("Approval selection: selected record only"));
+    assert!(transcript.contains("Required per-document domain confirmation"));
+    assert!(transcript.contains(&effect_digest));
+    assert_eq!(
+        derive_review_state_v2(
+            environment.root.path(),
+            ReviewTargetTypeV2::Source,
+            &environment.source_id,
+        )
+        .unwrap()
+        .state,
+        ReviewDerivedStateV2::Unreviewed
+    );
+    assert_eq!(
+        derive_review_state_v2(
+            environment.root.path(),
+            ReviewTargetTypeV2::Knowledge,
+            &environment.knowledge_id,
+        )
+        .unwrap()
+        .state,
+        ReviewDerivedStateV2::Approved
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[allow(deprecated)]
+fn real_tty_queue_item_selection_approves_all_targets_in_one_event() {
+    let environment = environment();
+    let card = show_review_card_v2(environment.root.path(), &environment.source_id).unwrap();
+    let item_id = card.item_id.clone();
+    let (confirmation, effect_digest) = approval_confirmation(&card, &item_id);
+
+    let transcript = run_tty_review(&environment, &item_id, &confirmation);
+
+    assert!(transcript.contains("Approval selection: all actionable displayed targets"));
+    assert!(transcript.contains("Required per-document domain confirmation"));
+    assert!(transcript.contains(&effect_digest));
+    assert_eq!(
+        derive_review_state_v2(
+            environment.root.path(),
+            ReviewTargetTypeV2::Source,
+            &environment.source_id,
+        )
+        .unwrap()
+        .state,
+        ReviewDerivedStateV2::Approved
+    );
+    assert_eq!(
+        derive_review_state_v2(
+            environment.root.path(),
+            ReviewTargetTypeV2::Knowledge,
+            &environment.knowledge_id,
+        )
+        .unwrap()
+        .state,
+        ReviewDerivedStateV2::Approved
+    );
+    assert_eq!(
+        fs::read_dir(environment.root.path().join("reviews"))
+            .unwrap()
+            .count(),
+        1
+    );
+}
+
+#[test]
+#[allow(deprecated)]
+fn review_rejects_a_well_formed_target_id_outside_the_displayed_group() {
+    let environment = environment();
+    Command::cargo_bin("mko")
+        .unwrap()
+        .arg("review")
+        .arg(format!("personal-source-{}", "0".repeat(64)))
+        .arg("--repo")
+        .arg(environment.root.path())
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("review_card_not_found"));
+    assert_eq!(
+        fs::read_dir(environment.root.path().join("reviews"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn approval_confirmation(card: &RenderedReviewCardV2, selected_id: &str) -> (String, String) {
+    let selected = card
         .targets
+        .iter()
+        .filter(|target| selected_id == card.item_id || target.snapshot.record_id == selected_id)
+        .collect::<Vec<_>>();
+    let targets = selected
         .iter()
         .map(|target| target.snapshot.clone())
         .collect::<Vec<_>>();
+    let selected_effects = selected
+        .iter()
+        .map(|target| {
+            serde_json::json!({
+                "record_id": target.snapshot.record_id,
+                "displayed_revision": target.snapshot.displayed_revision,
+                "effects": ["approve_current_revision_via_tty"],
+            })
+        })
+        .collect::<Vec<_>>();
+    let domain_confirmations = selected
+        .iter()
+        .filter_map(|target| {
+            target.domain_policy.as_ref().map(|domain_policy| {
+                serde_json::json!({
+                    "record_id": target.snapshot.record_id,
+                    "displayed_revision": target.snapshot.displayed_revision,
+                    "domain_policy": domain_policy,
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let selection = if selected_id == card.item_id {
+        serde_json::json!("all")
+    } else {
+        serde_json::json!({"record": selected_id})
+    };
     let effect_digest = canonical_json_sha256(&serde_json::json!({
+        "schema_version": 2,
         "operation": "approve",
+        "card_digest": card.card_digest,
+        "displayed_effect_digest": card.effect_digest,
+        "selection": selection,
         "targets": targets,
+        "selected_effects": selected_effects,
+        "domain_confirmations": domain_confirmations,
     }))
     .unwrap();
-    let confirmation = format!("approve {effect_digest}\n");
+    let mut confirmation = format!("approve {} {effect_digest}", card.card_digest);
+    for target in selected {
+        if let Some(domain_policy) = &target.domain_policy {
+            let policy = match domain_policy {
+                DomainPolicyV2::Standard => "standard",
+                DomainPolicyV2::HighRisk => "high_risk",
+            };
+            confirmation.push_str(&format!(
+                " confirm-domain {} {} {}",
+                target.snapshot.record_id, target.snapshot.displayed_revision, policy
+            ));
+        }
+    }
+    confirmation.push('\n');
+    (confirmation, effect_digest)
+}
+
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn run_tty_review(environment: &Environment, selected_id: &str, confirmation: &str) -> String {
     let shell_command =
         "stty -echo; exec \"$MKO_TEST_BIN\" review \"$MKO_TEST_ID\" --repo \"$MKO_TEST_REPO\"";
     let mut child = ProcessCommand::new("/usr/bin/script")
         .args(["-q", "/dev/null", "/bin/sh", "-c", shell_command])
         .env("MKO_TEST_BIN", assert_cmd::cargo::cargo_bin("mko"))
         .env("MKO_TEST_REPO", environment.root.path())
-        .env("MKO_TEST_ID", &environment.source_id)
+        .env("MKO_TEST_ID", selected_id)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -253,24 +446,7 @@ fn real_tty_review_approves_only_the_exact_displayed_revision() {
         String::from_utf8_lossy(&output.stderr),
         String::from_utf8_lossy(&output.stdout),
     );
-    let transcript = String::from_utf8_lossy(&output.stdout);
-    assert!(transcript.contains("# Review card"));
-    assert!(transcript.contains(&environment.source_id));
-    assert!(transcript.contains(&effect_digest));
-    assert!(transcript.contains("approved personal-review-"));
-    assert_eq!(
-        fs::read_dir(environment.root.path().join("reviews"))
-            .unwrap()
-            .count(),
-        1
-    );
-    let state = derive_review_state_v2(
-        environment.root.path(),
-        ReviewTargetTypeV2::Source,
-        &environment.source_id,
-    )
-    .unwrap();
-    assert_eq!(state.state, ReviewDerivedStateV2::Approved);
+    String::from_utf8(output.stdout).unwrap()
 }
 
 fn environment() -> Environment {
@@ -306,9 +482,25 @@ fn environment() -> Environment {
         &FixedClock("2026-07-23T00:00:00Z".parse().unwrap()),
     )
     .unwrap();
+    let knowledge_response: KnowledgeResponseV2 = serde_json::from_slice(include_bytes!(
+        "../../../tests/fixtures/json-v2/knowledge-response.json"
+    ))
+    .unwrap();
+    let knowledge = write_knowledge_record_v2(
+        WriteKnowledgeRecordRequestV2 {
+            repository_root: root.path(),
+            asset: &asset,
+            bundle: &bundle,
+            response: &knowledge_response,
+            expected_revision: None,
+        },
+        &FixedClock("2026-07-23T00:00:00Z".parse().unwrap()),
+    )
+    .unwrap();
     Environment {
         root,
         source_id: source.record_id,
+        knowledge_id: knowledge.record_id,
     }
 }
 

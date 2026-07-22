@@ -3,12 +3,15 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
+    time::{Duration as StdDuration, Instant},
 };
 
 use cap_std::{
     ambient_authority,
     fs::{Dir, File, OpenOptions, OpenOptionsExt},
 };
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
@@ -16,7 +19,7 @@ use crate::{
         HydrationConfirmationV2, inspect_provider_file, read_asset_v2,
         require_hydration_confirmation, revalidate_provider_snapshot, validated_disjoint_roots,
     },
-    clock::SystemClock,
+    clock::{Clock, SystemClock},
     config_v2::{DerivedArtifactsPolicyV2, KnowledgeConfigV2},
     error::MkoError,
     fingerprint::{FileSnapshot, fingerprint_open_file, validate_pdf_content},
@@ -34,6 +37,16 @@ use crate::{
 
 const MAX_BLOCK_TEXT_BYTES: usize = 240 * 1024;
 const MAX_PREPARED_BUNDLE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_PREPARED_SESSION_BYTES: u64 = MAX_PREPARED_BUNDLE_BYTES + 64 * 1024;
+const PREPARED_SESSION_TTL: Duration = Duration::hours(24);
+const MAX_SESSION_CLEANUP_ENTRIES: usize = 128;
+const MAX_SESSION_DIRECTORY_ENTRIES: usize = 4096;
+const MAX_SESSION_CLEANUP_SCAN_BYTES: u64 = 512 * 1024 * 1024;
+const SESSION_CLEANUP_DEADLINE: StdDuration = StdDuration::from_secs(2);
+const PREPARED_SESSION_PREFIX: &str = "prepared-content-sha256-";
+const PREPARED_SESSION_SUFFIX: &str = ".session.json";
+const PREPARED_TEMP_PREFIX: &str = ".mko-prepared-session-";
+const PREPARED_TEMP_SUFFIX: &str = ".tmp";
 static NEXT_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,6 +60,24 @@ pub struct PreparedPdfResultV2 {
     pub bundle: PreparedContentV2,
     pub bundle_path: PathBuf,
     pub outcome: PreparedPersistenceOutcomeV2,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PreparedSessionArtifactTypeV2 {
+    PreparedSession,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PreparedSessionArtifactV2 {
+    schema_version: u32,
+    artifact_type: PreparedSessionArtifactTypeV2,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    bundle: PreparedContentV2,
 }
 
 pub struct PreparePdfAssetRequestV2<'a> {
@@ -61,13 +92,24 @@ pub fn prepare_pdf_asset_v2(
     request: PreparePdfAssetRequestV2<'_>,
     worker_executable: &Path,
 ) -> Result<PreparedPdfResultV2, MkoError> {
-    prepare_pdf_asset_v2_with_extractor(request, |snapshot, expected| {
+    prepare_pdf_asset_v2_with_extractor_and_clock(request, &SystemClock, |snapshot, expected| {
         extract_pdf_pages_in_child(worker_executable, snapshot, expected)
     })
 }
 
 pub fn prepare_pdf_asset_v2_with_extractor<F>(
     request: PreparePdfAssetRequestV2<'_>,
+    extractor: F,
+) -> Result<PreparedPdfResultV2, MkoError>
+where
+    F: FnOnce(File, &FileSnapshot) -> Result<Vec<String>, MkoError>,
+{
+    prepare_pdf_asset_v2_with_extractor_and_clock(request, &SystemClock, extractor)
+}
+
+pub fn prepare_pdf_asset_v2_with_extractor_and_clock<F>(
+    request: PreparePdfAssetRequestV2<'_>,
+    clock: &dyn Clock,
     extractor: F,
 ) -> Result<PreparedPdfResultV2, MkoError>
 where
@@ -114,8 +156,8 @@ where
     }
     revalidate_provider_snapshot(&provider_root, &asset.provider.logical_locator, &before)?;
     let bundle = build_pdf_prepared_content_v2(&asset, &pages, request.metadata)?;
-    let bytes = canonical_json_bytes(&bundle)?;
-    if bytes.len() as u64 > MAX_PREPARED_BUNDLE_BYTES {
+    let bundle_bytes = canonical_json_bytes(&bundle)?;
+    if bundle_bytes.len() as u64 > MAX_PREPARED_BUNDLE_BYTES {
         return Err(MkoError::new(
             "prepared_bundle_too_large",
             "prepared-content-v2 exceeds its bounded local runtime representation",
@@ -125,47 +167,142 @@ where
     let _mutation_lock = RepositoryMutationLock::acquire(
         &repository_root,
         "v2 PDF prepare",
-        &SystemClock,
+        clock,
         StaleRepositoryLockPolicy::Preserve,
     )?;
+    cleanup_expired_sessions(&runtime.prepared, clock)?;
     revalidate_provider_snapshot(&provider_root, &asset.provider.logical_locator, &before)?;
-    let filename = format!("{}.json", bundle.bundle_id);
+    let filename = published_session_filename(&bundle)?;
     let bundle_path = runtime.prepared_path.join(&filename);
-    let outcome = write_bundle_immutable(&runtime.prepared, Path::new(&filename), &bytes)?;
-    let persisted = read_cap_prepared_content_v2(&runtime.prepared, Path::new(&filename))?;
-    if persisted != bundle {
+    let created_at = clock.now_utc();
+    let session = PreparedSessionArtifactV2 {
+        schema_version: 2,
+        artifact_type: PreparedSessionArtifactTypeV2::PreparedSession,
+        created_at,
+        expires_at: created_at + PREPARED_SESSION_TTL,
+        bundle: bundle.clone(),
+    };
+    let bytes = canonical_json_bytes(&session)?;
+    if bytes.len() as u64 > MAX_PREPARED_SESSION_BYTES {
+        return Err(MkoError::new(
+            "prepared_bundle_too_large",
+            "prepared-content-v2 exceeds its bounded local session representation",
+        ));
+    }
+    let outcome = write_session_immutable(
+        &runtime.prepared,
+        Path::new(&filename),
+        &session,
+        &bytes,
+        clock,
+    )?;
+    let persisted = read_cap_prepared_session_v2(&runtime.prepared, Path::new(&filename), clock)?;
+    if persisted.bundle != bundle {
         return Err(MkoError::new(
             "prepared_bundle_invalid",
-            "persisted prepared bundle failed exact canonical validation",
+            "prepared plaintext session failed exact canonical validation",
         ));
     }
     Ok(PreparedPdfResultV2 {
         bundle,
         bundle_path,
         outcome,
+        created_at: persisted.created_at,
+        expires_at: persisted.expires_at,
     })
 }
 
 pub fn read_prepared_content_v2(path: &Path) -> Result<PreparedContentV2, MkoError> {
-    let bytes = read_bounded_bundle_nofollow(path)?;
-    let bundle: PreparedContentV2 = serde_json::from_slice(&bytes)
-        .map_err(|error| MkoError::new("prepared_bundle_invalid", error.to_string()))?;
-    if canonical_json_bytes(&bundle)? != bytes {
+    read_prepared_content_v2_with_clock(path, &SystemClock)
+}
+
+pub fn read_prepared_content_v2_with_clock(
+    path: &Path,
+    clock: &dyn Clock,
+) -> Result<PreparedContentV2, MkoError> {
+    let bytes = read_bounded_session_nofollow(path)?;
+    parse_prepared_session(&bytes, clock).map(|session| session.bundle)
+}
+
+/// Cleans Core-owned prepared plaintext sessions during ordinary repository use.
+///
+/// A repository without a prepared-session runtime is a no-op. Once that
+/// runtime exists, cleanup is deliberately fail-closed: an unmanaged name,
+/// link, special file, invalid session, or unsafe permission blocks the caller
+/// without deleting the suspicious entry. This makes queue/show/dashboard
+/// surface local tampering instead of silently stepping around it.
+pub fn cleanup_prepared_sessions_v2(
+    repository_root: &Path,
+    clock: &dyn Clock,
+) -> Result<(), MkoError> {
+    KnowledgeConfigV2::read(repository_root)?;
+    let repository_root = fs::canonicalize(repository_root)
+        .map_err(|error| MkoError::new("repository_root_invalid", error.to_string()))?;
+    if !prepared_session_runtime_exists(&repository_root)? {
+        return Ok(());
+    }
+    let _mutation_lock = RepositoryMutationLock::acquire(
+        &repository_root,
+        "v2 prepared session cleanup",
+        clock,
+        StaleRepositoryLockPolicy::Preserve,
+    )?;
+    let Some(prepared) = open_existing_prepared_session_directory(&repository_root)? else {
+        return Ok(());
+    };
+    cleanup_expired_sessions(&prepared, clock)
+}
+
+fn parse_prepared_session(
+    bytes: &[u8],
+    clock: &dyn Clock,
+) -> Result<PreparedSessionArtifactV2, MkoError> {
+    let session = parse_prepared_session_without_expiry(bytes)?;
+    if clock.now_utc() >= session.expires_at {
         return Err(MkoError::new(
-            "prepared_bundle_invalid",
-            "prepared-content-v2 cache entry is not canonical JSON",
+            "prepared_session_expired",
+            "the prepared plaintext session expired; prepare the Asset again before writing Source or Knowledge",
         ));
     }
-    let digest = semantic_bundle_digest(&bundle)?;
+    Ok(session)
+}
+
+fn parse_prepared_session_without_expiry(
+    bytes: &[u8],
+) -> Result<PreparedSessionArtifactV2, MkoError> {
+    let session: PreparedSessionArtifactV2 = serde_json::from_slice(bytes)
+        .map_err(|error| MkoError::new("prepared_session_invalid", error.to_string()))?;
+    if canonical_json_bytes(&session)? != bytes {
+        return Err(MkoError::new(
+            "prepared_session_invalid",
+            "prepared plaintext session is not canonical JSON",
+        ));
+    }
+    if session.schema_version != 2
+        || session.expires_at != session.created_at + PREPARED_SESSION_TTL
+        || session.expires_at <= session.created_at
+    {
+        return Err(MkoError::new(
+            "prepared_session_invalid",
+            "prepared plaintext session metadata violates the Core-owned lifetime contract",
+        ));
+    }
+    validate_bundle_integrity(&session.bundle)?;
+    Ok(session)
+}
+
+fn validate_bundle_integrity(bundle: &PreparedContentV2) -> Result<(), MkoError> {
+    let digest = semantic_bundle_digest(bundle)?;
     if bundle.content_digest != digest
         || bundle.bundle_id != format!("prepared-content-{}", digest.replace(':', "-"))
     {
-        return Err(MkoError::new(
+        Err(MkoError::new(
             "prepared_bundle_digest_mismatch",
-            "prepared-content-v2 cache entry does not match its canonical digest",
-        ));
+            "prepared-content-v2 does not match its canonical digest",
+        ))
+    } else {
+        Ok(())
     }
-    Ok(bundle)
 }
 
 /// Builds the canonical schema-v2 prepared-content artifact for a PDF.
@@ -354,8 +491,8 @@ impl LocalRuntimeV2 {
             ));
         }
         let runtime = ensure_private_directory(&mko.join("runtime"))?;
-        let cache = ensure_private_directory(&runtime.join("cache"))?;
-        let prepared_path = ensure_private_directory(&cache.join("prepared"))?;
+        let sessions = ensure_private_directory(&runtime.join("sessions"))?;
+        let prepared_path = ensure_private_directory(&sessions.join("prepared"))?;
         let snapshots_path = ensure_private_directory(&runtime.join("snapshots"))?;
         let prepared = Dir::open_ambient_dir(&prepared_path, ambient_authority())
             .map_err(|error| MkoError::new("local_runtime_invalid", error.to_string()))?;
@@ -367,6 +504,50 @@ impl LocalRuntimeV2 {
             prepared_path,
         })
     }
+}
+
+fn prepared_session_runtime_exists(repository_root: &Path) -> Result<bool, MkoError> {
+    let path = repository_root.join(".mko/runtime/sessions/prepared");
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(MkoError::new("local_runtime_invalid", error.to_string())),
+    }
+}
+
+fn open_existing_prepared_session_directory(
+    repository_root: &Path,
+) -> Result<Option<Dir>, MkoError> {
+    let mko = repository_root.join(".mko");
+    require_real_directory(&mko)?;
+    if read_small_regular_nofollow(&mko.join(".gitignore"), 1024)? != b"runtime/\n" {
+        return Err(MkoError::new(
+            "local_runtime_policy_invalid",
+            ".mko/.gitignore must exclude runtime before prepared plaintext is cleaned",
+        ));
+    }
+    for path in [
+        mko.join("runtime"),
+        mko.join("runtime/sessions"),
+        mko.join("runtime/sessions/prepared"),
+    ] {
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                require_real_directory(&path)?;
+                ensure_private_directory_permissions(&path)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(MkoError::new("local_runtime_invalid", error.to_string()));
+            }
+        }
+    }
+    Dir::open_ambient_dir(
+        repository_root.join(".mko/runtime/sessions/prepared"),
+        ambient_authority(),
+    )
+    .map(Some)
+    .map_err(|error| MkoError::new("local_runtime_invalid", error.to_string()))
 }
 
 struct PdfSnapshotV2 {
@@ -490,8 +671,8 @@ fn require_real_directory(path: &Path) -> Result<(), MkoError> {
     }
 }
 
-fn read_bounded_bundle_nofollow(path: &Path) -> Result<Vec<u8>, MkoError> {
-    let bytes = read_regular_nofollow(path, MAX_PREPARED_BUNDLE_BYTES)?;
+fn read_bounded_session_nofollow(path: &Path) -> Result<Vec<u8>, MkoError> {
+    let bytes = read_regular_nofollow(path, MAX_PREPARED_SESSION_BYTES)?;
     ensure_private_file_permissions(path)?;
     Ok(bytes)
 }
@@ -623,7 +804,7 @@ fn ensure_private_file_permissions(path: &Path) -> Result<(), MkoError> {
     } else {
         Err(MkoError::new(
             "local_runtime_permissions_invalid",
-            "prepared plaintext cache file must be owner-only",
+            "prepared plaintext session file must be owner-only",
         ))
     }
 }
@@ -689,26 +870,224 @@ fn registered_asset_changed_error() -> MkoError {
     )
 }
 
-fn write_bundle_immutable(
+fn cleanup_expired_sessions(directory: &Dir, clock: &dyn Clock) -> Result<(), MkoError> {
+    let deadline = Instant::now() + SESSION_CLEANUP_DEADLINE;
+    let entries = directory
+        .entries()
+        .map_err(|error| MkoError::new("prepared_session_cleanup_failed", error.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| MkoError::new("prepared_session_cleanup_failed", error.to_string()))?;
+    if entries.len() > MAX_SESSION_DIRECTORY_ENTRIES {
+        return Err(session_cleanup_limit());
+    }
+
+    let mut entries = entries
+        .into_iter()
+        .map(|entry| {
+            let name = entry.file_name();
+            let name_text = name
+                .to_str()
+                .ok_or_else(|| {
+                    MkoError::new(
+                        "prepared_session_directory_invalid",
+                        "prepared session filenames must be Unicode",
+                    )
+                })?
+                .to_owned();
+            let kind = managed_session_entry_kind(&name_text)?;
+            let path = PathBuf::from(name);
+            let metadata = directory.symlink_metadata(&path).map_err(|error| {
+                MkoError::new("prepared_session_cleanup_failed", error.to_string())
+            })?;
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.len() > MAX_PREPARED_SESSION_BYTES
+            {
+                return Err(MkoError::new(
+                    "prepared_session_directory_invalid",
+                    "prepared session directory contains a link, special file, or oversized entry; inspect and relocate it before retrying",
+                ));
+            }
+            Ok((name_text, path, kind, metadata.len()))
+        })
+        .collect::<Result<Vec<_>, MkoError>>()?;
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut scanned_bytes = 0_u64;
+    let mut removable = Vec::new();
+    for (name, path, kind, size) in entries {
+        if Instant::now() >= deadline {
+            return Err(session_cleanup_limit());
+        }
+        scanned_bytes = scanned_bytes
+            .checked_add(size)
+            .ok_or_else(session_cleanup_limit)?;
+        if scanned_bytes > MAX_SESSION_CLEANUP_SCAN_BYTES {
+            return Err(session_cleanup_limit());
+        }
+        let bytes = read_cap_regular_nofollow(directory, &path, MAX_PREPARED_SESSION_BYTES)?;
+        if kind == ManagedSessionEntryKind::Temporary {
+            // A crash can leave the staged file partially written. Its exact
+            // Core-only name, private regular-file checks above, and the held
+            // repository mutation lock are sufficient to identify it as an
+            // unpublished artifact; parsing it would make crash recovery
+            // depend on the write having completed.
+            removable.push(path);
+            continue;
+        }
+        let session = parse_prepared_session_without_expiry(&bytes)?;
+        validate_session_entry_binding(&name, &kind, &session)?;
+        if clock.now_utc() >= session.expires_at {
+            removable.push(path);
+        }
+    }
+
+    let mut removed = false;
+    for path in removable.into_iter().take(MAX_SESSION_CLEANUP_ENTRIES) {
+        directory
+            .remove_file(&path)
+            .map_err(|error| MkoError::new("prepared_session_cleanup_failed", error.to_string()))?;
+        removed = true;
+    }
+    if removed {
+        sync_cap_directory(directory)?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManagedSessionEntryKind {
+    Published,
+    Temporary,
+}
+
+fn managed_session_entry_kind(name: &str) -> Result<ManagedSessionEntryKind, MkoError> {
+    if let Some(digest) = name
+        .strip_prefix(PREPARED_SESSION_PREFIX)
+        .and_then(|name| name.strip_suffix(PREPARED_SESSION_SUFFIX))
+        && valid_lower_hex_digest(digest)
+    {
+        return Ok(ManagedSessionEntryKind::Published);
+    }
+    if let Some(body) = name
+        .strip_prefix(PREPARED_TEMP_PREFIX)
+        .and_then(|name| name.strip_suffix(PREPARED_TEMP_SUFFIX))
+        && let Some((digest_and_pid, counter)) = body.rsplit_once('-')
+        && let Some((digest, pid)) = digest_and_pid.rsplit_once('-')
+        && valid_lower_hex_digest(digest)
+        && !pid.is_empty()
+        && pid.bytes().all(|byte| byte.is_ascii_digit())
+        && !counter.is_empty()
+        && counter.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Ok(ManagedSessionEntryKind::Temporary);
+    }
+    Err(MkoError::new(
+        "prepared_session_directory_invalid",
+        "prepared session directory contains an unmanaged entry; inspect and relocate it before retrying",
+    ))
+}
+
+fn valid_lower_hex_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn validate_session_entry_binding(
+    name: &str,
+    kind: &ManagedSessionEntryKind,
+    session: &PreparedSessionArtifactV2,
+) -> Result<(), MkoError> {
+    let digest = session
+        .bundle
+        .bundle_id
+        .strip_prefix(PREPARED_SESSION_PREFIX)
+        .ok_or_else(|| {
+            MkoError::new(
+                "prepared_session_directory_invalid",
+                "prepared session bundle ID is not canonical",
+            )
+        })?;
+    let matches = match kind {
+        ManagedSessionEntryKind::Published => {
+            name == format!("{PREPARED_SESSION_PREFIX}{digest}{PREPARED_SESSION_SUFFIX}")
+        }
+        ManagedSessionEntryKind::Temporary => name
+            .strip_prefix(PREPARED_TEMP_PREFIX)
+            .and_then(|name| name.strip_suffix(PREPARED_TEMP_SUFFIX))
+            .is_some_and(|body| body.starts_with(&format!("{digest}-"))),
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(MkoError::new(
+            "prepared_session_directory_invalid",
+            "prepared session filename does not match its content-addressed bundle",
+        ))
+    }
+}
+
+fn session_cleanup_limit() -> MkoError {
+    MkoError::new(
+        "prepared_session_cleanup_limit",
+        "prepared session cleanup exceeded its deterministic entry, byte, or time bound",
+    )
+}
+
+fn published_session_filename(bundle: &PreparedContentV2) -> Result<String, MkoError> {
+    let digest = bundle
+        .bundle_id
+        .strip_prefix(PREPARED_SESSION_PREFIX)
+        .filter(|digest| valid_lower_hex_digest(digest))
+        .ok_or_else(|| {
+            MkoError::new(
+                "prepared_bundle_invalid",
+                "prepared bundle ID is not a canonical content digest",
+            )
+        })?;
+    Ok(format!(
+        "{PREPARED_SESSION_PREFIX}{digest}{PREPARED_SESSION_SUFFIX}"
+    ))
+}
+
+fn write_session_immutable(
     directory: &Dir,
     name: &Path,
+    session: &PreparedSessionArtifactV2,
     bytes: &[u8],
+    clock: &dyn Clock,
 ) -> Result<PreparedPersistenceOutcomeV2, MkoError> {
-    if bytes.len() as u64 > MAX_PREPARED_BUNDLE_BYTES {
+    if bytes.len() as u64 > MAX_PREPARED_SESSION_BYTES {
         return Err(MkoError::new(
             "prepared_bundle_too_large",
-            "prepared-content-v2 exceeds its bounded local runtime representation",
+            "prepared-content-v2 exceeds its bounded local session representation",
         ));
     }
     match directory.symlink_metadata(name) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-            require_cap_bundle_bytes(directory, name, bytes)?;
-            return Ok(PreparedPersistenceOutcomeV2::Existing);
+            let existing_bytes =
+                read_cap_regular_nofollow(directory, name, MAX_PREPARED_SESSION_BYTES)?;
+            let existing = parse_prepared_session_without_expiry(&existing_bytes)?;
+            if clock.now_utc() < existing.expires_at {
+                if existing.bundle == session.bundle {
+                    return Ok(PreparedPersistenceOutcomeV2::Existing);
+                }
+                return Err(MkoError::new(
+                    "prepared_bundle_conflict",
+                    "content-addressed prepared session contains different bundle bytes",
+                ));
+            }
+            directory
+                .remove_file(name)
+                .map_err(|error| MkoError::new("local_runtime_write_failed", error.to_string()))?;
+            sync_cap_directory(directory)?;
         }
         Ok(_) => {
             return Err(MkoError::new(
                 "prepared_bundle_destination_invalid",
-                "prepared bundle destination must be a regular non-link file",
+                "prepared session destination must be a regular non-link file",
             ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -719,9 +1098,18 @@ fn write_bundle_immutable(
             ));
         }
     }
+    let digest = session
+        .bundle
+        .bundle_id
+        .strip_prefix(PREPARED_SESSION_PREFIX)
+        .ok_or_else(|| {
+            MkoError::new(
+                "prepared_bundle_invalid",
+                "prepared bundle ID is not a canonical content digest",
+            )
+        })?;
     let temporary = PathBuf::from(format!(
-        ".{}.{}.{}.tmp",
-        name.to_string_lossy(),
+        "{PREPARED_TEMP_PREFIX}{digest}-{}-{}{PREPARED_TEMP_SUFFIX}",
         std::process::id(),
         NEXT_SNAPSHOT.fetch_add(1, Ordering::Relaxed)
     ));
@@ -741,7 +1129,7 @@ fn write_bundle_immutable(
             .map_err(|error| MkoError::new("local_runtime_write_failed", error.to_string()))?;
         let mut actual = Vec::with_capacity(bytes.len());
         (&mut staged)
-            .take(MAX_PREPARED_BUNDLE_BYTES + 1)
+            .take(MAX_PREPARED_SESSION_BYTES + 1)
             .read_to_end(&mut actual)
             .map_err(|error| MkoError::new("local_runtime_write_failed", error.to_string()))?;
         if actual != bytes {
@@ -763,8 +1151,15 @@ fn write_bundle_immutable(
                 directory.remove_file(&temporary).map_err(|error| {
                     MkoError::new("local_runtime_write_failed", error.to_string())
                 })?;
-                require_cap_bundle_bytes(directory, name, bytes)?;
-                Ok(PreparedPersistenceOutcomeV2::Existing)
+                let existing = read_cap_prepared_session_v2(directory, name, clock)?;
+                if existing.bundle == session.bundle {
+                    Ok(PreparedPersistenceOutcomeV2::Existing)
+                } else {
+                    Err(MkoError::new(
+                        "prepared_bundle_conflict",
+                        "content-addressed prepared session contains different bundle bytes",
+                    ))
+                }
             }
             Err(error) => Err(MkoError::new(
                 "local_runtime_write_failed",
@@ -778,32 +1173,13 @@ fn write_bundle_immutable(
     result
 }
 
-fn require_cap_bundle_bytes(directory: &Dir, name: &Path, expected: &[u8]) -> Result<(), MkoError> {
-    let bytes = read_cap_regular_nofollow(directory, name, MAX_PREPARED_BUNDLE_BYTES)?;
-    if bytes == expected {
-        Ok(())
-    } else {
-        Err(MkoError::new(
-            "prepared_bundle_conflict",
-            "content-addressed prepared bundle path contains different bytes",
-        ))
-    }
-}
-
-fn read_cap_prepared_content_v2(
+fn read_cap_prepared_session_v2(
     directory: &Dir,
     name: &Path,
-) -> Result<PreparedContentV2, MkoError> {
-    let bytes = read_cap_regular_nofollow(directory, name, MAX_PREPARED_BUNDLE_BYTES)?;
-    let bundle: PreparedContentV2 = serde_json::from_slice(&bytes)
-        .map_err(|error| MkoError::new("prepared_bundle_invalid", error.to_string()))?;
-    if canonical_json_bytes(&bundle)? != bytes {
-        return Err(MkoError::new(
-            "prepared_bundle_invalid",
-            "persisted prepared bundle is not canonical JSON",
-        ));
-    }
-    Ok(bundle)
+    clock: &dyn Clock,
+) -> Result<PreparedSessionArtifactV2, MkoError> {
+    let bytes = read_cap_regular_nofollow(directory, name, MAX_PREPARED_SESSION_BYTES)?;
+    parse_prepared_session(&bytes, clock)
 }
 
 fn read_cap_regular_nofollow(
@@ -823,7 +1199,7 @@ fn read_cap_regular_nofollow(
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > limit {
         return Err(MkoError::new(
             "local_runtime_invalid",
-            "prepared bundle must be a bounded regular non-link file",
+            "prepared session must be a bounded regular non-link file",
         ));
     }
     let std_file = file
@@ -838,7 +1214,7 @@ fn read_cap_regular_nofollow(
     if bytes.len() as u64 > limit {
         return Err(MkoError::new(
             "local_runtime_invalid",
-            "prepared bundle exceeds its bounded input size",
+            "prepared session exceeds its bounded input size",
         ));
     }
     Ok(bytes)
@@ -859,7 +1235,7 @@ fn ensure_private_std_file_permissions(file: &fs::File) -> Result<(), MkoError> 
     } else {
         Err(MkoError::new(
             "local_runtime_permissions_invalid",
-            "prepared plaintext cache file must be owner-only",
+            "prepared plaintext session file must be owner-only",
         ))
     }
 }
@@ -879,7 +1255,7 @@ fn ensure_private_std_file_permissions(file: &fs::File) -> Result<(), MkoError> 
     } else {
         Err(MkoError::new(
             "local_runtime_permissions_invalid",
-            "prepared plaintext cache ACL must be owner-only",
+            "prepared plaintext session ACL must be owner-only",
         ))
     }
 }

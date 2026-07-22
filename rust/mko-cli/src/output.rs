@@ -54,7 +54,10 @@ pub fn emit_json_v2_failure(command: JsonV2Command, error: &MkoError) -> Result<
         error: JsonV2Error {
             code: error.code().into(),
             message: error.message().into(),
-            retryable: matches!(error.code(), "lock_held" | "review_session_random_failed"),
+            retryable: matches!(
+                error.code(),
+                "lock_held" | "review_session_random_failed" | "setup_profile_locked"
+            ),
             next_action: json_v2_next_action(error.code()),
             details: ErrorDetailsV2::default(),
         },
@@ -66,9 +69,13 @@ pub fn emit_json_v2_failure(command: JsonV2Command, error: &MkoError) -> Result<
 
 pub(crate) fn json_v2_next_action(code: &str) -> NextActionV2 {
     match code {
-        "kb_config_unreadable" | "kb_schema_unsupported" | "context_not_found" => {
-            NextActionV2::Configure
-        }
+        "kb_config_unreadable"
+        | "kb_schema_unsupported"
+        | "context_not_found"
+        | "setup_plan_not_found"
+        | "setup_plan_expired"
+        | "setup_plan_consumed"
+        | "setup_plan_stale" => NextActionV2::Configure,
         "provider_hydration_required"
         | "provider_not_hydrated"
         | "asset_not_hydrated"
@@ -77,8 +84,15 @@ pub(crate) fn json_v2_next_action(code: &str) -> NextActionV2 {
         "projection_not_found"
         | "projection_snapshot_changed"
         | "projection_stale"
+        | "dashboard_drift"
+        | "dashboard_snapshot_changed"
         | "review_target_blocked" => NextActionV2::Repair,
-        "lock_held" | "review_session_random_failed" => NextActionV2::Retry,
+        "dashboard_user_modified"
+        | "dashboard_projection_user_modified"
+        | "dashboard_orphan_projection" => NextActionV2::PreserveUserEdit,
+        "lock_held" | "review_session_random_failed" | "setup_profile_locked" => {
+            NextActionV2::Retry
+        }
         "review_session_expired" | "review_session_consumed" | "review_snapshot_stale" => {
             NextActionV2::Review
         }

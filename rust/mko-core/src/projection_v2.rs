@@ -186,26 +186,11 @@ struct StoredProjectionMetadataV2 {
 
 pub(crate) fn projection_snapshot_status_v2(
     repository_root: &Path,
-    record_type: ProjectionRecordTypeV2,
-    record_id: &str,
-    current_revision: &str,
-    review_head_id: Option<&str>,
-    derived_state: ProjectionStateV2,
+    expected: &ProjectionInputV2,
 ) -> Result<ProjectionSnapshotStatusV2, MkoError> {
-    let probe = ProjectionInputV2 {
-        record_type,
-        id: record_id.to_owned(),
-        title: "projection probe".into(),
-        current_revision: current_revision.to_owned(),
-        review_head_id: review_head_id.map(str::to_owned),
-        derived_state,
-        domain: "projection probe".into(),
-        tags: Vec::new(),
-        record_link: "projection-probe".into(),
-        asset_link: "projection-probe".into(),
-    };
-    validate_input(&probe)?;
-    let path = repository_root.join(projection_relative_path_unchecked(&probe));
+    validate_input(expected)?;
+    let rendered = render_projection_unchecked(expected)?;
+    let path = repository_root.join(projection_relative_path_unchecked(expected));
     match fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(ProjectionSnapshotStatusV2::Missing);
@@ -219,38 +204,11 @@ pub(crate) fn projection_snapshot_status_v2(
     let Ok(bytes) = read_regular_projection(&path) else {
         return Ok(ProjectionSnapshotStatusV2::Stale);
     };
-    let Ok(text) = std::str::from_utf8(&bytes) else {
-        return Ok(ProjectionSnapshotStatusV2::Stale);
-    };
-    let Ok(parsed) = parse_markdown::<StoredProjectionMetadataV2>(text) else {
-        return Ok(ProjectionSnapshotStatusV2::Stale);
-    };
-    let metadata = parsed.metadata;
-    if metadata.projection_schema_version != 2
-        || metadata.record_type != record_type
-        || metadata.record_id != record_id
-        || metadata.current_revision != current_revision
-        || metadata.review_head_id.as_deref() != review_head_id
-        || metadata.derived_state != derived_state
-    {
-        return Ok(ProjectionSnapshotStatusV2::Stale);
-    }
-    let input = ProjectionInputV2 {
-        record_type: metadata.record_type,
-        id: metadata.record_id,
-        title: metadata.title,
-        current_revision: metadata.current_revision,
-        review_head_id: metadata.review_head_id,
-        derived_state: metadata.derived_state,
-        domain: metadata.domain,
-        tags: metadata.tags,
-        record_link: metadata.record_link,
-        asset_link: metadata.asset_link,
-    };
-    let Ok(rendered) = render_projection_unchecked(&input) else {
-        return Ok(ProjectionSnapshotStatusV2::Stale);
-    };
-    if rendered.projection_digest == metadata.projection_digest && rendered.bytes == bytes {
+    // Currentness is defined against bytes freshly rendered from canonical
+    // record content plus authoritative Review events. Re-rendering values
+    // parsed from this projection would let a self-consistent but semantically
+    // false projection validate itself.
+    if rendered.bytes == bytes {
         Ok(ProjectionSnapshotStatusV2::Current)
     } else {
         Ok(ProjectionSnapshotStatusV2::Stale)
@@ -326,6 +284,8 @@ pub(crate) fn read_current_projection_input_v2(
 #[serde(deny_unknown_fields)]
 struct GeneratedManifestV2 {
     schema_version: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    dashboard_files: Vec<GeneratedProjectionEntryV2>,
     projections: Vec<GeneratedProjectionEntryV2>,
 }
 
@@ -335,6 +295,119 @@ struct GeneratedProjectionEntryV2 {
     path: String,
     #[serde(deserialize_with = "deserialize_required_option")]
     content_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GeneratedFileEntryV2 {
+    pub path: String,
+    pub content_digest: Option<String>,
+}
+
+pub(crate) fn generated_dashboard_entries_v2(
+    repository_root: &Path,
+) -> Result<Vec<GeneratedFileEntryV2>, MkoError> {
+    let path = repository_root.join(MANIFEST_PATH);
+    if matches!(
+        fs::symlink_metadata(&path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    ) {
+        return Ok(Vec::new());
+    }
+    let (manifest, _) = read_manifest(repository_root)?;
+    Ok(manifest
+        .dashboard_files
+        .into_iter()
+        .map(|entry| GeneratedFileEntryV2 {
+            path: entry.path,
+            content_digest: entry.content_digest,
+        })
+        .collect())
+}
+
+pub(crate) fn generated_projection_entries_v2(
+    repository_root: &Path,
+) -> Result<Vec<GeneratedFileEntryV2>, MkoError> {
+    let path = repository_root.join(MANIFEST_PATH);
+    if matches!(
+        fs::symlink_metadata(&path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    ) {
+        return Ok(Vec::new());
+    }
+    let (manifest, _) = read_manifest(repository_root)?;
+    Ok(manifest
+        .projections
+        .into_iter()
+        .map(|entry| GeneratedFileEntryV2 {
+            path: entry.path,
+            content_digest: entry.content_digest,
+        })
+        .collect())
+}
+
+pub(crate) fn set_generated_dashboard_digest_locked_v2(
+    repository_root: &Path,
+    relative: &str,
+    content_digest: &str,
+) -> Result<(), MkoError> {
+    if !is_canonical_dashboard_path(relative) || validate_digest(content_digest).is_err() {
+        return Err(MkoError::new(
+            "dashboard_manifest_invalid",
+            "dashboard manifest entry is not a canonical managed file",
+        ));
+    }
+    let manifest_path = repository_root.join(MANIFEST_PATH);
+    let (mut manifest, manifest_bytes) = match fs::symlink_metadata(&manifest_path) {
+        Ok(_) => read_manifest(repository_root)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+            GeneratedManifestV2 {
+                schema_version: 2,
+                dashboard_files: Vec::new(),
+                projections: Vec::new(),
+            },
+            Vec::new(),
+        ),
+        Err(error) => {
+            return Err(MkoError::new(
+                "projection_manifest_invalid",
+                error.to_string(),
+            ));
+        }
+    };
+    if let Some(entry) = manifest
+        .dashboard_files
+        .iter_mut()
+        .find(|entry| entry.path == relative)
+    {
+        entry.content_digest = Some(content_digest.to_owned());
+    } else {
+        manifest.dashboard_files.push(GeneratedProjectionEntryV2 {
+            path: relative.to_owned(),
+            content_digest: Some(content_digest.to_owned()),
+        });
+        manifest
+            .dashboard_files
+            .sort_by(|left, right| left.path.cmp(&right.path));
+    }
+    if manifest_bytes.is_empty() {
+        let bytes = render_manifest(&manifest)?;
+        let publication = write_new(&manifest_path, &bytes, |_| {
+            Err(MkoError::new(
+                "projection_manifest_snapshot_changed",
+                "the generated manifest appeared while dashboard ownership was claimed",
+            ))
+        })
+        .map_err(map_projection_atomic_error)?;
+        if publication != AtomicWriteResult::Created {
+            return Err(MkoError::new(
+                "projection_manifest_snapshot_changed",
+                "the generated manifest changed while dashboard ownership was claimed",
+            ));
+        }
+    } else {
+        let _ = write_manifest(repository_root, &manifest_bytes, &manifest)?;
+    }
+    Ok(())
 }
 
 pub fn projection_relative_path_v2(input: &ProjectionInputV2) -> Result<String, MkoError> {
@@ -520,6 +593,17 @@ pub(crate) fn write_projection_locked(
     Ok(result(path, rendered, outcome, None))
 }
 
+pub(crate) fn prepare_projection_recovery_locked_v2(
+    repository_root: &Path,
+    input: &ProjectionInputV2,
+    actual: &[u8],
+) -> Result<ProjectionRecoveryV2, MkoError> {
+    validate_repository_layout(repository_root)?;
+    validate_input(input)?;
+    let rendered = render_projection_unchecked(input)?;
+    prepare_recovery(repository_root, input, actual, &rendered.bytes)
+}
+
 fn result(
     path: PathBuf,
     rendered: RenderedProjectionV2,
@@ -655,6 +739,21 @@ fn read_manifest(repository_root: &Path) -> Result<(GeneratedManifestV2, Vec<u8>
             ));
         }
     }
+    let mut dashboard_paths = HashSet::new();
+    for entry in &manifest.dashboard_files {
+        if !is_canonical_dashboard_path(&entry.path)
+            || !dashboard_paths.insert(entry.path.as_str())
+            || entry
+                .content_digest
+                .as_deref()
+                .is_none_or(|digest| validate_digest(digest).is_err())
+        {
+            return Err(MkoError::new(
+                "projection_manifest_invalid",
+                "generated manifest contains an invalid dashboard file entry",
+            ));
+        }
+    }
     Ok((manifest, bytes))
 }
 
@@ -681,6 +780,7 @@ fn claim_projection_path(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let manifest = GeneratedManifestV2 {
                 schema_version: 2,
+                dashboard_files: Vec::new(),
                 projections: vec![GeneratedProjectionEntryV2 {
                     path: relative.into(),
                     content_digest: None,
@@ -728,6 +828,13 @@ fn claim_projection_path(
     manifest_bytes = write_manifest(repository_root, &manifest_bytes, &manifest)?;
     let index = owned_entry_index(&manifest, relative)?;
     Ok((manifest, manifest_bytes, index))
+}
+
+fn is_canonical_dashboard_path(value: &str) -> bool {
+    matches!(
+        value,
+        "HOME.md" | "views/review-queue.base" | "views/knowledge-library.base"
+    )
 }
 
 fn is_canonical_projection_path(value: &str) -> bool {

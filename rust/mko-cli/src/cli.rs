@@ -17,7 +17,10 @@ use mko_core::{
         ResolveContextRequest, ResolvedPersonalContext, SystemPlatformEnvironment,
         resolve_personal_context,
     },
-    dashboard_v2::{DashboardOutcomeV2, ensure_dashboard_v2},
+    dashboard_v2::{
+        DashboardCanonicalStateV2, DashboardFileKindV2, DashboardFileStateV2, DashboardOutcomeV2,
+        DashboardProjectionStateV2, inspect_dashboard_v2, repair_dashboard_v2,
+    },
     doctor::{DoctorRequest, SystemDoctorEnvironment, diagnose},
     error::MkoError,
     hooks::install_hooks,
@@ -32,7 +35,10 @@ use mko_core::{
     },
     json_v2::{
         AddBatchDataV2, AddBatchItemErrorV2, AddBatchItemV2, AddBatchWarningV2, AddDataV2,
-        AddOutcomeV2, AddSingleDataV2, JsonV2Command, JsonV2Success,
+        AddOutcomeV2, AddSingleDataV2, DashboardCanonicalStateDataV2, DashboardDataV2,
+        DashboardFileDataV2, DashboardFileKindDataV2, DashboardFileStateDataV2,
+        DashboardProjectionStateDataV2, JsonV2Command, JsonV2Success, NextActionV2,
+        SetupApplyDataV2,
     },
     knowledge::{
         ConceptKind, ConceptMatch, KnowledgeSearchQuery, WriteKnowledgeRequest, approve_knowledge,
@@ -50,6 +56,7 @@ use mko_core::{
     setup::{
         SetupRequest, SystemSetupWriter, apply_setup, detect_google_drive_roots, preflight_setup,
     },
+    setup_plan_v2::{apply_setup_plan_v2_tty, create_setup_plan_v2},
     setup_v2::{SetupPersonalV2Request, setup_personal_v2},
     source::{
         RepairSourceStateRequest, WriteSourceRequest, repair_source_state, write_source_draft,
@@ -312,12 +319,40 @@ enum HooksCommand {
 
 #[derive(Args)]
 struct SetupArgs {
+    #[command(subcommand)]
+    command: Option<SetupCommand>,
     #[arg(long)]
     repo: Option<PathBuf>,
     #[arg(long)]
     drive_root: Option<PathBuf>,
     #[arg(long)]
     replace_profile: bool,
+}
+
+#[derive(Subcommand)]
+enum SetupCommand {
+    Plan(SetupPlanArgs),
+    Apply(SetupApplyArgs),
+}
+
+#[derive(Args)]
+struct SetupPlanArgs {
+    #[arg(long)]
+    repo: Option<PathBuf>,
+    #[arg(long)]
+    drive_root: Option<PathBuf>,
+    #[arg(long)]
+    replace_profile: bool,
+    #[arg(long, value_enum, default_value_t = OutputFormat::JsonV2)]
+    format: OutputFormat,
+}
+
+#[derive(Args)]
+struct SetupApplyArgs {
+    #[arg(long)]
+    plan: String,
+    #[arg(long, value_enum, default_value_t = OutputFormat::JsonV2)]
+    format: OutputFormat,
 }
 #[derive(Args)]
 struct AddArgs {
@@ -338,6 +373,8 @@ struct AddArgs {
 struct DashboardArgs {
     #[arg(long)]
     repo: Option<PathBuf>,
+    #[arg(long)]
+    repair: bool,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
 }
@@ -441,6 +478,10 @@ struct ReviewFeedbackArgs {
 }
 #[derive(Args)]
 struct ReviewArgs {
+    #[arg(
+        value_name = "TARGET_OR_QUEUE_ID",
+        help = "Source/Knowledge ID approves only that record; a queue item ID (or no ID) approves all actionable records in the displayed card"
+    )]
     stable_id: Option<String>,
     #[arg(long)]
     repo: Option<PathBuf>,
@@ -1782,6 +1823,12 @@ fn check_data(report: &CheckReport) -> CheckData {
 }
 
 fn setup(arguments: SetupArgs) -> Result<(), MkoError> {
+    if let Some(command) = arguments.command {
+        return match command {
+            SetupCommand::Plan(arguments) => setup_plan_v2(arguments),
+            SetupCommand::Apply(arguments) => setup_apply_v2(arguments),
+        };
+    }
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err(MkoError::new(
             "tty_required",
@@ -1834,6 +1881,45 @@ fn setup(arguments: SetupArgs) -> Result<(), MkoError> {
     println!("✓ Obsidian 보기 파일 생성");
     println!("PDF를 Inbox에 넣고 `mko add <PDF 경로>`를 실행하세요.");
     Ok(())
+}
+
+fn setup_plan_v2(arguments: SetupPlanArgs) -> Result<(), MkoError> {
+    if arguments.format != OutputFormat::JsonV2 {
+        return Err(MkoError::new(
+            "format_unsupported",
+            "mko setup plan requires json-v2 output",
+        ));
+    }
+    let platform = SystemPlatformEnvironment;
+    let repository = setup_destination(arguments.repo, &platform)?;
+    let drive_root = select_drive_root_machine(arguments.drive_root, &platform)?;
+    let plan = create_setup_plan_v2(
+        SetupPersonalV2Request {
+            repository_root: &repository,
+            drive_account_root: &drive_root,
+            replace_profile: arguments.replace_profile,
+        },
+        &platform,
+        &SystemClock,
+    )?;
+    crate::output::emit_json_v2(JsonV2Success::setup_plan(plan))
+}
+
+fn setup_apply_v2(arguments: SetupApplyArgs) -> Result<(), MkoError> {
+    if arguments.format != OutputFormat::JsonV2 {
+        return Err(MkoError::new(
+            "format_unsupported",
+            "mko setup apply requires json-v2 output",
+        ));
+    }
+    let result =
+        apply_setup_plan_v2_tty(&arguments.plan, &SystemPlatformEnvironment, &SystemClock)?;
+    crate::output::emit_json_v2(JsonV2Success::setup_apply(SetupApplyDataV2 {
+        plan_id: result.plan_id,
+        repository_root: result.setup.repository_root.display().to_string(),
+        provider_root: result.setup.provider_root.display().to_string(),
+        profile_changed: result.setup.profile_changed,
+    }))
 }
 
 fn setup_legacy(repository: PathBuf, drive_root: PathBuf) -> Result<(), MkoError> {
@@ -1904,6 +1990,27 @@ fn select_drive_root(
         })
 }
 
+fn select_drive_root_machine(
+    explicit: Option<PathBuf>,
+    platform: &dyn mko_core::context::PlatformEnvironment,
+) -> Result<PathBuf, MkoError> {
+    if let Some(root) = explicit {
+        return Ok(root);
+    }
+    let roots = detect_google_drive_roots(platform)?;
+    match roots.as_slice() {
+        [root] => Ok(root.path.clone()),
+        [] => Err(MkoError::new(
+            "drive_root_not_found",
+            "no platform-known Google Drive account root was found",
+        )),
+        _ => Err(MkoError::new(
+            "drive_root_ambiguous",
+            "pass --drive-root with one detected Google Drive account root",
+        )),
+    }
+}
+
 fn dashboard(arguments: DashboardArgs) -> Result<(), MkoError> {
     let repository = setup_repository(arguments.repo)?;
     if !crate::cli_v2::is_v2_repository(&repository)? {
@@ -1912,21 +2019,111 @@ fn dashboard(arguments: DashboardArgs) -> Result<(), MkoError> {
             "mko dashboard requires a v0.3 Personal KB",
         ));
     }
-    if arguments.format != OutputFormat::Human {
+    if arguments.format == OutputFormat::JsonV1 {
         return Err(MkoError::new(
             "format_unsupported",
-            "mko dashboard machine output is not available yet",
+            "mko dashboard supports human or json-v2 output",
         ));
     }
-    let result = ensure_dashboard_v2(&repository)?;
-    match result.outcome {
-        DashboardOutcomeV2::Created => println!("Obsidian 보기 파일을 생성했습니다."),
-        DashboardOutcomeV2::Existing => println!("Obsidian 보기 파일이 정상입니다."),
+    if arguments.repair {
+        let result = repair_dashboard_v2(&repository)?;
+        if arguments.format == OutputFormat::Human {
+            match result.outcome {
+                DashboardOutcomeV2::Created => println!("Obsidian 보기 파일을 생성했습니다."),
+                DashboardOutcomeV2::Existing => println!("Obsidian 보기 파일이 정상입니다."),
+                DashboardOutcomeV2::Repaired => {
+                    println!("변경되지 않은 생성 파일을 안전하게 복구했습니다.")
+                }
+            }
+            for path in result.generated_files {
+                println!("- {path}");
+            }
+        }
     }
-    for path in result.generated_files {
-        println!("- {path}");
+    let status = inspect_dashboard_v2(&repository)?;
+    if arguments.format == OutputFormat::JsonV2 {
+        let data = dashboard_json_v2(status);
+        return crate::output::emit_json_v2(JsonV2Success::dashboard(data));
+    }
+    println!(
+        "Canonical: {}",
+        match status.canonical_state {
+            DashboardCanonicalStateV2::Ready => "ready",
+            DashboardCanonicalStateV2::Blocked => "blocked",
+        }
+    );
+    println!(
+        "Projection: {}",
+        match status.projection_state {
+            DashboardProjectionStateV2::Current => "current",
+            DashboardProjectionStateV2::RepairRequired => "repair required",
+        }
+    );
+    for item in &status.items {
+        println!("- {}: {:?}", item.path, item.state);
     }
     Ok(())
+}
+
+fn dashboard_json_v2(status: mko_core::dashboard_v2::DashboardStatusV2) -> DashboardDataV2 {
+    let preserve_user_edit = status.items.iter().any(|item| {
+        matches!(
+            item.state,
+            DashboardFileStateV2::UserModified | DashboardFileStateV2::Orphaned
+        )
+    });
+    DashboardDataV2 {
+        canonical_state: match status.canonical_state {
+            DashboardCanonicalStateV2::Ready => DashboardCanonicalStateDataV2::Ready,
+            DashboardCanonicalStateV2::Blocked => DashboardCanonicalStateDataV2::Blocked,
+        },
+        projection_state: match status.projection_state {
+            DashboardProjectionStateV2::Current => DashboardProjectionStateDataV2::Current,
+            DashboardProjectionStateV2::RepairRequired => {
+                DashboardProjectionStateDataV2::RepairRequired
+            }
+        },
+        manifest_owned_drift: status.manifest_owned_drift,
+        next_action: match (status.projection_state, preserve_user_edit) {
+            (DashboardProjectionStateV2::Current, _) => NextActionV2::None,
+            (DashboardProjectionStateV2::RepairRequired, true) => NextActionV2::PreserveUserEdit,
+            (DashboardProjectionStateV2::RepairRequired, false) => NextActionV2::Repair,
+        },
+        items: status
+            .items
+            .into_iter()
+            .map(|item| DashboardFileDataV2 {
+                path: item.path,
+                kind: match item.kind {
+                    DashboardFileKindV2::ViewDefinition => DashboardFileKindDataV2::ViewDefinition,
+                    DashboardFileKindV2::RecordProjection => {
+                        DashboardFileKindDataV2::RecordProjection
+                    }
+                },
+                manifest_owned: item.manifest_owned,
+                next_action: match item.state {
+                    DashboardFileStateV2::Current => NextActionV2::None,
+                    DashboardFileStateV2::UserModified | DashboardFileStateV2::Orphaned => {
+                        NextActionV2::PreserveUserEdit
+                    }
+                    DashboardFileStateV2::Missing
+                    | DashboardFileStateV2::Stale
+                    | DashboardFileStateV2::Unowned => NextActionV2::Repair,
+                },
+                state: match item.state {
+                    DashboardFileStateV2::Current => DashboardFileStateDataV2::Current,
+                    DashboardFileStateV2::Missing => DashboardFileStateDataV2::Missing,
+                    DashboardFileStateV2::Stale => DashboardFileStateDataV2::Stale,
+                    DashboardFileStateV2::UserModified => DashboardFileStateDataV2::UserModified,
+                    DashboardFileStateV2::Unowned => DashboardFileStateDataV2::Unowned,
+                    DashboardFileStateV2::Orphaned => DashboardFileStateDataV2::Orphaned,
+                },
+            })
+            .collect(),
+        scan_complete: true,
+        remaining: 0,
+        next_cursor: None,
+    }
 }
 
 fn setup_repository(explicit: Option<PathBuf>) -> Result<PathBuf, MkoError> {
@@ -2154,6 +2351,22 @@ fn emit_json_v2_failure_or_stderr(command: JsonV2Command, error: &MkoError) {
 
 fn json_v2_command(cli: &Cli) -> Option<JsonV2Command> {
     match &cli.command {
+        Command::Setup(SetupArgs {
+            command:
+                Some(SetupCommand::Plan(SetupPlanArgs {
+                    format: OutputFormat::JsonV2,
+                    ..
+                })),
+            ..
+        }) => Some(JsonV2Command::SetupPlan),
+        Command::Setup(SetupArgs {
+            command:
+                Some(SetupCommand::Apply(SetupApplyArgs {
+                    format: OutputFormat::JsonV2,
+                    ..
+                })),
+            ..
+        }) => Some(JsonV2Command::SetupApply),
         Command::Add(AddArgs {
             format: OutputFormat::JsonV2,
             ..
@@ -2174,6 +2387,10 @@ fn json_v2_command(cli: &Cli) -> Option<JsonV2Command> {
             format: OutputFormat::JsonV2,
             ..
         }) => Some(JsonV2Command::ReviewFeedback),
+        Command::Dashboard(DashboardArgs {
+            format: OutputFormat::JsonV2,
+            ..
+        }) => Some(JsonV2Command::Dashboard),
         Command::Source {
             command:
                 SourceCommand::Prepare(PrepareArgs {
@@ -2316,11 +2533,14 @@ fn json_v2_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option
         args.get(1)?.to_str()?,
         args.get(2).and_then(|argument| argument.to_str()),
     ) {
+        ("setup", Some("plan")) => Some(JsonV2Command::SetupPlan),
+        ("setup", Some("apply")) => Some(JsonV2Command::SetupApply),
         ("add", _) => Some(JsonV2Command::Add),
         ("queue", _) => Some(JsonV2Command::Queue),
         ("show", _) => Some(JsonV2Command::Show),
         ("review-open", _) => Some(JsonV2Command::ReviewOpen),
         ("review-feedback", _) => Some(JsonV2Command::ReviewFeedback),
+        ("dashboard", _) => Some(JsonV2Command::Dashboard),
         ("source", Some("prepare")) => Some(JsonV2Command::SourcePrepare),
         ("source", Some("write-draft")) => Some(JsonV2Command::SourceWrite),
         ("knowledge", Some("write")) => Some(JsonV2Command::KnowledgeWrite),

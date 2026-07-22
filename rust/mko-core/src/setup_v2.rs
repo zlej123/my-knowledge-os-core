@@ -9,7 +9,10 @@ use crate::{
     context::{PlatformEnvironment, Scope},
     dashboard_v2::{DashboardResultV2, ensure_dashboard_v2},
     error::MkoError,
-    profile::{MachineProfileFile, PROFILE_SCHEMA_VERSION, PersonalProfile, ProfileStore},
+    profile::{
+        MachineProfileFile, PROFILE_SCHEMA_VERSION, PersonalProfile, ProfileMutationLock,
+        ProfileSnapshot, ProfileStore,
+    },
     scaffold_v2::{ScaffoldOutcomeV2, scaffold_personal_kb_v2},
 };
 
@@ -35,6 +38,19 @@ pub fn setup_personal_v2(
     request: SetupPersonalV2Request<'_>,
     platform: &dyn PlatformEnvironment,
 ) -> Result<SetupPersonalV2Result, MkoError> {
+    let store = ProfileStore::from_platform(platform)?;
+    let mutation_lock = store.acquire_mutation_lock()?;
+    let expected_profile = store.read_snapshot()?;
+    setup_personal_v2_locked(request, platform, &store, &mutation_lock, expected_profile)
+}
+
+pub(crate) fn setup_personal_v2_locked(
+    request: SetupPersonalV2Request<'_>,
+    platform: &dyn PlatformEnvironment,
+    store: &ProfileStore,
+    mutation_lock: &ProfileMutationLock,
+    existing_snapshot: ProfileSnapshot,
+) -> Result<SetupPersonalV2Result, MkoError> {
     let drive_account_root =
         canonical_real_directory(request.drive_account_root, "provider_root_invalid")?;
     let provider_root = INBOX_COMPONENTS
@@ -51,8 +67,7 @@ pub fn setup_personal_v2(
             "the Git KB must remain outside the selected Drive account",
         ));
     }
-    let store = ProfileStore::from_platform(platform)?;
-    let existing_profiles = store.read()?;
+    let existing_profiles = existing_snapshot.profile.clone();
     let candidate_profile = PersonalProfile {
         repository_root: repository_candidate.clone(),
         provider_root: provider_root.clone(),
@@ -91,7 +106,7 @@ pub fn setup_personal_v2(
     profiles.default_profile = PROFILE_NAME.into();
     profiles.profiles.insert(PROFILE_NAME.into(), desired);
     if profile_changed {
-        store.write(&profiles)?;
+        store.write_if_unchanged(mutation_lock, &existing_snapshot, &profiles)?;
     }
 
     Ok(SetupPersonalV2Result {

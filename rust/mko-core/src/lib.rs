@@ -45,6 +45,7 @@ pub mod safe_yaml;
 pub mod scaffold_v2;
 pub mod secret;
 pub mod setup;
+pub mod setup_plan_v2;
 pub mod setup_v2;
 pub mod source;
 pub mod state;

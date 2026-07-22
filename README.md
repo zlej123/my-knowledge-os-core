@@ -22,6 +22,19 @@ cargo install --path rust/mko-cli --locked
 mko setup
 ```
 
+설정은 비변경 계획과 실제 TTY 적용의 두 단계로 실행합니다.
+
+```bash
+mko setup plan --format json-v2
+# 실제 터미널에서 Core가 다시 표시한 정확한 경로와 효과를 확인한 뒤
+mko setup apply --plan <core-plan-id> --format json-v2
+```
+
+계획은 15분 뒤 만료되고 한 번만 사용할 수 있으며, 파일·프로필·목적지가 바뀌면 적용 전
+무효화됩니다. 채팅 승인이나 호스트의 일반 명령 승인만으로는 적용할 수 없고, Core가 표시한
+card/effect digest에 묶인 정확한 문구를 실제 TTY에 입력해야 합니다. 또는 `mko setup`의
+사람용 터미널 흐름을 사용할 수 있습니다.
+
 설정 화면은 사용할 Personal KB와 Google Drive Inbox의 정확한 경로를 보여주고 `y` 확인
 전에는 아무것도 만들지 않습니다. 기본 KB는 `~/My-Knowledge-OS`이고 Git 저장소는 Google
 Drive 바깥에 둡니다. 다른 위치는 `mko setup --repo <path>`로 선택할 수 있습니다.
@@ -99,6 +112,9 @@ mko review <stable-id>
 에이전트는 사람용 출력 대신 엄격한 JSON v2 envelope를 사용합니다.
 
 ```bash
+mko setup plan --format json-v2
+# 실제 TTY 전용; 비대화형 실행은 setup_tty_required로 실패
+mko setup apply --plan <core-plan-id> --format json-v2
 mko add --inbox --format json-v2
 mko add <inbox-pdf> --format json-v2
 mko source prepare --asset-id <asset-id> --format json-v2
@@ -111,7 +127,8 @@ mko review-feedback --input <decision.json> --format json-v2
 ```
 
 계약은 [schemas/v2](schemas/v2), 예시는 [tests/fixtures/json-v2](tests/fixtures/json-v2)에 있습니다.
-추출 전문은 `.mko/runtime/` 아래의 기기 로컬 캐시이며 Git과 Drive에서 제외됩니다.
+추출 전문은 `.mko/runtime/sessions/` 아래의 24시간 기기 로컬 세션 파일이며 Git과 Drive에서
+제외됩니다. 만료되면 Core가 재추출하고, 암호화 없는 영구 평문 캐시는 사용하지 않습니다.
 
 ## 저장소와 동기화
 

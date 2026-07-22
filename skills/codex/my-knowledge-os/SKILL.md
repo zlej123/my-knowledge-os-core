@@ -21,8 +21,25 @@ Use these terms consistently:
 
 ## Setup and read-only requests
 
-If setup is missing, explain that `mko setup` must run in a real terminal because it confirms the
-exact KB and Google Drive Inbox before mutation. Do not simulate terminal approval.
+If setup is missing, create a non-mutating plan:
+
+```bash
+mko setup plan --format json-v2
+```
+
+Display every returned step, logical destination, effect, expiry, and digest. Then stop and ask the
+user to run the exact apply command in a real terminal:
+
+```bash
+mko setup apply --plan "CORE_PLAN_ID" --format json-v2
+```
+
+Core revalidates the plan under the machine-local setup/profile lock, displays the exact canonical
+repository, Drive account, provider Inbox and profile paths plus every create/modify effect, and
+accepts only its revision/effect-bound exact phrase from a real TTY. Never treat chat text, a host
+command-approval UI, an agent-generated flag, or possession of a plan ID as setup approval. Do not
+simulate terminal approval. A setup approval never authorizes review approval, judgment, Git, or
+another mutation.
 
 For review display, use only the v2 machine surfaces:
 

@@ -1,6 +1,7 @@
 use std::fs;
 
 use assert_cmd::Command;
+use chrono::{Duration, Utc};
 use mko_core::{
     asset_v2::{HydrationConfirmationV2, RegisterAssetRequestV2, register_pdf_asset_v2},
     model_v2::{
@@ -42,7 +43,15 @@ fn source_and_knowledge_writes_return_strict_v2_envelopes_and_join_one_queue_ite
     )
     .unwrap();
     let bundle_path = root.path().join("prepared.json");
-    fs::write(&bundle_path, canonical_json_bytes(&bundle).unwrap()).unwrap();
+    let created_at = Utc::now();
+    let session = serde_json::json!({
+        "schema_version": 2,
+        "artifact_type": "prepared_session",
+        "created_at": created_at,
+        "expires_at": created_at + Duration::hours(24),
+        "bundle": bundle,
+    });
+    fs::write(&bundle_path, canonical_json_bytes(&session).unwrap()).unwrap();
     make_owner_only(&bundle_path);
     let evidence = EvidenceRefV2 {
         block_id: "block-000001".into(),

@@ -15,15 +15,15 @@ use serde::Serialize;
 
 use crate::{
     asset_v2::read_asset_v2,
-    config_v2::KnowledgeConfigV2,
+    config_v2::{DomainPolicyV2, KnowledgeConfigV2},
     error::MkoError,
     front_matter::parse_markdown,
     json_v2::{QueueDataV2, QueueItemStateV2, QueueItemTypeV2, QueueItemV2, QueueNextActionV2},
     judgment_v2::{JudgmentAnnotationV2, prepare_judgment_v2},
-    model_v2::ReviewTargetTypeV2,
+    model_v2::{KnowledgeUnitKindV2, ReviewTargetTypeV2},
     projection_v2::{
-        ProjectionRecordTypeV2, ProjectionSnapshotStatusV2, ProjectionStateV2,
-        projection_snapshot_status_v2,
+        ProjectionInputV2, ProjectionRecordTypeV2, ProjectionSnapshotStatusV2, ProjectionStateV2,
+        projection_relative_path_v2, projection_snapshot_status_v2,
     },
     records_v2::{
         AssetRecordV2, CurrentPointerV2, KnowledgeRevisionV2, SemanticRecordTypeV2,
@@ -71,6 +71,11 @@ impl ReviewCardTargetStateV2 {
 pub struct ReviewCardTargetV2 {
     pub snapshot: ReviewTargetSnapshotV2,
     pub state: ReviewCardTargetStateV2,
+    /// Core-owned policy embedded in the exact immutable Knowledge revision.
+    ///
+    /// Approval requires the human to type this value back for every pending
+    /// Knowledge target. Source targets have no domain policy.
+    pub domain_policy: Option<DomainPolicyV2>,
     pub previous_approved_revision: Option<String>,
     pub conflicting_review_head_ids: Vec<String>,
     pub effects: Vec<String>,
@@ -125,10 +130,51 @@ struct ScannedTarget {
     history: Option<ReviewTargetHistoryV2>,
     state: Option<ReviewCardTargetStateV2>,
     projection_stale: bool,
+    expected_projection: Option<ProjectionInputV2>,
+    domain_policy_gate_satisfied: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CanonicalProjectionHealthV2 {
+    pub path: String,
+    pub stale: bool,
+    pub expected: ProjectionInputV2,
 }
 
 pub fn derive_queue_v2(repository_root: &Path) -> Result<QueueDataV2, MkoError> {
     let groups = derive_groups(repository_root)?;
+    queue_from_groups(&groups)
+}
+
+pub(crate) fn derive_queue_with_projection_health_v2(
+    repository_root: &Path,
+) -> Result<(QueueDataV2, Vec<CanonicalProjectionHealthV2>), MkoError> {
+    let groups = derive_groups(repository_root)?;
+    let queue = queue_from_groups(&groups)?;
+    let mut projections = groups
+        .values()
+        .flatten()
+        .map(|target| {
+            let expected = target.expected_projection.clone().ok_or_else(|| {
+                MkoError::new(
+                    "projection_state_invalid",
+                    "canonical expected projection is missing",
+                )
+            })?;
+            Ok(CanonicalProjectionHealthV2 {
+                path: projection_relative_path_v2(&expected)?,
+                stale: target.projection_stale,
+                expected,
+            })
+        })
+        .collect::<Result<Vec<_>, MkoError>>()?;
+    projections.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok((queue, projections))
+}
+
+fn queue_from_groups(
+    groups: &BTreeMap<String, Vec<ScannedTarget>>,
+) -> Result<QueueDataV2, MkoError> {
     let items = groups
         .values()
         .filter(|targets| {
@@ -198,23 +244,16 @@ fn derive_groups(repository_root: &Path) -> Result<BTreeMap<String, Vec<ScannedT
     let histories = derive_review_histories_v2(repository_root, &review_inputs)?;
     for (target, history) in targets.iter_mut().zip(histories) {
         let mut state = target_state(&history);
-        let projection_state = projection_state(&state);
-        let projection_status = projection_snapshot_status_v2(
-            repository_root,
-            match target.record_type {
-                ReviewTargetTypeV2::Source => ProjectionRecordTypeV2::Source,
-                ReviewTargetTypeV2::Knowledge => ProjectionRecordTypeV2::Knowledge,
-            },
-            &target.record_id,
-            &target.pointer.revision,
-            history.derived.review_head_id.as_deref(),
-            projection_state,
-        )?;
+        target.history = Some(history);
+        target.state = Some(state.clone());
+        let expected_projection = canonical_projection_input(target)?;
+        let projection_status =
+            projection_snapshot_status_v2(repository_root, &expected_projection)?;
+        target.expected_projection = Some(expected_projection);
         target.projection_stale = projection_status != ProjectionSnapshotStatusV2::Current;
-        if target.projection_stale {
+        if target.projection_stale || !target.domain_policy_gate_satisfied {
             state = ReviewCardTargetStateV2::Blocked;
         }
-        target.history = Some(history);
         target.state = Some(state);
     }
 
@@ -242,6 +281,44 @@ fn derive_groups(repository_root: &Path) -> Result<BTreeMap<String, Vec<ScannedT
         }
     }
     Ok(groups)
+}
+
+fn canonical_projection_input(target: &ScannedTarget) -> Result<ProjectionInputV2, MkoError> {
+    let history = target
+        .history
+        .as_ref()
+        .ok_or_else(|| MkoError::new("review_state_invalid", "review history is missing"))?;
+    let state = target
+        .state
+        .as_ref()
+        .ok_or_else(|| MkoError::new("review_state_invalid", "review state is missing"))?;
+    let (record_type, collection) = match target.record_type {
+        ReviewTargetTypeV2::Source => (ProjectionRecordTypeV2::Source, "sources"),
+        ReviewTargetTypeV2::Knowledge => (ProjectionRecordTypeV2::Knowledge, "knowledge"),
+    };
+    let mut tags = match &target.revision {
+        RevisionV2::Source(revision) => revision.response.tags.clone(),
+        RevisionV2::Knowledge(revision) => revision
+            .response
+            .units
+            .iter()
+            .flat_map(|unit| unit.tags.iter().cloned())
+            .collect(),
+    };
+    tags.sort();
+    tags.dedup();
+    Ok(ProjectionInputV2 {
+        record_type,
+        id: target.record_id.clone(),
+        title: target.revision.title(&target.asset).to_owned(),
+        current_revision: target.pointer.revision.clone(),
+        review_head_id: history.derived.review_head_id.clone(),
+        derived_state: projection_state(state),
+        domain: "uncategorized".into(),
+        tags,
+        record_link: format!("{collection}/{}/current.yaml", target.record_id),
+        asset_link: format!("assets/registry/{}.json", target.asset.id),
+    })
 }
 
 fn scan_collection(
@@ -312,6 +389,7 @@ fn scan_collection(
                 "current revision does not match its immutable Asset fingerprint",
             ));
         }
+        let domain_policy_gate_satisfied = knowledge_policy_gate_satisfied(&revision);
         targets.push(ScannedTarget {
             record_type: record_type.clone(),
             record_id,
@@ -321,6 +399,8 @@ fn scan_collection(
             history: None,
             state: None,
             projection_stale: false,
+            expected_projection: None,
+            domain_policy_gate_satisfied,
         });
     }
     Ok(targets)
@@ -503,6 +583,7 @@ struct EffectTargetV2<'a> {
     record_id: &'a str,
     displayed_revision: &'a str,
     expected_review_head_id: Option<&'a str>,
+    domain_policy: Option<&'a DomainPolicyV2>,
     effects: &'a [String],
 }
 
@@ -526,6 +607,7 @@ fn render_card(
                     .history
                     .as_ref()
                     .and_then(|history| history.derived.review_head_id.as_deref()),
+                domain_policy: card_target.domain_policy.as_ref(),
                 effects: &card_target.effects,
             })
             .collect(),
@@ -552,6 +634,12 @@ fn render_card(
                 .unwrap_or("none"),
             card_target.effects.join(", "),
         ));
+        if let Some(domain_policy) = &card_target.domain_policy {
+            card.push_str(&format!(
+                "- Domain policy requiring human confirmation: `{}`\n",
+                domain_policy_name(domain_policy)
+            ));
+        }
         if !card_target.conflicting_review_head_ids.is_empty() {
             card.push_str(&format!(
                 "- Conflicting review heads: `{}`\n",
@@ -605,6 +693,12 @@ fn render_card(
                 target.record_id
             ));
         }
+        if !target.domain_policy_gate_satisfied {
+            card.push_str(&format!(
+                "\n## Diagnostic for {}\n\nThe high-risk Knowledge revision is missing a counterargument or open question and cannot be approved.\n",
+                target.record_id
+            ));
+        }
     }
     if card.len() > MAX_CARD_BYTES {
         return Err(MkoError::new(
@@ -651,9 +745,40 @@ fn card_target(target: &ScannedTarget) -> ReviewCardTargetV2 {
             expected_review_head_id: history.derived.review_head_id.clone(),
         },
         state,
+        domain_policy: match &target.revision {
+            RevisionV2::Source(_) => None,
+            RevisionV2::Knowledge(revision) => Some(revision.domain_policy.clone()),
+        },
         previous_approved_revision: history.previous_approved_revision.clone(),
         conflicting_review_head_ids: history.derived.conflicting_review_head_ids.clone(),
         effects,
+    }
+}
+
+fn knowledge_policy_gate_satisfied(revision: &RevisionV2) -> bool {
+    let RevisionV2::Knowledge(revision) = revision else {
+        return true;
+    };
+    if revision.domain_policy != DomainPolicyV2::HighRisk {
+        return true;
+    }
+    let has_counterargument = revision
+        .response
+        .units
+        .iter()
+        .any(|unit| unit.kind == KnowledgeUnitKindV2::Counterargument);
+    let has_open_question = revision
+        .response
+        .units
+        .iter()
+        .any(|unit| unit.kind == KnowledgeUnitKindV2::OpenQuestion);
+    has_counterargument && has_open_question
+}
+
+fn domain_policy_name(policy: &DomainPolicyV2) -> &'static str {
+    match policy {
+        DomainPolicyV2::Standard => "standard",
+        DomainPolicyV2::HighRisk => "high_risk",
     }
 }
 
@@ -934,4 +1059,71 @@ fn queue_scan_limit() -> MkoError {
         "queue_scan_limit",
         "record scan exceeded its entry or elapsed-time bound",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        model_v2::{KnowledgeResponseV2, KnowledgeUnitV2},
+        records_v2::{EvidenceBasisV2, KnowledgeRevisionRecordTypeV2},
+    };
+
+    #[test]
+    fn high_risk_policy_gate_requires_counterargument_and_open_question() {
+        let response: KnowledgeResponseV2 = serde_json::from_slice(include_bytes!(
+            "../../../tests/fixtures/json-v2/knowledge-response.json"
+        ))
+        .unwrap();
+        let mut revision = KnowledgeRevisionV2 {
+            schema_version: 2,
+            record_type: KnowledgeRevisionRecordTypeV2::Knowledge,
+            record_id: format!("personal-knowledge-{}", "1".repeat(64)),
+            asset_id: format!("personal-asset-{}", "2".repeat(64)),
+            asset_fingerprint: format!("sha256:{}", "2".repeat(64)),
+            evidence_basis: EvidenceBasisV2 {
+                bundle_id: format!("prepared-content-sha256-{}", "3".repeat(64)),
+                content_digest: format!("sha256:{}", "3".repeat(64)),
+                asset_fingerprint: format!("sha256:{}", "2".repeat(64)),
+                extractor_name: "test".into(),
+                extractor_version: "1".into(),
+            },
+            domain_policy: DomainPolicyV2::HighRisk,
+            response,
+        };
+
+        assert!(!knowledge_policy_gate_satisfied(&RevisionV2::Knowledge(
+            revision.clone()
+        )));
+
+        for unit in [
+            serde_json::json!({
+                "kind": "counterargument",
+                "title": "Alternative",
+                "body": "An alternative explanation remains possible.",
+                "confidence": "low",
+                "basis": "conflicting_evidence",
+                "evidence_refs": [],
+                "tags": []
+            }),
+            serde_json::json!({
+                "kind": "open_question",
+                "title": "Verification",
+                "body": "What independent evidence would verify this?",
+                "confidence": "low",
+                "basis": "missing_evidence",
+                "evidence_refs": [],
+                "tags": []
+            }),
+        ] {
+            revision
+                .response
+                .units
+                .push(serde_json::from_value::<KnowledgeUnitV2>(unit).unwrap());
+        }
+
+        assert!(knowledge_policy_gate_satisfied(&RevisionV2::Knowledge(
+            revision
+        )));
+    }
 }

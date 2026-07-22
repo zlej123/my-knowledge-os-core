@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Write as _,
     fs::{self, OpenOptions},
     hash::{Hash, Hasher},
     io::{BufRead, BufReader, IsTerminal, Read, Write},
@@ -18,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     atomic::{AtomicWriteResult, write_new},
     clock::Clock,
-    config_v2::KnowledgeConfigV2,
+    config_v2::{DomainPolicyV2, KnowledgeConfigV2},
     error::MkoError,
     front_matter::{parse_markdown, render_markdown},
     lock::{RepositoryMutationLock, StaleRepositoryLockPolicy},
@@ -31,6 +32,7 @@ use crate::{
         projection_relative_path_v2, read_current_projection_input_v2, render_projection_v2,
         write_projection_locked,
     },
+    queue_v2::{RenderedReviewCardV2, ReviewCardTargetStateV2, show_review_card_v2},
     records_v2::{CurrentPointerV2, RecordProjectionStatusV2, SemanticRecordTypeV2},
     revision_v2::{canonical_json_sha256, sha256_digest},
 };
@@ -93,8 +95,36 @@ pub struct ReviewTargetSnapshotV2 {
 /// Core-computed effect prepared for direct terminal display.
 #[derive(Debug)]
 struct TtyApprovalEffectV2 {
+    card: RenderedReviewCardV2,
+    selection: TtyApprovalSelectionV2,
     effect_digest: String,
     targets: Vec<ReviewTargetSnapshotV2>,
+    selected_effects: Vec<SelectedTargetEffectV2>,
+    domain_confirmations: Vec<DomainConfirmationV2>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TtyApprovalSelectionV2 {
+    All,
+    Record(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct SelectedTargetEffectV2 {
+    record_id: String,
+    displayed_revision: String,
+    effects: Vec<String>,
+}
+
+/// Per-document classification that a human must explicitly type back before
+/// a Knowledge revision can be approved. The value comes from the immutable
+/// revision through the Core-rendered card, never from agent text or tags.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct DomainConfirmationV2 {
+    record_id: String,
+    displayed_revision: String,
+    domain_policy: DomainPolicyV2,
 }
 
 /// Sealed approval authority created only by exact real-TTY confirmation.
@@ -229,13 +259,29 @@ fn pending_targets_from_request(
 
 pub fn publish_tty_approval_review_v2(
     repository_root: &Path,
-    targets: Vec<ReviewTargetSnapshotV2>,
+    stable_id: &str,
     clock: &dyn Clock,
 ) -> Result<ReviewPublicationV2, MkoError> {
-    let effect = prepare_tty_approval(repository_root, targets, clock)?;
     let mut terminal = ProcessTty;
-    let confirmed = confirm_tty_approval(effect, &mut terminal)?;
-    publish_confirmed_tty_approval(repository_root, confirmed, clock)
+    publish_tty_approval_with_terminal(repository_root, stable_id, clock, &mut terminal)
+}
+
+fn publish_tty_approval_with_terminal(
+    repository_root: &Path,
+    stable_id: &str,
+    clock: &dyn Clock,
+    terminal: &mut dyn TtyInteraction,
+) -> Result<ReviewPublicationV2, MkoError> {
+    let _lock = RepositoryMutationLock::acquire(
+        repository_root,
+        "v2 TTY review approval",
+        clock,
+        StaleRepositoryLockPolicy::Preserve,
+    )?;
+    let effect = prepare_tty_approval_locked(repository_root, stable_id)?;
+    let confirmed = confirm_tty_approval(effect, terminal)?;
+    validate_confirmed_tty_approval_locked(repository_root, &confirmed)?;
+    publish_confirmed_tty_approval_locked(repository_root, confirmed, clock)
 }
 
 pub fn publish_review_resolution_v2(
@@ -348,7 +394,7 @@ pub fn publish_review_resolution_v2(
     })
 }
 
-fn publish_confirmed_tty_approval(
+fn publish_confirmed_tty_approval_locked(
     repository_root: &Path,
     artifact: ConfirmedTtyApprovalV2,
     clock: &dyn Clock,
@@ -366,36 +412,144 @@ fn publish_confirmed_tty_approval(
             feedback: None,
         })
         .collect();
-    publish_review(repository_root, targets, clock)
+    publish_review_locked(repository_root, targets, clock)
 }
 
-fn prepare_tty_approval(
+fn prepare_tty_approval_locked(
     repository_root: &Path,
-    targets: Vec<ReviewTargetSnapshotV2>,
-    clock: &dyn Clock,
+    stable_id: &str,
 ) -> Result<TtyApprovalEffectV2, MkoError> {
+    let card = show_review_card_v2(repository_root, stable_id)?;
+    let selection = if stable_id == card.item_id {
+        TtyApprovalSelectionV2::All
+    } else if card
+        .targets
+        .iter()
+        .any(|target| target.snapshot.record_id == stable_id)
+    {
+        TtyApprovalSelectionV2::Record(stable_id.to_owned())
+    } else {
+        return Err(MkoError::new(
+            "review_selection_invalid",
+            "the approval selection is not an exact target from the canonical review card",
+        ));
+    };
+    let selected = card
+        .targets
+        .iter()
+        .filter(|target| match &selection {
+            TtyApprovalSelectionV2::All => true,
+            TtyApprovalSelectionV2::Record(record_id) => target.snapshot.record_id == *record_id,
+        })
+        .collect::<Vec<_>>();
+    if selected
+        .iter()
+        .any(|target| target.state == ReviewCardTargetStateV2::Blocked)
+    {
+        return Err(MkoError::new(
+            "review_target_blocked",
+            "the canonical review card contains a blocked target; diagnose it before approval",
+        ));
+    }
+    let targets = selected
+        .iter()
+        .filter(|target| target.state != ReviewCardTargetStateV2::Approved)
+        .map(|target| target.snapshot.clone())
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return Err(MkoError::new(
+            "review_nothing_to_approve",
+            "every target in the canonical review card is already approved",
+        ));
+    }
     validate_snapshot_targets(&targets)?;
     reject_duplicate_snapshots(&targets)?;
-    let _lock = RepositoryMutationLock::acquire(
-        repository_root,
-        "v2 TTY review approval prepare",
-        clock,
-        StaleRepositoryLockPolicy::Preserve,
-    )?;
-    KnowledgeConfigV2::read(repository_root)?;
-    let reviews_directory = repository_root.join("reviews");
-    validate_real_directory(&reviews_directory, "review_destination_invalid")?;
-    let graph = read_review_graph_from(&reviews_directory)?;
-    validate_target_snapshots_at_commit(repository_root, &targets, &graph)?;
+    let selected_effects = selected
+        .iter()
+        .filter(|target| target.state != ReviewCardTargetStateV2::Approved)
+        .map(|target| {
+            if !target
+                .effects
+                .iter()
+                .any(|effect| effect == "approve_current_revision_via_tty")
+            {
+                return Err(MkoError::new(
+                    "review_effect_invalid",
+                    "the selected canonical card target has no TTY approval effect",
+                ));
+            }
+            Ok(SelectedTargetEffectV2 {
+                record_id: target.snapshot.record_id.clone(),
+                displayed_revision: target.snapshot.displayed_revision.clone(),
+                effects: vec!["approve_current_revision_via_tty".into()],
+            })
+        })
+        .collect::<Result<Vec<_>, MkoError>>()?;
+    let domain_confirmations = selected
+        .iter()
+        .filter(|target| target.state != ReviewCardTargetStateV2::Approved)
+        .filter_map(|target| {
+            target
+                .domain_policy
+                .clone()
+                .map(|domain_policy| DomainConfirmationV2 {
+                    record_id: target.snapshot.record_id.clone(),
+                    displayed_revision: target.snapshot.displayed_revision.clone(),
+                    domain_policy,
+                })
+        })
+        .collect::<Vec<_>>();
     let effect = serde_json::json!({
+        "schema_version": 2,
         "operation": "approve",
+        "card_digest": card.card_digest,
+        "displayed_effect_digest": card.effect_digest,
+        "selection": selection,
         "targets": targets,
+        "selected_effects": selected_effects,
+        "domain_confirmations": domain_confirmations,
     });
     let effect_digest = canonical_json_sha256(&effect)?;
     Ok(TtyApprovalEffectV2 {
+        card,
+        selection,
         effect_digest,
         targets,
+        selected_effects,
+        domain_confirmations,
     })
+}
+
+fn validate_confirmed_tty_approval_locked(
+    repository_root: &Path,
+    confirmed: &ConfirmedTtyApprovalV2,
+) -> Result<(), MkoError> {
+    let stable_id = match &confirmed.0.selection {
+        TtyApprovalSelectionV2::All => &confirmed.0.card.item_id,
+        TtyApprovalSelectionV2::Record(record_id) => record_id,
+    };
+    let current = prepare_tty_approval_locked(repository_root, stable_id)
+        .map_err(|_| review_snapshot_stale())?;
+    if current.card.card_bytes != confirmed.0.card.card_bytes
+        || current.card.card_digest != confirmed.0.card.card_digest
+        || current.card.effect_digest != confirmed.0.card.effect_digest
+        || current.card.targets != confirmed.0.card.targets
+        || current.selection != confirmed.0.selection
+        || current.targets != confirmed.0.targets
+        || current.selected_effects != confirmed.0.selected_effects
+        || current.domain_confirmations != confirmed.0.domain_confirmations
+        || current.effect_digest != confirmed.0.effect_digest
+    {
+        return Err(review_snapshot_stale());
+    }
+    Ok(())
+}
+
+fn review_snapshot_stale() -> MkoError {
+    MkoError::new(
+        "review_snapshot_stale",
+        "the canonical review card changed after display; display and confirm the current card again",
+    )
 }
 
 trait TtyInteraction {
@@ -430,30 +584,88 @@ fn confirm_tty_approval(
     effect: TtyApprovalEffectV2,
     terminal: &mut dyn TtyInteraction,
 ) -> Result<ConfirmedTtyApprovalV2, MkoError> {
+    let mut phrase = format!(
+        "approve {} {}",
+        effect.card.card_digest, effect.effect_digest
+    );
+    for confirmation in &effect.domain_confirmations {
+        write!(
+            phrase,
+            " confirm-domain {} {} {}",
+            confirmation.record_id,
+            confirmation.displayed_revision,
+            domain_policy_name(&confirmation.domain_policy)
+        )
+        .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
+    }
+    let mut display = Vec::with_capacity(effect.card.card_bytes.len() + 2048);
+    display.extend_from_slice(b"\nMy Knowledge OS final approval\n\n");
+    display.extend_from_slice(&effect.card.card_bytes);
+    display.extend_from_slice(b"\n## Exact approval effect\n\n");
+    match &effect.selection {
+        TtyApprovalSelectionV2::All => {
+            display.extend_from_slice(b"Approval selection: all actionable displayed targets\n");
+        }
+        TtyApprovalSelectionV2::Record(record_id) => {
+            writeln!(
+                display,
+                "Approval selection: selected record only (`{record_id}`)"
+            )
+            .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
+        }
+    }
+    for target in &effect.targets {
+        let selected_effects = effect
+            .selected_effects
+            .iter()
+            .find(|selected| selected.record_id == target.record_id)
+            .map(|selected| selected.effects.join(", "))
+            .unwrap_or_else(|| "none".into());
+        writeln!(
+            display,
+            "- {:?} `{}` at revision `{}` (review head: `{}`; effects: `{}`)",
+            target.record_type,
+            target.record_id,
+            target.displayed_revision,
+            target.expected_review_head_id.as_deref().unwrap_or("none"),
+            selected_effects,
+        )
+        .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
+    }
+    if !effect.domain_confirmations.is_empty() {
+        display.extend_from_slice(b"\n## Required per-document domain confirmation\n\n");
+        for confirmation in &effect.domain_confirmations {
+            writeln!(
+                display,
+                "- Knowledge `{}` at revision `{}` is classified `{}`",
+                confirmation.record_id,
+                confirmation.displayed_revision,
+                domain_policy_name(&confirmation.domain_policy)
+            )
+            .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
+        }
+        display.extend_from_slice(
+            b"The final phrase explicitly confirms each classification. Request changes instead if any classification is wrong.\n",
+        );
+    }
+    write!(
+        display,
+        "\nEffect: approve every exact target listed above\nCard digest: {}\nDisplayed effect digest: {}\nApproval effect digest: {}\n\nType exactly:\n{}\n> ",
+        effect.card.card_digest,
+        effect.card.effect_digest,
+        effect.effect_digest,
+        phrase
+    )
+    .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
+    terminal
+        .display(&display)
+        .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
     if !terminal.is_real_tty() {
         return Err(MkoError::new(
             "review_tty_required",
             "final approval requires Core-owned display and confirmation on a real TTY",
         ));
     }
-    let phrase = format!("approve {}", effect.effect_digest);
-    let mut display = String::from("\nMy Knowledge OS final approval\n\n");
-    for target in &effect.targets {
-        display.push_str(&format!(
-            "- {:?} {}\n  revision: {}\n  current review head: {}\n",
-            target.record_type,
-            target.record_id,
-            target.displayed_revision,
-            target.expected_review_head_id.as_deref().unwrap_or("none")
-        ));
-    }
-    display.push_str(&format!(
-        "\nEffect: approve every target listed above\nEffect digest: {}\n\nType exactly:\n{}\n> ",
-        effect.effect_digest, phrase
-    ));
-    terminal
-        .display(display.as_bytes())
-        .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
     let input = terminal
         .read_confirmation(512)
         .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
@@ -467,6 +679,13 @@ fn confirm_tty_approval(
         ));
     }
     Ok(ConfirmedTtyApprovalV2(effect))
+}
+
+fn domain_policy_name(policy: &DomainPolicyV2) -> &'static str {
+    match policy {
+        DomainPolicyV2::Standard => "standard",
+        DomainPolicyV2::HighRisk => "high_risk",
+    }
 }
 
 pub fn derive_review_state_v2(
@@ -1458,6 +1677,17 @@ fn review_scan_limit_error() -> MkoError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        judgment_v2::{JudgmentAuthorshipV2, prepare_judgment_v2},
+        model_v2::{KnowledgeResponseV2, PreparedContentV2, SourceResponseV2},
+        records_v2::{
+            AssetRecordV2, RecordWriteResultV2, WriteKnowledgeRecordRequestV2,
+            WriteSourceRecordRequestV2, write_knowledge_record_v2, write_source_record_v2,
+        },
+        revision_v2::canonical_json_bytes,
+        scaffold_v2::scaffold_personal_kb_v2,
+    };
+    use tempfile::tempdir;
 
     struct FakeTty {
         real: bool,
@@ -1482,46 +1712,89 @@ mod tests {
         }
     }
 
+    struct MutatingTty<F: FnOnce()> {
+        displayed: Vec<u8>,
+        mutation: Option<F>,
+    }
+
+    impl<F: FnOnce()> TtyInteraction for MutatingTty<F> {
+        fn is_real_tty(&self) -> bool {
+            true
+        }
+
+        fn display(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            self.displayed.extend_from_slice(bytes);
+            Ok(())
+        }
+
+        fn read_confirmation(&mut self, _byte_limit: u64) -> std::io::Result<String> {
+            if let Some(mutation) = self.mutation.take() {
+                mutation();
+            }
+            let displayed = std::str::from_utf8(&self.displayed).unwrap();
+            let phrase = displayed
+                .split("Type exactly:\n")
+                .nth(1)
+                .and_then(|remaining| remaining.lines().next())
+                .unwrap();
+            Ok(format!("{phrase}\n"))
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct FixedClock(DateTime<Utc>);
+
+    impl Clock for FixedClock {
+        fn now_utc(&self) -> DateTime<Utc> {
+            self.0
+        }
+    }
+
+    struct CombinedEnvironment {
+        root: tempfile::TempDir,
+        source: RecordWriteResultV2,
+        knowledge: RecordWriteResultV2,
+        clock: FixedClock,
+    }
+
     #[test]
-    fn tty_confirmation_is_core_rendered_and_requires_the_exact_effect_digest() {
+    fn tty_confirmation_renders_the_full_card_and_binds_both_digests() {
         let digest = format!("sha256:{}", "a".repeat(64));
-        let effect = TtyApprovalEffectV2 {
-            effect_digest: digest.clone(),
-            targets: vec![ReviewTargetSnapshotV2 {
-                record_type: ReviewTargetTypeV2::Source,
-                record_id: format!("personal-source-{}", "b".repeat(64)),
-                displayed_revision: format!("sha256:{}", "c".repeat(64)),
-                expected_review_head_id: None,
-            }],
-        };
+        let effect = test_effect(digest.clone(), ReviewTargetTypeV2::Source);
+        let phrase = format!(
+            "approve {} {}",
+            effect.card.card_digest, effect.effect_digest
+        );
         let mut terminal = FakeTty {
             real: true,
-            input: format!("approve {digest}\n"),
+            input: format!("{phrase}\n"),
             displayed: Vec::new(),
             reads: 0,
         };
         let record_id = effect.targets[0].record_id.clone();
         let revision = effect.targets[0].displayed_revision.clone();
+        let card_bytes = effect.card.card_bytes.clone();
+        let card_digest = effect.card.card_digest.clone();
 
         confirm_tty_approval(effect, &mut terminal).unwrap();
 
         let displayed = String::from_utf8(terminal.displayed).unwrap();
+        assert!(displayed.contains(std::str::from_utf8(&card_bytes).unwrap()));
         assert!(displayed.contains(&record_id));
         assert!(displayed.contains(&revision));
+        assert!(displayed.contains(&card_digest));
         assert!(displayed.contains(&digest));
+        assert!(displayed.contains(&phrase));
         assert_eq!(terminal.reads, 1);
     }
 
     #[test]
     fn tty_confirmation_rejects_wrong_input_and_non_tty_without_reading() {
-        let effect = || TtyApprovalEffectV2 {
-            effect_digest: format!("sha256:{}", "d".repeat(64)),
-            targets: vec![ReviewTargetSnapshotV2 {
-                record_type: ReviewTargetTypeV2::Knowledge,
-                record_id: format!("personal-knowledge-{}", "e".repeat(64)),
-                displayed_revision: format!("sha256:{}", "f".repeat(64)),
-                expected_review_head_id: None,
-            }],
+        let effect = || {
+            test_effect(
+                format!("sha256:{}", "d".repeat(64)),
+                ReviewTargetTypeV2::Knowledge,
+            )
         };
         let mut wrong = FakeTty {
             real: true,
@@ -1538,7 +1811,7 @@ mod tests {
 
         let mut non_tty = FakeTty {
             real: false,
-            input: format!("approve {}\n", effect().effect_digest),
+            input: "unused\n".into(),
             displayed: Vec::new(),
             reads: 0,
         };
@@ -1548,7 +1821,413 @@ mod tests {
                 .code(),
             "review_tty_required"
         );
-        assert!(non_tty.displayed.is_empty());
+        assert!(
+            String::from_utf8(non_tty.displayed)
+                .unwrap()
+                .contains("# Review card")
+        );
         assert_eq!(non_tty.reads, 0);
+    }
+
+    #[test]
+    fn knowledge_approval_requires_explicit_revision_bound_domain_confirmation() {
+        let effect = test_effect(
+            format!("sha256:{}", "d".repeat(64)),
+            ReviewTargetTypeV2::Knowledge,
+        );
+        let confirmation = &effect.domain_confirmations[0];
+        let phrase = format!(
+            "approve {} {} confirm-domain {} {} standard",
+            effect.card.card_digest,
+            effect.effect_digest,
+            confirmation.record_id,
+            confirmation.displayed_revision,
+        );
+        let mut terminal = FakeTty {
+            real: true,
+            input: format!("{phrase}\n"),
+            displayed: Vec::new(),
+            reads: 0,
+        };
+
+        confirm_tty_approval(effect, &mut terminal).unwrap();
+
+        let displayed = String::from_utf8(terminal.displayed).unwrap();
+        assert!(displayed.contains("Required per-document domain confirmation"));
+        assert!(displayed.contains("classified `standard`"));
+        assert!(displayed.contains(&phrase));
+        assert_eq!(terminal.reads, 1);
+    }
+
+    #[test]
+    fn source_record_id_selects_only_source_from_the_full_combined_card() {
+        let environment = combined_environment();
+        let mut terminal = MutatingTty {
+            displayed: Vec::new(),
+            mutation: Some(|| {}),
+        };
+
+        let publication = publish_tty_approval_with_terminal(
+            environment.root.path(),
+            &environment.source.record_id,
+            &environment.clock,
+            &mut terminal,
+        )
+        .unwrap();
+
+        assert_eq!(publication.record.targets.len(), 1);
+        assert_eq!(
+            publication.record.targets[0].record_id,
+            environment.source.record_id
+        );
+        let displayed = String::from_utf8(terminal.displayed).unwrap();
+        assert!(displayed.contains(&environment.knowledge.record_id));
+        assert!(displayed.contains("Approval selection: selected record only"));
+        assert_eq!(
+            derive_review_state_v2(
+                environment.root.path(),
+                ReviewTargetTypeV2::Source,
+                &environment.source.record_id,
+            )
+            .unwrap()
+            .state,
+            ReviewDerivedStateV2::Approved
+        );
+        assert_eq!(
+            derive_review_state_v2(
+                environment.root.path(),
+                ReviewTargetTypeV2::Knowledge,
+                &environment.knowledge.record_id,
+            )
+            .unwrap()
+            .state,
+            ReviewDerivedStateV2::Unreviewed
+        );
+    }
+
+    #[test]
+    fn knowledge_record_id_selects_only_knowledge_and_its_domain_confirmation() {
+        let environment = combined_environment();
+        let mut terminal = MutatingTty {
+            displayed: Vec::new(),
+            mutation: Some(|| {}),
+        };
+
+        let publication = publish_tty_approval_with_terminal(
+            environment.root.path(),
+            &environment.knowledge.record_id,
+            &environment.clock,
+            &mut terminal,
+        )
+        .unwrap();
+
+        assert_eq!(publication.record.targets.len(), 1);
+        assert_eq!(
+            publication.record.targets[0].record_id,
+            environment.knowledge.record_id
+        );
+        let displayed = String::from_utf8(terminal.displayed).unwrap();
+        assert!(displayed.contains(&environment.source.record_id));
+        assert!(displayed.contains("Required per-document domain confirmation"));
+        assert!(displayed.contains("Approval selection: selected record only"));
+        assert_eq!(
+            derive_review_state_v2(
+                environment.root.path(),
+                ReviewTargetTypeV2::Source,
+                &environment.source.record_id,
+            )
+            .unwrap()
+            .state,
+            ReviewDerivedStateV2::Unreviewed
+        );
+        assert_eq!(
+            derive_review_state_v2(
+                environment.root.path(),
+                ReviewTargetTypeV2::Knowledge,
+                &environment.knowledge.record_id,
+            )
+            .unwrap()
+            .state,
+            ReviewDerivedStateV2::Approved
+        );
+    }
+
+    #[test]
+    fn queue_item_id_approves_all_actionable_targets_in_one_event() {
+        let environment = combined_environment();
+        let item_id = show_review_card_v2(environment.root.path(), &environment.source.record_id)
+            .unwrap()
+            .item_id;
+        let mut terminal = MutatingTty {
+            displayed: Vec::new(),
+            mutation: Some(|| {}),
+        };
+
+        let publication = publish_tty_approval_with_terminal(
+            environment.root.path(),
+            &item_id,
+            &environment.clock,
+            &mut terminal,
+        )
+        .unwrap();
+
+        assert_eq!(publication.record.targets.len(), 2);
+        assert_eq!(
+            publication
+                .record
+                .targets
+                .iter()
+                .map(|target| target.record_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                environment.source.record_id.as_str(),
+                environment.knowledge.record_id.as_str(),
+            ]
+        );
+        assert!(
+            String::from_utf8(terminal.displayed)
+                .unwrap()
+                .contains("Approval selection: all actionable displayed targets")
+        );
+    }
+
+    #[test]
+    fn invalid_selective_target_never_reaches_confirmation_or_publication() {
+        let environment = combined_environment();
+        let mut terminal = FakeTty {
+            real: true,
+            input: String::new(),
+            displayed: Vec::new(),
+            reads: 0,
+        };
+
+        let error = publish_tty_approval_with_terminal(
+            environment.root.path(),
+            &format!("personal-source-{}", "0".repeat(64)),
+            &environment.clock,
+            &mut terminal,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "review_card_not_found");
+        assert!(terminal.displayed.is_empty());
+        assert_eq!(terminal.reads, 0);
+        assert_eq!(
+            fs::read_dir(environment.root.path().join("reviews"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn judgment_added_after_display_makes_the_canonical_card_stale() {
+        let root = tempdir().unwrap();
+        scaffold_personal_kb_v2(root.path()).unwrap();
+        let asset: AssetRecordV2 =
+            serde_json::from_slice(include_bytes!("../../../tests/fixtures/json-v2/asset.json"))
+                .unwrap();
+        fs::write(
+            root.path()
+                .join("assets/registry")
+                .join(format!("{}.json", asset.id)),
+            canonical_json_bytes(&asset).unwrap(),
+        )
+        .unwrap();
+        let mut bundle: PreparedContentV2 = serde_json::from_slice(include_bytes!(
+            "../../../tests/fixtures/json-v2/prepared-content.json"
+        ))
+        .unwrap();
+        seal_test_bundle(&mut bundle);
+        let response: KnowledgeResponseV2 = serde_json::from_slice(include_bytes!(
+            "../../../tests/fixtures/json-v2/knowledge-response.json"
+        ))
+        .unwrap();
+        let clock = FixedClock("2026-07-23T12:00:00Z".parse().unwrap());
+        let knowledge = write_knowledge_record_v2(
+            WriteKnowledgeRecordRequestV2 {
+                repository_root: root.path(),
+                asset: &asset,
+                bundle: &bundle,
+                response: &response,
+                expected_revision: None,
+            },
+            &clock,
+        )
+        .unwrap();
+        let judgment = prepare_judgment_v2(
+            &knowledge.record_id,
+            &knowledge.revision,
+            "This exact judgment appeared after display.",
+            JudgmentAuthorshipV2::UserConfirmedViaTty,
+            clock.now_utc(),
+        )
+        .unwrap();
+        let judgment_directory = root
+            .path()
+            .join("knowledge")
+            .join(&knowledge.record_id)
+            .join("judgments");
+        let judgment_path = judgment_directory.join(format!("{}.md", judgment.annotation.id));
+        let judgment_bytes = judgment.markdown;
+        let mut terminal = MutatingTty {
+            displayed: Vec::new(),
+            mutation: Some(move || {
+                fs::create_dir(&judgment_directory).unwrap();
+                fs::write(&judgment_path, judgment_bytes).unwrap();
+            }),
+        };
+
+        let error = publish_tty_approval_with_terminal(
+            root.path(),
+            &knowledge.record_id,
+            &clock,
+            &mut terminal,
+        )
+        .expect_err("a judgment that changes displayed card bytes must invalidate approval");
+
+        assert_eq!(error.code(), "review_snapshot_stale");
+        assert_eq!(
+            fs::read_dir(root.path().join("reviews")).unwrap().count(),
+            0
+        );
+
+        let mut current_terminal = MutatingTty {
+            displayed: Vec::new(),
+            mutation: Some(|| {}),
+        };
+        let publication = publish_tty_approval_with_terminal(
+            root.path(),
+            &knowledge.record_id,
+            &clock,
+            &mut current_terminal,
+        )
+        .expect("the newly displayed current card remains approvable");
+        assert_eq!(publication.record.targets.len(), 1);
+        assert_eq!(
+            publication.record.targets[0].displayed_revision,
+            knowledge.revision
+        );
+        assert_eq!(
+            publication.record.targets[0].decision,
+            ReviewDecisionV2::Approve
+        );
+    }
+
+    fn test_effect(effect_digest: String, record_type: ReviewTargetTypeV2) -> TtyApprovalEffectV2 {
+        let record_id = match record_type {
+            ReviewTargetTypeV2::Source => format!("personal-source-{}", "b".repeat(64)),
+            ReviewTargetTypeV2::Knowledge => format!("personal-knowledge-{}", "e".repeat(64)),
+        };
+        let domain_policy = match record_type {
+            ReviewTargetTypeV2::Source => None,
+            ReviewTargetTypeV2::Knowledge => Some(DomainPolicyV2::Standard),
+        };
+        let snapshot = ReviewTargetSnapshotV2 {
+            record_type,
+            record_id: record_id.clone(),
+            displayed_revision: format!("sha256:{}", "c".repeat(64)),
+            expected_review_head_id: None,
+        };
+        let card_bytes = b"# Review card\n\ncanonical body and exact effects\n".to_vec();
+        TtyApprovalEffectV2 {
+            card: RenderedReviewCardV2 {
+                item_id: format!("personal-queue-{}", "1".repeat(64)),
+                asset_id: format!("personal-asset-{}", "2".repeat(64)),
+                targets: vec![crate::queue_v2::ReviewCardTargetV2 {
+                    snapshot: snapshot.clone(),
+                    state: ReviewCardTargetStateV2::Unreviewed,
+                    domain_policy: domain_policy.clone(),
+                    previous_approved_revision: None,
+                    conflicting_review_head_ids: Vec::new(),
+                    effects: vec!["approve_current_revision_via_tty".into()],
+                }],
+                effect_digest: format!("sha256:{}", "3".repeat(64)),
+                card_digest: sha256_digest(&card_bytes),
+                card_bytes,
+            },
+            selection: TtyApprovalSelectionV2::All,
+            effect_digest,
+            targets: vec![snapshot],
+            selected_effects: vec![SelectedTargetEffectV2 {
+                record_id: record_id.clone(),
+                displayed_revision: format!("sha256:{}", "c".repeat(64)),
+                effects: vec!["approve_current_revision_via_tty".into()],
+            }],
+            domain_confirmations: domain_policy
+                .map(|domain_policy| DomainConfirmationV2 {
+                    record_id: record_id.clone(),
+                    displayed_revision: format!("sha256:{}", "c".repeat(64)),
+                    domain_policy,
+                })
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn seal_test_bundle(bundle: &mut PreparedContentV2) {
+        let mut value = serde_json::to_value(&*bundle).unwrap();
+        value.as_object_mut().unwrap().remove("bundle_id");
+        value.as_object_mut().unwrap().remove("content_digest");
+        let digest = canonical_json_sha256(&value).unwrap();
+        bundle.content_digest = digest.clone();
+        bundle.bundle_id = format!("prepared-content-{}", digest.replace(':', "-"));
+    }
+
+    fn combined_environment() -> CombinedEnvironment {
+        let root = tempdir().unwrap();
+        scaffold_personal_kb_v2(root.path()).unwrap();
+        let asset: AssetRecordV2 =
+            serde_json::from_slice(include_bytes!("../../../tests/fixtures/json-v2/asset.json"))
+                .unwrap();
+        fs::write(
+            root.path()
+                .join("assets/registry")
+                .join(format!("{}.json", asset.id)),
+            canonical_json_bytes(&asset).unwrap(),
+        )
+        .unwrap();
+        let mut bundle: PreparedContentV2 = serde_json::from_slice(include_bytes!(
+            "../../../tests/fixtures/json-v2/prepared-content.json"
+        ))
+        .unwrap();
+        seal_test_bundle(&mut bundle);
+        let clock = FixedClock("2026-07-23T13:00:00Z".parse().unwrap());
+        let source_response: SourceResponseV2 = serde_json::from_slice(include_bytes!(
+            "../../../tests/fixtures/json-v2/source-response.json"
+        ))
+        .unwrap();
+        let knowledge_response: KnowledgeResponseV2 = serde_json::from_slice(include_bytes!(
+            "../../../tests/fixtures/json-v2/knowledge-response.json"
+        ))
+        .unwrap();
+        let source = write_source_record_v2(
+            WriteSourceRecordRequestV2 {
+                repository_root: root.path(),
+                asset: &asset,
+                bundle: &bundle,
+                response: &source_response,
+                expected_revision: None,
+            },
+            &clock,
+        )
+        .unwrap();
+        let knowledge = write_knowledge_record_v2(
+            WriteKnowledgeRecordRequestV2 {
+                repository_root: root.path(),
+                asset: &asset,
+                bundle: &bundle,
+                response: &knowledge_response,
+                expected_revision: None,
+            },
+            &clock,
+        )
+        .unwrap();
+        CombinedEnvironment {
+            root,
+            source,
+            knowledge,
+            clock,
+        }
     }
 }

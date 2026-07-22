@@ -1,6 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::review_session_v2::ReviewOpenDataV2;
+use crate::setup_plan_v2::SetupPlanDataV2;
 
 fn deserialize_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
@@ -271,8 +272,74 @@ pub enum NextActionV2 {
     WriteKnowledge,
     Review,
     Repair,
+    PreserveUserEdit,
     Retry,
     Sync,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardCanonicalStateDataV2 {
+    Ready,
+    Blocked,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardProjectionStateDataV2 {
+    Current,
+    RepairRequired,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardFileKindDataV2 {
+    ViewDefinition,
+    RecordProjection,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardFileStateDataV2 {
+    Current,
+    Missing,
+    Stale,
+    UserModified,
+    Unowned,
+    Orphaned,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DashboardFileDataV2 {
+    pub path: String,
+    pub kind: DashboardFileKindDataV2,
+    pub manifest_owned: bool,
+    pub state: DashboardFileStateDataV2,
+    pub next_action: NextActionV2,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DashboardDataV2 {
+    pub canonical_state: DashboardCanonicalStateDataV2,
+    pub projection_state: DashboardProjectionStateDataV2,
+    pub manifest_owned_drift: bool,
+    pub next_action: NextActionV2,
+    pub items: Vec<DashboardFileDataV2>,
+    pub scan_complete: bool,
+    pub remaining: u64,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupApplyDataV2 {
+    pub plan_id: String,
+    pub repository_root: String,
+    pub provider_root: String,
+    pub profile_changed: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -293,6 +360,20 @@ pub struct JsonV2Error {
 #[serde(tag = "command")]
 #[serde(deny_unknown_fields)]
 pub enum JsonV2Success {
+    #[serde(rename = "setup.plan")]
+    SetupPlan {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: SetupPlanDataV2,
+    },
+    #[serde(rename = "setup.apply")]
+    SetupApply {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: SetupApplyDataV2,
+    },
     #[serde(rename = "add")]
     Add {
         #[serde(deserialize_with = "deserialize_schema_version")]
@@ -349,9 +430,32 @@ pub enum JsonV2Success {
         result: JsonV2SuccessResult,
         data: ReviewFeedbackDataV2,
     },
+    #[serde(rename = "dashboard")]
+    Dashboard {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: DashboardDataV2,
+    },
 }
 
 impl JsonV2Success {
+    pub fn setup_plan(data: SetupPlanDataV2) -> Self {
+        Self::SetupPlan {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
+    pub fn setup_apply(data: SetupApplyDataV2) -> Self {
+        Self::SetupApply {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
     pub fn add(data: AddDataV2) -> Self {
         Self::Add {
             schema_version: 2,
@@ -410,6 +514,14 @@ impl JsonV2Success {
 
     pub fn review_feedback(data: ReviewFeedbackDataV2) -> Self {
         Self::ReviewFeedback {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
+    pub fn dashboard(data: DashboardDataV2) -> Self {
+        Self::Dashboard {
             schema_version: 2,
             result: JsonV2SuccessResult::Ok,
             data,

@@ -12,7 +12,7 @@ use std::os::windows::fs::OpenOptionsExt;
 
 use mko_core::{
     asset_v2::{HydrationConfirmationV2, read_asset_v2},
-    clock::Clock,
+    clock::{Clock, SystemClock},
     config::KnowledgeConfig,
     config_v2::KnowledgeConfigV2,
     error::MkoError,
@@ -23,8 +23,8 @@ use mko_core::{
     },
     model_v2::{KnowledgeResponseV2, PreparedMetadataV2, SourceResponseV2},
     prepared_v2::{
-        PreparePdfAssetRequestV2, PreparedPersistenceOutcomeV2, prepare_pdf_asset_v2,
-        read_prepared_content_v2,
+        PreparePdfAssetRequestV2, PreparedPersistenceOutcomeV2, cleanup_prepared_sessions_v2,
+        prepare_pdf_asset_v2, read_prepared_content_v2,
     },
     queue_v2::{ReviewCardTargetStateV2, derive_queue_v2, show_review_card_v2},
     records_v2::{
@@ -34,7 +34,7 @@ use mko_core::{
     review_session_v2::{
         ReviewSessionDecisionInputV2, apply_review_session_decision_v2, open_review_session_v2,
     },
-    review_v2::{ReviewTargetSnapshotV2, publish_tty_approval_review_v2},
+    review_v2::publish_tty_approval_review_v2,
 };
 use serde::de::DeserializeOwned;
 
@@ -46,7 +46,10 @@ const MAX_SEMANTIC_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 pub fn is_v2_repository(repository: &Path) -> Result<bool, MkoError> {
     let marker = repository.join("knowledge-os.yaml");
     match KnowledgeConfigV2::read(repository) {
-        Ok(_) => Ok(true),
+        Ok(_) => {
+            cleanup_prepared_sessions_v2(repository, &SystemClock)?;
+            Ok(true)
+        }
         Err(v2_error) => {
             if KnowledgeConfig::read(repository).is_ok() {
                 return Ok(false);
@@ -61,6 +64,7 @@ pub fn is_v2_repository(repository: &Path) -> Result<bool, MkoError> {
 }
 
 pub fn queue(repository: &Path) -> Result<(), MkoError> {
+    cleanup_prepared_sessions_v2(repository, &SystemClock)?;
     let queue = derive_queue_v2(repository)?;
     let stdout = io::stdout();
     let mut output = stdout.lock();
@@ -98,10 +102,12 @@ pub fn queue(repository: &Path) -> Result<(), MkoError> {
 }
 
 pub fn queue_json_v2(repository: &Path) -> Result<(), MkoError> {
+    cleanup_prepared_sessions_v2(repository, &SystemClock)?;
     emit_json_v2(JsonV2Success::queue(derive_queue_v2(repository)?))
 }
 
 pub fn show(repository: &Path, stable_id: &str) -> Result<(), MkoError> {
+    cleanup_prepared_sessions_v2(repository, &SystemClock)?;
     let card = show_review_card_v2(repository, stable_id)?;
     let stdout = io::stdout();
     let mut output = stdout.lock();
@@ -112,6 +118,7 @@ pub fn show(repository: &Path, stable_id: &str) -> Result<(), MkoError> {
 }
 
 pub fn show_json_v2(repository: &Path, stable_id: &str) -> Result<(), MkoError> {
+    cleanup_prepared_sessions_v2(repository, &SystemClock)?;
     let card = show_review_card_v2(repository, stable_id)?;
     let card_markdown = String::from_utf8(card.card_bytes)
         .map_err(|error| MkoError::new("review_card_invalid", error.to_string()))?;
@@ -288,46 +295,52 @@ pub fn review(
                 MkoError::new("review_queue_empty", "there is no pending review item")
             })?,
     };
-    let card = show_review_card_v2(repository, &selected_id)?;
+    let publication = publish_tty_approval_review_v2(repository, &selected_id, clock)?;
+    report_review_publication(&publication)?;
+    Ok(())
+}
 
-    let stderr = io::stderr();
-    let mut display = stderr.lock();
-    display
-        .write_all(&card.card_bytes)
-        .and_then(|()| display.flush())
-        .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
-    drop(display);
-
-    if card
-        .targets
-        .iter()
-        .any(|target| target.state == ReviewCardTargetStateV2::Blocked)
-    {
-        return Err(MkoError::new(
-            "review_target_blocked",
-            "the displayed review card contains a blocked target; diagnose it before approval",
-        ));
+fn report_review_publication(
+    publication: &mko_core::review_v2::ReviewPublicationV2,
+) -> Result<(), MkoError> {
+    let mut blocked = Vec::new();
+    for projection in &publication.projections {
+        match projection {
+            RecordProjectionStatusV2::Current(_) => {}
+            RecordProjectionStatusV2::RepairRequired(result) => {
+                let recovery = result.recovery.as_ref();
+                blocked.push(format!(
+                    "{}: user edit preserved; inspect {}, resolve or relocate the edit, then run `mko dashboard` to verify readiness",
+                    result.path.display(),
+                    recovery
+                        .map(|recovery| recovery.diff_path.display().to_string())
+                        .unwrap_or_else(|| "the generated recovery diff".into())
+                ));
+            }
+            RecordProjectionStatusV2::Stale { path, error } => blocked.push(format!(
+                "{}: stale ({}) — run `mko dashboard --repair`, then `mko check`",
+                path.display(),
+                error.code()
+            )),
+        }
     }
-    let targets = card
-        .targets
-        .iter()
-        .filter(|target| target.state != ReviewCardTargetStateV2::Approved)
-        .map(|target| ReviewTargetSnapshotV2 {
-            record_type: target.snapshot.record_type.clone(),
-            record_id: target.snapshot.record_id.clone(),
-            displayed_revision: target.snapshot.displayed_revision.clone(),
-            expected_review_head_id: target.snapshot.expected_review_head_id.clone(),
-        })
-        .collect::<Vec<_>>();
-    if targets.is_empty() {
-        return Err(MkoError::new(
-            "review_nothing_to_approve",
-            "every target in the displayed review card is already approved",
-        ));
+    if blocked.is_empty() {
+        println!("approved {} (readiness current)", publication.record.id);
+    } else {
+        println!(
+            "review event published {}, but readiness is blocked by {} projection(s)",
+            publication.record.id,
+            blocked.len()
+        );
+        let stderr = io::stderr();
+        let mut output = stderr.lock();
+        for blocker in blocked {
+            writeln!(output, "- {blocker}").map_err(|error| output_error(error.to_string()))?;
+        }
+        output
+            .flush()
+            .map_err(|error| output_error(error.to_string()))?;
     }
-
-    let publication = publish_tty_approval_review_v2(repository, targets, clock)?;
-    println!("approved {}", publication.record.id);
     Ok(())
 }
 

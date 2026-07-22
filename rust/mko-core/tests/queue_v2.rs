@@ -3,6 +3,7 @@ use std::{fs, path::Path};
 use chrono::{DateTime, Utc};
 use mko_core::{
     clock::Clock,
+    config_v2::DomainPolicyV2,
     front_matter::render_markdown,
     json_v2::{QueueItemStateV2, QueueItemTypeV2, QueueNextActionV2},
     model_v2::{
@@ -177,11 +178,17 @@ fn source_and_knowledge_share_one_full_canonical_card_with_a_stable_digest() {
     assert_eq!(first.targets.len(), 2);
     assert_eq!(first.targets[0].snapshot.record_id, source.record_id);
     assert_eq!(first.targets[1].snapshot.record_id, knowledge.record_id);
+    assert_eq!(first.targets[0].domain_policy, None);
+    assert_eq!(
+        first.targets[1].domain_policy,
+        Some(DomainPolicyV2::Standard)
+    );
     let text = String::from_utf8(first.card_bytes).unwrap();
     assert!(text.contains("Source-grounded content"));
     assert!(text.contains("Knowledge analysis"));
     assert!(text.contains(&environment.source.general_summary));
     assert!(text.contains(&environment.knowledge.synthesis));
+    assert!(text.contains("Domain policy requiring human confirmation: `standard`"));
     assert!(text.contains(&first.effect_digest));
 }
 
@@ -244,6 +251,36 @@ fn missing_projection_blocks_the_queue() {
     fs::remove_file(&projection.path).unwrap();
 
     let queue = derive_queue_v2(environment.root.path()).unwrap();
+    assert_eq!(queue.items[0].state, QueueItemStateV2::Blocked);
+    assert_eq!(queue.items[0].next_action, QueueNextActionV2::Diagnose);
+}
+
+#[test]
+fn self_consistent_projection_with_noncanonical_semantics_blocks_the_queue() {
+    let environment = environment();
+    let source = write_source(&environment, &environment.bundle, &environment.source, None);
+    let wrong_title = "Projection-authored title that canonical Source never contained";
+
+    write_projection_v2(
+        environment.root.path(),
+        &ProjectionInputV2 {
+            record_type: ProjectionRecordTypeV2::Source,
+            id: source.record_id.clone(),
+            title: wrong_title.into(),
+            current_revision: source.revision.clone(),
+            review_head_id: None,
+            derived_state: ProjectionStateV2::Unreviewed,
+            domain: "uncategorized".into(),
+            tags: environment.source.tags.clone(),
+            record_link: format!("sources/{}/current.yaml", source.record_id),
+            asset_link: format!("assets/registry/{}.json", environment.asset.id),
+        },
+    )
+    .unwrap();
+
+    let queue = derive_queue_v2(environment.root.path()).unwrap();
+
+    assert_eq!(queue.items.len(), 1);
     assert_eq!(queue.items[0].state, QueueItemStateV2::Blocked);
     assert_eq!(queue.items[0].next_action, QueueNextActionV2::Diagnose);
 }

@@ -3,6 +3,8 @@
   "$id": "https://my-knowledge-os.local/schemas/v2/machine-output.schema.json",
   "title": "My Knowledge OS machine envelope v2",
   "oneOf": [
+    { "$ref": "#/$defs/setup_plan_success" },
+    { "$ref": "#/$defs/setup_apply_success" },
     { "$ref": "#/$defs/add_success" },
     { "$ref": "#/$defs/source_prepare_success" },
     { "$ref": "#/$defs/source_write_success" },
@@ -11,6 +13,7 @@
     { "$ref": "#/$defs/show_success" },
     { "$ref": "#/$defs/review_open_success" },
     { "$ref": "#/$defs/review_feedback_success" },
+    { "$ref": "#/$defs/dashboard_success" },
     { "$ref": "#/$defs/failure" }
   ],
   "$defs": {
@@ -44,6 +47,7 @@
         "write_knowledge",
         "review",
         "repair",
+        "preserve_user_edit",
         "retry",
         "sync"
       ]
@@ -359,6 +363,101 @@
         }
       }
     },
+    "dashboard_file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind", "manifest_owned", "state", "next_action"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "kind": { "enum": ["view_definition", "record_projection"] },
+        "manifest_owned": { "type": "boolean" },
+        "state": {
+          "enum": ["current", "missing", "stale", "user_modified", "unowned", "orphaned"]
+        },
+        "next_action": { "$ref": "#/$defs/next_action" }
+      }
+    },
+    "dashboard_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_state",
+        "projection_state",
+        "manifest_owned_drift",
+        "next_action",
+        "items",
+        "scan_complete",
+        "remaining",
+        "next_cursor"
+      ],
+      "properties": {
+        "canonical_state": { "enum": ["ready", "blocked"] },
+        "projection_state": { "enum": ["current", "repair_required"] },
+        "manifest_owned_drift": { "type": "boolean" },
+        "next_action": { "$ref": "#/$defs/next_action" },
+        "items": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": { "$ref": "#/$defs/dashboard_file" }
+        },
+        "scan_complete": { "type": "boolean" },
+        "remaining": { "type": "integer", "minimum": 0 },
+        "next_cursor": { "type": ["string", "null"], "maxLength": 4096 }
+      }
+    },
+    "setup_plan_step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_id", "effect", "destination", "requires_human_approval"],
+      "properties": {
+        "step_id": {
+          "enum": ["scaffold_repository", "ensure_provider_inbox", "ensure_dashboard", "configure_profile"]
+        },
+        "effect": { "enum": ["read", "create", "modify"] },
+        "destination": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "requires_human_approval": { "type": "boolean" }
+      }
+    },
+    "setup_plan_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan_id",
+        "expires_at",
+        "single_use",
+        "precondition_digest",
+        "effect_digest",
+        "steps",
+        "approval_mode",
+        "next_action"
+      ],
+      "properties": {
+        "plan_id": { "type": "string", "pattern": "^mko-setup-plan-[0-9a-f]{64}$" },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "single_use": { "const": true },
+        "precondition_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "effect_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "steps": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/setup_plan_step" }
+        },
+        "approval_mode": { "const": "tty" },
+        "next_action": { "enum": ["approve_plan", "none"] }
+      }
+    },
+    "setup_apply_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plan_id", "repository_root", "provider_root", "profile_changed"],
+      "properties": {
+        "plan_id": { "type": "string", "pattern": "^mko-setup-plan-[0-9a-f]{64}$" },
+        "repository_root": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "provider_root": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "profile_changed": { "type": "boolean" }
+      }
+    },
     "error": {
       "type": "object",
       "additionalProperties": false,
@@ -380,6 +479,28 @@
         "command": { "const": "add" },
         "result": { "const": "ok" },
         "data": { "$ref": "#/$defs/add_data" }
+      }
+    },
+    "setup_plan_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "setup.plan" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/setup_plan_data" }
+      }
+    },
+    "setup_apply_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "setup.apply" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/setup_apply_data" }
       }
     },
     "source_prepare_success": {
@@ -457,6 +578,17 @@
         "command": { "const": "review.feedback" },
         "result": { "const": "ok" },
         "data": { "$ref": "#/$defs/review_feedback_data" }
+      }
+    },
+    "dashboard_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "dashboard" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/dashboard_data" }
       }
     },
     "failure": {

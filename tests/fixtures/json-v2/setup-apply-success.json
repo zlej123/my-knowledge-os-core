@@ -1,0 +1,11 @@
+{
+  "command": "setup.apply",
+  "schema_version": 2,
+  "result": "ok",
+  "data": {
+    "plan_id": "mko-setup-plan-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "repository_root": "/Knowledge/Personal Engineering Vault/personal-kb",
+    "provider_root": "/Google Drive/My Drive/My-Knowledge-OS-Assets/personal/inbox",
+    "profile_changed": true
+  }
+}

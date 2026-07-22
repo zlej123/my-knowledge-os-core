@@ -41,6 +41,17 @@ pub struct ProfileStore {
     path: PathBuf,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProfileSnapshot {
+    pub profile: Option<MachineProfileFile>,
+    bytes: Option<Vec<u8>>,
+}
+
+pub(crate) struct ProfileMutationLock {
+    path: PathBuf,
+    _file: fs::File,
+}
+
 impl ProfileStore {
     pub fn from_platform(platform: &dyn PlatformEnvironment) -> Result<Self, MkoError> {
         Ok(Self {
@@ -62,9 +73,18 @@ impl ProfileStore {
     }
 
     pub fn read(&self) -> Result<Option<MachineProfileFile>, MkoError> {
+        Ok(self.read_snapshot()?.profile)
+    }
+
+    pub(crate) fn read_snapshot(&self) -> Result<ProfileSnapshot, MkoError> {
         let metadata = match fs::symlink_metadata(&self.path) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ProfileSnapshot {
+                    profile: None,
+                    bytes: None,
+                });
+            }
             Err(error) => return Err(profile_io_error("read", &self.path, error)),
         };
         if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -80,14 +100,77 @@ impl ProfileStore {
             )
         })?)?;
         ensure_owner_private_file(&self.path, &metadata)?;
-        let input = fs::read_to_string(&self.path)
-            .map_err(|error| profile_io_error("read", &self.path, error))?;
-        let profile = parse_profile(&input)?;
+        let bytes =
+            fs::read(&self.path).map_err(|error| profile_io_error("read", &self.path, error))?;
+        let input = std::str::from_utf8(&bytes)
+            .map_err(|error| MkoError::new("profile_invalid", error.to_string()))?;
+        let profile = parse_profile(input)?;
         validate_profile(&profile)?;
-        Ok(Some(profile))
+        Ok(ProfileSnapshot {
+            profile: Some(profile),
+            bytes: Some(bytes),
+        })
     }
 
     pub fn write(&self, profile: &MachineProfileFile) -> Result<(), MkoError> {
+        let mutation_lock = self.acquire_mutation_lock()?;
+        let expected = self.read_snapshot()?;
+        self.write_if_unchanged(&mutation_lock, &expected, profile)
+    }
+
+    pub(crate) fn acquire_mutation_lock(&self) -> Result<ProfileMutationLock, MkoError> {
+        let parent = self.path.parent().ok_or_else(|| {
+            MkoError::new(
+                "profile_path_invalid",
+                "machine profile path has no parent directory",
+            )
+        })?;
+        fs::create_dir_all(parent)
+            .map_err(|error| profile_io_error("create directory for", &self.path, error))?;
+        ensure_private_directory(parent)?;
+        let lock_path = parent.join("setup-profile.lock");
+        reject_unsafe_lock_destination(&lock_path)?;
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true);
+        configure_private_lock_open(&mut options);
+        let file = options
+            .open(&lock_path)
+            .map_err(|error| profile_io_error("open lock for", &lock_path, error))?;
+        set_owner_private_file(&file)?;
+        match file.try_lock() {
+            Ok(()) => Ok(ProfileMutationLock {
+                path: lock_path,
+                _file: file,
+            }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(MkoError::new(
+                "setup_profile_locked",
+                "another setup or profile mutation is already in progress",
+            )),
+            Err(std::fs::TryLockError::Error(error)) => {
+                Err(MkoError::new("setup_profile_locked", error.to_string()))
+            }
+        }
+    }
+
+    pub(crate) fn write_if_unchanged(
+        &self,
+        mutation_lock: &ProfileMutationLock,
+        expected: &ProfileSnapshot,
+        profile: &MachineProfileFile,
+    ) -> Result<(), MkoError> {
+        if mutation_lock.path.parent() != self.path.parent() {
+            return Err(MkoError::new(
+                "setup_profile_lock_invalid",
+                "the profile mutation lock does not protect this profile store",
+            ));
+        }
+        let current = self.read_snapshot()?;
+        if current.bytes != expected.bytes {
+            return Err(MkoError::new(
+                "profile_snapshot_changed",
+                "profiles.yaml changed after setup inspection; create and approve a new setup plan",
+            ));
+        }
         validate_profile(profile)?;
         let serialized = serde_saphyr::to_string(profile)
             .map_err(|error| MkoError::new("profile_invalid", error.to_string()))?;
@@ -164,6 +247,36 @@ impl ProfileStore {
         Ok(profile)
     }
 }
+
+fn reject_unsafe_lock_destination(path: &Path) -> Result<(), MkoError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(()),
+        Ok(_) => Err(MkoError::new(
+            "profile_path_invalid",
+            "machine profile lock must be a regular file and must not be a symlink",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(profile_io_error("inspect", path, error)),
+    }
+}
+
+#[cfg(unix)]
+fn configure_private_lock_open(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.mode(0o600).custom_flags(nix::libc::O_NOFOLLOW);
+}
+
+#[cfg(windows)]
+fn configure_private_lock_open(options: &mut fs::OpenOptions) {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn configure_private_lock_open(_options: &mut fs::OpenOptions) {}
 
 fn validate_profile(profile: &MachineProfileFile) -> Result<(), MkoError> {
     if profile.schema_version != PROFILE_SCHEMA_VERSION
@@ -438,6 +551,64 @@ mod tests {
                 .code(),
             "profile_permissions_invalid"
         );
+    }
+
+    #[test]
+    fn profile_compare_and_swap_rejects_a_stale_full_map() {
+        use std::{collections::BTreeMap, fs};
+
+        use tempfile::TempDir;
+
+        use super::{MachineProfileFile, PersonalProfile, ProfileStore};
+        use crate::context::Scope;
+
+        let root = TempDir::new().unwrap();
+        let repository = root.path().join("repository");
+        let provider = root.path().join("provider");
+        let other_repository = root.path().join("other-repository");
+        let other_provider = root.path().join("other-provider");
+        for path in [&repository, &provider, &other_repository, &other_provider] {
+            fs::create_dir_all(path).unwrap();
+        }
+        let store = ProfileStore::at(root.path().join("config/mko/profiles.yaml"));
+        let initial = MachineProfileFile {
+            schema_version: 1,
+            default_profile: "personal".into(),
+            profiles: BTreeMap::from([(
+                "personal".into(),
+                PersonalProfile {
+                    repository_root: repository.clone(),
+                    provider_root: provider.clone(),
+                    scope: Scope::Personal,
+                },
+            )]),
+        };
+        store.write(&initial).unwrap();
+
+        let mutation_lock = store.acquire_mutation_lock().unwrap();
+        let expected = store.read_snapshot().unwrap();
+        let mut concurrently_changed = initial.clone();
+        concurrently_changed.profiles.insert(
+            "other".into(),
+            PersonalProfile {
+                repository_root: other_repository,
+                provider_root: other_provider,
+                scope: Scope::Personal,
+            },
+        );
+        fs::write(
+            store.path(),
+            serde_saphyr::to_string(&concurrently_changed).unwrap(),
+        )
+        .unwrap();
+
+        let mut stale_replacement = initial;
+        stale_replacement.default_profile = "personal".into();
+        let error = store
+            .write_if_unchanged(&mutation_lock, &expected, &stale_replacement)
+            .unwrap_err();
+        assert_eq!(error.code(), "profile_snapshot_changed");
+        assert_eq!(store.read().unwrap(), Some(concurrently_changed));
     }
 
     #[cfg(windows)]

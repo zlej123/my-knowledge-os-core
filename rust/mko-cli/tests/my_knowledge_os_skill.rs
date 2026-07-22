@@ -808,6 +808,9 @@ fn normalize_transcript(transcript: &mut Value) {
                 step["result"]["data"]["source_path"] = "<SOURCE_PATH>".into();
                 step["result"]["data"]["content_revision"] = "<CONTENT_REVISION>".into();
             }
+            "knowledge.write" => {
+                step["result"]["data"]["knowledge_path"] = "<KNOWLEDGE_PATH>".into();
+            }
             _ => {}
         }
     }
