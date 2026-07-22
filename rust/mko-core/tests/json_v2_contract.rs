@@ -107,6 +107,14 @@ fn machine_envelope_goldens_validate_and_round_trip() {
     assert!(validator.is_valid(&add_value));
     let add_typed: JsonV2Success = serde_json::from_slice(add).unwrap();
     assert_eq!(serde_json::to_value(add_typed).unwrap(), add_value);
+    let add_batch = include_bytes!("../../../tests/fixtures/json-v2/add-batch-success.json");
+    let add_batch_value: Value = serde_json::from_slice(add_batch).unwrap();
+    assert!(validator.is_valid(&add_batch_value));
+    let add_batch_typed: JsonV2Success = serde_json::from_slice(add_batch).unwrap();
+    assert_eq!(
+        serde_json::to_value(add_batch_typed).unwrap(),
+        add_batch_value
+    );
 
     for bytes in [
         include_bytes!("../../../tests/fixtures/json-v2/source-prepare-success.json").as_slice(),

@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, btree_map::Entry},
     fs,
     io::Read,
     path::{Component, Path, PathBuf},
@@ -21,6 +22,10 @@ use crate::{
     },
     lock::{RepositoryMutationLock, StaleRepositoryLockPolicy},
     path_policy::validate_portable_relative_path,
+    provider_scan::{
+        DEFAULT_SCAN_LIMITS, ElapsedClock, ProviderCatalogEntry, ProviderCatalogScan,
+        ProviderScanRequest, ProviderScanWarning, scan_provider_catalog,
+    },
     records_v2::{AssetProviderBindingV2, AssetRecordTypeV2, AssetRecordV2},
     revision_v2::canonical_json_bytes,
 };
@@ -51,6 +56,168 @@ pub struct RegisterAssetRequestV2<'a> {
     pub provider_root: &'a Path,
     pub logical_locator: &'a str,
     pub hydration_confirmation: HydrationConfirmationV2,
+}
+
+pub struct RegisterInboxAssetsRequestV2<'a> {
+    pub repository_root: &'a Path,
+    pub provider_root: &'a Path,
+    pub hydration_confirmation: HydrationConfirmationV2,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InboxAssetRegistrationItemV2 {
+    pub logical_locator: String,
+    pub registration: Option<AssetRegistrationResultV2>,
+    pub error: Option<MkoError>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InboxAssetRegistrationResultV2 {
+    /// False when provider discovery was incomplete or more known candidates
+    /// remain outside this bounded response.
+    pub scan_complete: bool,
+    pub items: Vec<InboxAssetRegistrationItemV2>,
+    pub warnings: Vec<ProviderScanWarning>,
+    /// Number of already-discovered actionable locators omitted by the batch
+    /// ceiling. If `scan_complete` is false, additional undiscovered entries may
+    /// also exist and are intentionally not guessed here.
+    pub remaining: u64,
+}
+
+#[derive(Clone, Debug)]
+enum InboxCandidateV2 {
+    Readable,
+    Blocked(MkoError),
+}
+
+/// Registers one deterministic, bounded page of PDFs already present below the
+/// configured provider Inbox. Individual failures are returned beside successful
+/// immutable registrations and never roll back earlier successes.
+pub fn register_inbox_pdf_assets_v2(
+    request: RegisterInboxAssetsRequestV2<'_>,
+    elapsed_clock: &dyn ElapsedClock,
+) -> Result<InboxAssetRegistrationResultV2, MkoError> {
+    KnowledgeConfigV2::read(request.repository_root)?;
+    let (repository_root, provider_root) =
+        validated_disjoint_roots(request.repository_root, request.provider_root)?;
+    let scan = scan_provider_catalog(
+        ProviderScanRequest::new(&provider_root).with_limits(DEFAULT_SCAN_LIMITS),
+        elapsed_clock,
+    )?;
+    Ok(apply_inbox_catalog_v2(
+        request,
+        &repository_root,
+        &provider_root,
+        scan,
+    ))
+}
+
+fn apply_inbox_catalog_v2(
+    request: RegisterInboxAssetsRequestV2<'_>,
+    repository_root: &Path,
+    provider_root: &Path,
+    scan: ProviderCatalogScan,
+) -> InboxAssetRegistrationResultV2 {
+    // The catalog's legacy `scan_complete` is false for every warning, including
+    // a fully enumerated invalid PDF. Batch callers need the narrower discovery
+    // meaning: known item-local content failures do not imply hidden entries.
+    let provider_scan_complete = scan.scan_complete
+        || scan
+            .warnings
+            .iter()
+            .all(item_warning_preserves_scan_completeness);
+    let mut candidates = BTreeMap::<String, InboxCandidateV2>::new();
+    for entry in scan.entries {
+        match entry {
+            ProviderCatalogEntry::Readable(pdf) => {
+                candidates.insert(pdf.provider_locator, InboxCandidateV2::Readable);
+            }
+            ProviderCatalogEntry::Placeholder {
+                provider_locator, ..
+            } => {
+                candidates.insert(
+                    provider_locator,
+                    InboxCandidateV2::Blocked(MkoError::new(
+                        "asset_not_hydrated",
+                        "provider PDF is not available as a fully local readable snapshot",
+                    )),
+                );
+            }
+        }
+    }
+
+    let mut warnings = Vec::new();
+    for warning in scan.warnings {
+        let Some(locator) = warning.provider_locator.clone() else {
+            warnings.push(warning);
+            continue;
+        };
+        match candidates.entry(locator) {
+            Entry::Vacant(entry) => {
+                entry.insert(InboxCandidateV2::Blocked(MkoError::new(
+                    warning.code,
+                    warning.message,
+                )));
+            }
+            Entry::Occupied(_) => warnings.push(warning),
+        }
+    }
+
+    let batch_limit = usize::try_from(DEFAULT_SCAN_LIMITS.max_batch_items).unwrap_or(usize::MAX);
+    let remaining = candidates.len().saturating_sub(batch_limit) as u64;
+    if remaining > 0 {
+        warnings.push(ProviderScanWarning {
+            code: "batch_item_limit".into(),
+            message: format!(
+                "{remaining} additional discovered Inbox item(s) remain outside this bounded batch"
+            ),
+            provider_locator: None,
+        });
+    }
+
+    let mut items = Vec::with_capacity(candidates.len().min(batch_limit));
+    for (logical_locator, candidate) in candidates.into_iter().take(batch_limit) {
+        let (registration, error) = match candidate {
+            InboxCandidateV2::Readable => match register_pdf_asset_v2(RegisterAssetRequestV2 {
+                repository_root,
+                provider_root,
+                logical_locator: &logical_locator,
+                hydration_confirmation: request.hydration_confirmation,
+            }) {
+                Ok(result) => (Some(result), None),
+                Err(error) => (None, Some(error)),
+            },
+            InboxCandidateV2::Blocked(error) => (None, Some(error)),
+        };
+        items.push(InboxAssetRegistrationItemV2 {
+            logical_locator,
+            registration,
+            error,
+        });
+    }
+    warnings.sort_by(|left, right| {
+        left.code
+            .cmp(&right.code)
+            .then(left.provider_locator.cmp(&right.provider_locator))
+    });
+    InboxAssetRegistrationResultV2 {
+        scan_complete: provider_scan_complete && remaining == 0,
+        items,
+        warnings,
+        remaining,
+    }
+}
+
+fn item_warning_preserves_scan_completeness(warning: &ProviderScanWarning) -> bool {
+    warning.provider_locator.is_some()
+        && matches!(
+            warning.code.as_str(),
+            "invalid_pdf"
+                | "file_too_large"
+                | "pdf_too_large"
+                | "fingerprint_changed"
+                | "scan_file_unreadable"
+        )
 }
 
 pub fn register_pdf_asset_v2(
@@ -509,3 +676,67 @@ fn configure_std_nofollow(options: &mut fs::OpenOptions) {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn configure_std_nofollow(_options: &mut fs::OpenOptions) {}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::PathBuf};
+
+    use crate::{
+        provider_scan::{ProviderCatalogEntry, ProviderCatalogScan, ProviderScanWarning},
+        scaffold_v2::scaffold_personal_kb_v2,
+    };
+
+    use super::{HydrationConfirmationV2, RegisterInboxAssetsRequestV2, apply_inbox_catalog_v2};
+
+    #[test]
+    fn placeholder_is_an_item_and_time_limit_stays_a_global_warning() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = root.path().join("repository");
+        let provider = root.path().join("provider");
+        scaffold_personal_kb_v2(&repository).unwrap();
+        fs::create_dir(&provider).unwrap();
+        let scan = ProviderCatalogScan {
+            scan_complete: false,
+            mutation_safe: false,
+            entries: vec![ProviderCatalogEntry::Placeholder {
+                provider_locator: "offline.pdf".into(),
+                relative_path: PathBuf::from("offline.pdf"),
+            }],
+            warnings: vec![ProviderScanWarning {
+                code: "scan_time_limit".into(),
+                message: "provider scan reached the time limit".into(),
+                provider_locator: None,
+            }],
+            entries_seen: 1,
+            total_pdf_bytes: 0,
+        };
+
+        let result = apply_inbox_catalog_v2(
+            RegisterInboxAssetsRequestV2 {
+                repository_root: &repository,
+                provider_root: &provider,
+                hydration_confirmation: HydrationConfirmationV2::Confirmed,
+            },
+            &repository,
+            &provider,
+            scan,
+        );
+
+        assert!(!result.scan_complete);
+        assert_eq!(result.remaining, 0);
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].logical_locator, "offline.pdf");
+        assert_eq!(
+            result.items[0].error.as_ref().unwrap().code(),
+            "asset_not_hydrated"
+        );
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].code, "scan_time_limit");
+        assert!(
+            fs::read_dir(repository.join("assets/registry"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+}

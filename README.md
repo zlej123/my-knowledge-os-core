@@ -26,7 +26,13 @@ mko setup
 전에는 아무것도 만들지 않습니다. 기본 KB는 `~/My-Knowledge-OS`이고 Git 저장소는 Google
 Drive 바깥에 둡니다. 다른 위치는 `mko setup --repo <path>`로 선택할 수 있습니다.
 
-성공하면 출력된 Personal Inbox에 PDF를 복사한 뒤 등록합니다.
+성공하면 출력된 Personal Inbox에 PDF를 복사한 뒤, 폴더 전체를 한 번에 등록할 수 있습니다.
+
+```bash
+mko add --inbox
+```
+
+한 파일만 선택해 등록할 수도 있습니다.
 
 ```bash
 mko add "/Google Drive/.../My-Knowledge-OS-Assets/personal/inbox/paper.pdf"
@@ -93,6 +99,7 @@ mko review <stable-id>
 에이전트는 사람용 출력 대신 엄격한 JSON v2 envelope를 사용합니다.
 
 ```bash
+mko add --inbox --format json-v2
 mko add <inbox-pdf> --format json-v2
 mko source prepare --asset-id <asset-id> --format json-v2
 mko source write-draft --bundle <bundle> --response <source-response.json> --format json-v2

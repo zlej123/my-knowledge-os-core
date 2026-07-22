@@ -93,7 +93,7 @@
         "next_action": { "enum": ["display", "regenerate", "diagnose"] }
       }
     },
-    "add_data": {
+    "add_single_data": {
       "type": "object",
       "additionalProperties": false,
       "required": ["asset_id", "outcome", "registry_path", "logical_locator"],
@@ -106,6 +106,87 @@
         "registry_path": { "type": "string", "minLength": 1, "maxLength": 32768 },
         "logical_locator": { "type": "string", "minLength": 1, "maxLength": 32768 }
       }
+    },
+    "add_batch_item_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "next_action"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "next_action": { "$ref": "#/$defs/next_action" }
+      }
+    },
+    "add_batch_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logical_locator", "asset_id", "outcome", "error"],
+      "properties": {
+        "logical_locator": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "asset_id": {
+          "anyOf": [
+            { "type": "string", "pattern": "^personal-asset-[0-9a-f]{64}$" },
+            { "type": "null" }
+          ]
+        },
+        "outcome": {
+          "anyOf": [{ "enum": ["created", "existing"] }, { "type": "null" }]
+        },
+        "error": {
+          "anyOf": [{ "$ref": "#/$defs/add_batch_item_error" }, { "type": "null" }]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "asset_id": { "type": "string" },
+            "outcome": { "type": "string" },
+            "error": { "type": "null" }
+          }
+        },
+        {
+          "properties": {
+            "asset_id": { "type": "null" },
+            "outcome": { "type": "null" },
+            "error": { "type": "object" }
+          }
+        }
+      ]
+    },
+    "add_batch_warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "logical_locator"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "logical_locator": { "type": ["string", "null"], "maxLength": 32768 }
+      }
+    },
+    "add_batch_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "scan_complete", "remaining", "warnings"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 20,
+          "items": { "$ref": "#/$defs/add_batch_item" }
+        },
+        "scan_complete": { "type": "boolean" },
+        "remaining": { "type": "integer", "minimum": 0 },
+        "warnings": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/add_batch_warning" }
+        }
+      }
+    },
+    "add_data": {
+      "oneOf": [
+        { "$ref": "#/$defs/add_single_data" },
+        { "$ref": "#/$defs/add_batch_data" }
+      ]
     },
     "source_prepare_data": {
       "type": "object",

@@ -163,11 +163,56 @@ pub enum AddOutcomeV2 {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct AddDataV2 {
+pub struct AddSingleDataV2 {
     pub asset_id: String,
     pub outcome: AddOutcomeV2,
     pub registry_path: String,
     pub logical_locator: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddBatchItemErrorV2 {
+    pub code: String,
+    pub message: String,
+    pub next_action: NextActionV2,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddBatchItemV2 {
+    pub logical_locator: String,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub asset_id: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub outcome: Option<AddOutcomeV2>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub error: Option<AddBatchItemErrorV2>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddBatchWarningV2 {
+    pub code: String,
+    pub message: String,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub logical_locator: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddBatchDataV2 {
+    pub items: Vec<AddBatchItemV2>,
+    pub scan_complete: bool,
+    pub remaining: u64,
+    pub warnings: Vec<AddBatchWarningV2>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum AddDataV2 {
+    Single(AddSingleDataV2),
+    Batch(AddBatchDataV2),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

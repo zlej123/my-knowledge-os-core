@@ -211,7 +211,7 @@ pub(crate) struct ProviderMetadataWalk {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ProviderCatalogEntry {
+pub enum ProviderCatalogEntry {
     Placeholder {
         provider_locator: String,
         relative_path: PathBuf,
@@ -220,13 +220,27 @@ pub(crate) enum ProviderCatalogEntry {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ProviderCatalogScan {
+pub struct ProviderCatalogScan {
     pub scan_complete: bool,
     pub mutation_safe: bool,
     pub entries: Vec<ProviderCatalogEntry>,
     pub warnings: Vec<ProviderScanWarning>,
     pub entries_seen: u64,
     pub total_pdf_bytes: u64,
+}
+
+/// Scans the provider into a deterministic metadata-first catalog without
+/// treating one unreadable candidate as a fatal error for every other item.
+///
+/// Consumers must still re-open and revalidate a readable entry before any
+/// mutation. The catalog's fingerprint is discovery evidence, not an authority
+/// to bypass the registration transaction.
+pub fn scan_provider_catalog(
+    request: ProviderScanRequest,
+    elapsed_clock: &dyn ElapsedClock,
+) -> Result<ProviderCatalogScan, MkoError> {
+    let deadline = ScanDeadline::start(elapsed_clock, request.limits);
+    scan_provider_catalog_metadata_first_with_deadline(request, &deadline)
 }
 
 pub(crate) fn scan_provider_catalog_metadata_first_with_deadline(

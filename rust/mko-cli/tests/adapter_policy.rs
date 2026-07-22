@@ -867,24 +867,26 @@ fn knowledge_os_forward_test_is_sequential_and_covers_verified_backup_retry() {
 }
 
 #[test]
-fn knowledge_os_skill_does_not_fall_back_to_the_legacy_batch_contract() {
+fn knowledge_os_skill_uses_the_bounded_v2_batch_contract() {
     let text = std::fs::read_to_string(knowledge_os_skill_path()).unwrap();
     let commands = executable_surfaces(&text);
 
     assert!(
-        !commands.contains("mko add --inbox"),
-        "v0.3 Skill must not escape into the legacy JSON-v1 batch"
+        commands.contains("mko add --inbox --format json-v2"),
+        "v0.3 Skill must use Core-owned bounded Inbox discovery"
     );
+    assert!(!text.contains("mko add --inbox --format json-v1"));
     for required in [
-        "currently registers one selected PDF at a time",
-        "Do not invoke the legacy",
-        "Do not list the provider yourself",
-        "select the first PDF",
-        "bounded json-v2 batch command",
+        "Deduplicate successful items by Core-returned `asset_id`",
+        "typed `next_action`",
+        "`scan_complete` and `remaining` independently",
+        "never claim that the",
+        "pending human review",
+        "Do not list",
     ] {
         assert!(
             text.contains(required),
-            "missing batch resumption rule: {required}"
+            "missing bounded batch rule: {required}"
         );
     }
     assert!(!commands.contains("--format json-v1"));

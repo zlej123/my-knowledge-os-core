@@ -93,3 +93,61 @@ fn add_rejects_an_outside_pdf_with_a_typed_recovery() {
             .is_none()
     );
 }
+
+#[test]
+#[allow(deprecated)]
+fn add_inbox_returns_partial_success_without_hiding_blocked_items() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    let provider = root.path().join("Personal Inbox");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    fs::create_dir_all(provider.join("papers")).unwrap();
+    fs::write(provider.join("papers/a.pdf"), b"%PDF-1.7\nfirst").unwrap();
+    fs::write(provider.join("papers/b.pdf"), b"not a pdf").unwrap();
+
+    let output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["add", "--inbox", "--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output: serde_json::Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(output["command"], "add");
+    assert_eq!(output["data"]["scan_complete"], true);
+    assert_eq!(output["data"]["remaining"], 0);
+    assert_eq!(output["data"]["items"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        output["data"]["items"][0]["logical_locator"],
+        "papers/a.pdf"
+    );
+    assert_eq!(output["data"]["items"][0]["outcome"], "created");
+    assert!(output["data"]["items"][0]["error"].is_null());
+    assert_eq!(
+        output["data"]["items"][1]["logical_locator"],
+        "papers/b.pdf"
+    );
+    assert!(output["data"]["items"][1]["asset_id"].is_null());
+    assert_eq!(output["data"]["items"][1]["error"]["code"], "invalid_pdf");
+
+    let second = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["add", "--inbox", "--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let second: serde_json::Value = serde_json::from_slice(&second).unwrap();
+    assert_eq!(second["data"]["items"][0]["outcome"], "existing");
+    assert_eq!(
+        second["data"]["items"][0]["asset_id"],
+        output["data"]["items"][0]["asset_id"]
+    );
+}

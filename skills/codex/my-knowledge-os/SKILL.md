@@ -36,9 +36,19 @@ Questions or explanations such as `이 PDF에 어떤 공식이 있어?` do not a
 write. Knowledge mutation requires an explicit original request or the user's yes to the exact
 post-summary question below.
 
-The v0.3 machine contract currently registers one selected PDF at a time. Do not invoke the legacy
-JSON-v1 batch registration. Do not list the provider yourself. For `Inbox 정리해줘`, ask the user to
-select the first PDF; a bounded json-v2 batch command will replace this temporary limitation.
+For `Inbox 정리해줘`, let Core discover and register one bounded deterministic batch. Do not list
+the provider yourself and do not copy a document-derived locator into shell syntax:
+
+```bash
+mko add --inbox --format json-v2
+```
+
+The result is partial-success data. Deduplicate successful items by Core-returned `asset_id`, then
+continue each unique Asset through the selected-PDF workflow starting at step 2. Report item errors
+using only their typed `next_action`; do not perform recovery automatically. Preserve
+`scan_complete` and `remaining` independently. If `scan_complete` is false, never claim that the
+Inbox is fully processed, even when `remaining` is zero. Stop every completed item at pending human
+review and summarize created, existing, blocked, and remaining counts.
 
 ## Selected PDF workflow
 

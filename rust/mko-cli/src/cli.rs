@@ -9,7 +9,7 @@ use mko_core::{
     approve::{ApproveSourceRequest, approve_source},
     asset_v2::{
         AssetRegistrationOutcomeV2, HydrationConfirmationV2, RegisterAssetRequestV2,
-        register_pdf_asset_v2,
+        RegisterInboxAssetsRequestV2, register_inbox_pdf_assets_v2, register_pdf_asset_v2,
     },
     check::{CheckReport, CheckRequest, check_repository},
     clock::SystemClock,
@@ -30,7 +30,10 @@ use mko_core::{
         KnowledgeWriteData, KnowledgeWriteOutcome, NextAction, PrepareData, Recovery,
         SuccessResult, UserState, WriteDraftData,
     },
-    json_v2::{AddDataV2, AddOutcomeV2, JsonV2Command, JsonV2Success},
+    json_v2::{
+        AddBatchDataV2, AddBatchItemErrorV2, AddBatchItemV2, AddBatchWarningV2, AddDataV2,
+        AddOutcomeV2, AddSingleDataV2, JsonV2Command, JsonV2Success,
+    },
     knowledge::{
         ConceptKind, ConceptMatch, KnowledgeSearchQuery, WriteKnowledgeRequest, approve_knowledge,
         list_knowledge, list_unreviewed_knowledge, search_knowledge, write_knowledge_note,
@@ -58,7 +61,7 @@ use crate::{
     batch_add_data,
     output::{
         emit_encoded_json, emit_json_v1, emit_json_v1_failure, emit_json_v2_failure,
-        emit_json_value, emit_legacy_json_error,
+        emit_json_value, emit_legacy_json_error, json_v2_next_action,
     },
 };
 
@@ -814,10 +817,96 @@ fn add(arguments: AddArgs) -> Result<(), MkoError> {
 
 fn add_v2(arguments: AddArgs, context: &ResolvedPersonalContext) -> Result<(), MkoError> {
     if arguments.inbox {
-        return Err(MkoError::new(
-            "inbox_batch_not_implemented",
-            "v0.3 batch registration is not available yet; pass one PDF path",
-        ));
+        let result = register_inbox_pdf_assets_v2(
+            RegisterInboxAssetsRequestV2 {
+                repository_root: &context.repository_root,
+                provider_root: &context.provider_root,
+                hydration_confirmation: if arguments.confirm_download {
+                    HydrationConfirmationV2::Confirmed
+                } else {
+                    HydrationConfirmationV2::NotConfirmed
+                },
+            },
+            &MonotonicElapsedClock::start(),
+        )?;
+        let items = result
+            .items
+            .into_iter()
+            .map(|item| {
+                let (asset_id, outcome) = match item.registration {
+                    Some(registration) => (
+                        Some(registration.asset.id),
+                        Some(match registration.outcome {
+                            AssetRegistrationOutcomeV2::Created => AddOutcomeV2::Created,
+                            AssetRegistrationOutcomeV2::Existing => AddOutcomeV2::Existing,
+                        }),
+                    ),
+                    None => (None, None),
+                };
+                let error = item.error.map(|error| AddBatchItemErrorV2 {
+                    code: error.code().into(),
+                    message: error.message().into(),
+                    next_action: json_v2_next_action(error.code()),
+                });
+                AddBatchItemV2 {
+                    logical_locator: item.logical_locator,
+                    asset_id,
+                    outcome,
+                    error,
+                }
+            })
+            .collect::<Vec<_>>();
+        let warnings = result
+            .warnings
+            .into_iter()
+            .map(|warning| AddBatchWarningV2 {
+                code: warning.code,
+                message: warning.message,
+                logical_locator: warning.provider_locator,
+            })
+            .collect::<Vec<_>>();
+        let batch = AddBatchDataV2 {
+            items,
+            scan_complete: result.scan_complete,
+            remaining: result.remaining,
+            warnings,
+        };
+        return match arguments.format {
+            OutputFormat::JsonV2 => {
+                crate::output::emit_json_v2(JsonV2Success::add(AddDataV2::Batch(batch)))
+            }
+            OutputFormat::Human => {
+                let created = batch
+                    .items
+                    .iter()
+                    .filter(|item| item.outcome == Some(AddOutcomeV2::Created))
+                    .count();
+                let existing = batch
+                    .items
+                    .iter()
+                    .filter(|item| item.outcome == Some(AddOutcomeV2::Existing))
+                    .count();
+                let blocked = batch
+                    .items
+                    .iter()
+                    .filter(|item| item.error.is_some())
+                    .count();
+                println!("새 등록 {created} · 기존 {existing} · 확인 필요 {blocked}");
+                if !batch.scan_complete || batch.remaining > 0 {
+                    println!("검색 미완료 · 다음 실행 대기 {}개 이상", batch.remaining);
+                }
+                for item in &batch.items {
+                    if let Some(error) = &item.error {
+                        println!("- {}: {}", item.logical_locator, error.message);
+                    }
+                }
+                Ok(())
+            }
+            OutputFormat::JsonV1 => Err(MkoError::new(
+                "format_unsupported",
+                "a v0.3 KB requires json-v2 output",
+            )),
+        };
     }
     if arguments.temporary_source || arguments.verified_backup {
         return Err(MkoError::new(
@@ -850,15 +939,17 @@ fn add_v2(arguments: AddArgs, context: &ResolvedPersonalContext) -> Result<(), M
             println!("다음: 이 PDF를 요약해 달라고 요청하세요.");
             Ok(())
         }
-        OutputFormat::JsonV2 => crate::output::emit_json_v2(JsonV2Success::add(AddDataV2 {
-            asset_id: result.asset.id,
-            outcome: match result.outcome {
-                AssetRegistrationOutcomeV2::Created => AddOutcomeV2::Created,
-                AssetRegistrationOutcomeV2::Existing => AddOutcomeV2::Existing,
-            },
-            registry_path: result.registry_path.display().to_string(),
-            logical_locator,
-        })),
+        OutputFormat::JsonV2 => {
+            crate::output::emit_json_v2(JsonV2Success::add(AddDataV2::Single(AddSingleDataV2 {
+                asset_id: result.asset.id,
+                outcome: match result.outcome {
+                    AssetRegistrationOutcomeV2::Created => AddOutcomeV2::Created,
+                    AssetRegistrationOutcomeV2::Existing => AddOutcomeV2::Existing,
+                },
+                registry_path: result.registry_path.display().to_string(),
+                logical_locator,
+            })))
+        }
         OutputFormat::JsonV1 => Err(MkoError::new(
             "format_unsupported",
             "a v0.3 KB requires json-v2 output",

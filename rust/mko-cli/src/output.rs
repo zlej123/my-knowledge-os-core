@@ -64,7 +64,7 @@ pub fn emit_json_v2_failure(command: JsonV2Command, error: &MkoError) -> Result<
     emit_encoded_json(&encoded)
 }
 
-fn json_v2_next_action(code: &str) -> NextActionV2 {
+pub(crate) fn json_v2_next_action(code: &str) -> NextActionV2 {
     match code {
         "kb_config_unreadable" | "kb_schema_unsupported" | "context_not_found" => {
             NextActionV2::Configure
