@@ -33,6 +33,7 @@ const MAX_KNOWLEDGE_SLUG_BYTES: usize = 96;
 const MAX_KNOWLEDGE_ENTRIES: usize = 1024;
 const MAX_KNOWLEDGE_SCAN_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_KNOWLEDGE_SCAN_ELAPSED_MS: u64 = 5_000;
+const KNOWLEDGE_READ_CHUNK_BYTES: usize = 64 * 1024;
 const DEFAULT_KNOWLEDGE_SCAN_LIMITS: ScanLimits = ScanLimits {
     max_entries: MAX_KNOWLEDGE_ENTRIES as u64,
     max_total_bytes: MAX_KNOWLEDGE_SCAN_BYTES,
@@ -262,6 +263,10 @@ pub trait KnowledgeScanObserver {
     }
 
     fn after_entry_metadata(&mut self, _filename: &Path) -> Result<(), MkoError> {
+        Ok(())
+    }
+
+    fn after_read_chunk(&mut self, _bytes_read: usize) -> Result<(), MkoError> {
         Ok(())
     }
 }
@@ -981,13 +986,29 @@ fn read_knowledge_snapshot_for_scan(
     observer.after_entry_metadata(filename)?;
     deadline.check()?;
     let mut bytes = Vec::new();
-    Read::by_ref(&mut file)
-        .take(max_bytes.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|error| MkoError::new("knowledge_unreadable", error.to_string()))?;
-    deadline.check()?;
-    if bytes.len() as u64 > max_bytes {
-        return Err(knowledge_scan_error());
+    let mut chunk = [0u8; KNOWLEDGE_READ_CHUNK_BYTES];
+    loop {
+        deadline.check()?;
+        let remaining_with_sentinel = max_bytes
+            .saturating_add(1)
+            .saturating_sub(bytes.len() as u64);
+        if remaining_with_sentinel == 0 {
+            return Err(knowledge_scan_error());
+        }
+        let chunk_limit = remaining_with_sentinel.min(chunk.len() as u64) as usize;
+        let bytes_read = Read::read(&mut file, &mut chunk[..chunk_limit])
+            .map_err(|error| MkoError::new("knowledge_unreadable", error.to_string()))?;
+        if bytes_read > 0 {
+            observer.after_read_chunk(bytes_read)?;
+        }
+        deadline.check()?;
+        if bytes_read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..bytes_read]);
+        if bytes.len() as u64 > max_bytes {
+            return Err(knowledge_scan_error());
+        }
     }
     Ok(bytes)
 }

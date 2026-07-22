@@ -64,3 +64,34 @@ passed
 - The symlink-entry race runs on Unix; the JSON interactive protocol test uses macOS `script`.
   Native Windows no-follow/reparse behavior and an interactive Windows console remain release
   gates.
+
+## Important review fix: deadline checks during entry reads
+
+The retained-file scan no longer performs one potentially long `read_to_end` between deadline
+checks. It reads at most 64 KiB per operation, checks the shared scan deadline immediately before
+and after each read, and preserves the existing total-byte sentinel so file growth still fails
+closed.
+
+The deterministic regression advances a manual elapsed clock after the first chunk. Before the
+production change, its test-first run failed with E0407 because the monolithic scanner had no
+per-chunk observation point. After the bounded loop was added, the scan stops with
+`scan_time_limit` after exactly one chunk.
+
+Fresh follow-up verification:
+
+```text
+scripts/fmt.sh --check
+passed
+
+cargo test -p mko-core --test knowledge
+41 passed; 0 failed
+
+cargo test -p mko-cli --test knowledge_cli
+9 passed; 0 failed
+
+cargo clippy -p mko-core --test knowledge -- -D warnings
+passed
+
+cargo clippy -p mko-cli --test knowledge_cli -- -D warnings
+passed
+```

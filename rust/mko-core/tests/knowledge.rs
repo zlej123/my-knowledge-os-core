@@ -240,6 +240,27 @@ impl ElapsedClock for IncrementingElapsedClock {
     }
 }
 
+struct ManualElapsedClock(Arc<AtomicU64>);
+
+impl ElapsedClock for ManualElapsedClock {
+    fn elapsed_ms(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+struct ExpireAfterFirstReadChunk {
+    elapsed_ms: Arc<AtomicU64>,
+    chunks_read: Arc<AtomicU64>,
+}
+
+impl KnowledgeScanObserver for ExpireAfterFirstReadChunk {
+    fn after_read_chunk(&mut self, _bytes_read: usize) -> Result<(), mko_core::error::MkoError> {
+        self.chunks_read.fetch_add(1, Ordering::Relaxed);
+        self.elapsed_ms.store(5, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
 fn knowledge_scan_limits(max_total_bytes: u64, max_elapsed_ms: u64) -> ScanLimits {
     ScanLimits {
         max_entries: 16,
@@ -845,6 +866,46 @@ fn knowledge_scan_has_one_elapsed_deadline() {
     .unwrap_err();
 
     assert_eq!(error.code(), "scan_time_limit");
+}
+
+#[test]
+fn knowledge_scan_checks_the_deadline_between_entry_read_chunks() {
+    let kb = knowledge_fixture();
+    let response = serde_json::json!({
+        "synthesis": "s".repeat(40 * 1024),
+        "concepts": [{
+            "name": "Large concept",
+            "kind": "concept",
+            "body": "b".repeat(40 * 1024),
+            "tags": [],
+            "locator": null
+        }]
+    })
+    .to_string();
+    kb.write(kb.asset_id(), response.as_bytes(), false).unwrap();
+    let elapsed_ms = Arc::new(AtomicU64::new(0));
+    let chunks_read = Arc::new(AtomicU64::new(0));
+    let clock = ManualElapsedClock(elapsed_ms.clone());
+    let mut observer = ExpireAfterFirstReadChunk {
+        elapsed_ms,
+        chunks_read: chunks_read.clone(),
+    };
+
+    let error = search_knowledge_with_scan(
+        kb.repo(),
+        &KnowledgeSearchQuery {
+            term: String::new(),
+            kind: None,
+            tag: None,
+        },
+        knowledge_scan_limits(1024 * 1024, 5),
+        &clock,
+        &mut observer,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "scan_time_limit");
+    assert_eq!(chunks_read.load(Ordering::Relaxed), 1);
 }
 
 #[cfg(unix)]
