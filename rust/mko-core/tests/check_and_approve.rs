@@ -628,6 +628,26 @@ fn asset_deleted_before_cas_entry_validation_maps_to_asset_changed() {
     .unwrap_err();
 
     assert_eq!(error.code(), "asset_changed_during_approval");
+    assert!(
+        error.message().contains("Source was durably approved"),
+        "the error must disclose the partial commit: {}",
+        error.message()
+    );
+    assert!(
+        error.message().contains("mko check"),
+        "the error must direct the user to inspect durable state: {}",
+        error.message()
+    );
+    assert!(
+        error.message().contains("repair") && error.message().contains("before retrying approval"),
+        "the error must require state-aware repair before retry: {}",
+        error.message()
+    );
+    assert!(
+        !error.message().contains("nothing was published"),
+        "the error must not deny an already durable Source publication: {}",
+        error.message()
+    );
     assert!(!asset_path.exists());
     assert_eq!(
         parse_markdown::<SourceRecord>(&fs::read_to_string(&env.source_path).unwrap())

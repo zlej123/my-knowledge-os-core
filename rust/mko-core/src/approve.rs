@@ -377,7 +377,9 @@ pub(crate) fn publish_approved_source_under_lock(
             }
         },
     )
-    .map_err(map_asset_publication_error)?;
+    .map_err(|error| {
+        map_asset_publication_error(error, &request.repository_root, &request.asset.id)
+    })?;
     Ok(ApproveSourceResult {
         source_id,
         revision,
@@ -463,9 +465,13 @@ fn map_source_publication_error(error: MkoError) -> MkoError {
     }
 }
 
-fn map_asset_publication_error(error: MkoError) -> MkoError {
-    if is_cas_entry_change(&error) {
-        asset_changed_error()
+fn map_asset_publication_error(
+    error: MkoError,
+    repository_root: &Path,
+    asset_id: &str,
+) -> MkoError {
+    if is_cas_entry_change(&error) || error.code() == "asset_changed_during_approval" {
+        asset_changed_after_source_publication_error(repository_root, asset_id)
     } else {
         error
     }
@@ -482,6 +488,19 @@ fn asset_changed_error() -> MkoError {
     MkoError::new(
         "asset_changed_during_approval",
         "Asset changed after it was presented for approval; nothing was published",
+    )
+}
+
+fn asset_changed_after_source_publication_error(
+    repository_root: &Path,
+    asset_id: &str,
+) -> MkoError {
+    MkoError::new(
+        "asset_changed_during_approval",
+        format!(
+            "Source was durably approved, but Asset {asset_id} changed before its transition to processed. Run `mko check --repo \"{}\"` to inspect the durable Source/Asset state, then complete the reported repair before retrying approval",
+            repository_root.display()
+        ),
     )
 }
 
