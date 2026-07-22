@@ -428,6 +428,24 @@ fn write_is_idempotent_for_identical_content() {
 }
 
 #[test]
+fn write_rejects_noncanonical_existing_generation_before_returning_existing() {
+    let kb = knowledge_fixture();
+    let written = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let path = kb.repo().join(&written.knowledge_path);
+    let corrupted = fs::read_to_string(&path).unwrap().replace(
+        "processor_version: knowledge-v1",
+        "processor_version: future-v9",
+    );
+    fs::write(&path, corrupted).unwrap();
+
+    let error = kb
+        .write(kb.asset_id(), VALID.as_bytes(), false)
+        .unwrap_err();
+
+    assert_eq!(error.code(), "knowledge_invalid");
+}
+
+#[test]
 fn regenerating_requires_replace_and_resets_to_unreviewed_keeping_prior_approved_revision() {
     let kb = knowledge_fixture();
     let original = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
@@ -550,6 +568,27 @@ fn approve_marks_reviewed_and_records_approved_revision() {
     assert!(doc.contains("status: reviewed"));
     assert!(doc.contains(&format!("approved_revision: {}", w.content_revision)));
     assert!(doc.contains("reviewed_at:") && !doc.contains("reviewed_at: null"));
+}
+
+#[test]
+fn approve_rejects_noncanonical_existing_schema_before_reviewing() {
+    let kb = knowledge_fixture();
+    let written = kb.write(kb.asset_id(), VALID.as_bytes(), false).unwrap();
+    let path = kb.repo().join(&written.knowledge_path);
+    let corrupted = fs::read_to_string(&path)
+        .unwrap()
+        .replace("schema_version: 1", "schema_version: 2");
+    fs::write(&path, corrupted).unwrap();
+
+    let error =
+        approve_knowledge(kb.repo(), &written.knowledge_id, &written.content_revision).unwrap_err();
+
+    assert_eq!(error.code(), "knowledge_invalid");
+    assert!(
+        fs::read_to_string(path)
+            .unwrap()
+            .contains("status: unreviewed")
+    );
 }
 
 #[test]

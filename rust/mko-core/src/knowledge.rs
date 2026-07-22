@@ -341,6 +341,9 @@ pub fn write_knowledge_note_with_clocks_and_observer(
         })
         .transpose()?
         .flatten();
+    if let Some(document) = &existing {
+        validate_canonical_knowledge_document(&repository_root, document, &asset)?;
+    }
     let approved_revision = existing
         .as_ref()
         .and_then(|document| document.record.approved_revision.clone());
@@ -1216,6 +1219,27 @@ fn validate_document_revision(
     Ok(())
 }
 
+fn validate_canonical_knowledge_document(
+    repository_root: &Path,
+    document: &KnowledgeDocument,
+    asset: &AssetRecord,
+) -> Result<(), MkoError> {
+    let path = repository_relative(repository_root, &document.path)?;
+    let issue = validate_knowledge_record(&path, &document.record, &document.body)
+        .into_iter()
+        .filter(|issue| issue.code != "revision_mismatch")
+        .chain(validate_knowledge_asset_contract(
+            &path,
+            &document.record,
+            asset,
+        ))
+        .next();
+    if let Some(issue) = issue {
+        return Err(MkoError::new(issue.code, issue.message));
+    }
+    Ok(())
+}
+
 fn validate_expected_knowledge_snapshot(
     directory: &Dir,
     filename: &Path,
@@ -1424,6 +1448,13 @@ pub fn approve_knowledge_with_clocks_and_observer(
     let mut document =
         find_knowledge_in_directory_with_deadline(&knowledge, knowledge_id, &scan_deadline)?
             .ok_or_else(|| MkoError::new("knowledge_not_found", "no knowledge note has this ID"))?;
+    let asset = read_asset(&repository_root, &document.record.asset_id).map_err(|_| {
+        MkoError::new(
+            "knowledge_invalid",
+            "knowledge note does not refer to a canonical Asset Registry record",
+        )
+    })?;
+    validate_canonical_knowledge_document(&repository_root, &document, &asset)?;
     validate_document_revision(&document, content_revision)?;
     document.record.review.status = ReviewState::Reviewed;
     document.record.review.reviewed_at = Some(clock.now_utc());
