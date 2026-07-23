@@ -155,6 +155,7 @@ pub(crate) struct ProviderMetadataEntry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProviderHydrationDisposition {
     Placeholder,
+    #[cfg_attr(not(any(target_os = "macos", windows, test)), allow(dead_code))]
     Supported,
     #[cfg_attr(any(target_os = "macos", windows), allow(dead_code))]
     Unsupported,
