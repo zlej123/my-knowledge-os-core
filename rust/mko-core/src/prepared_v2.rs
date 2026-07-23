@@ -1271,8 +1271,8 @@ fn ensure_private_std_file_permissions(_file: &fs::File) -> Result<(), MkoError>
 #[cfg(unix)]
 fn sync_cap_directory(directory: &Dir) -> Result<(), MkoError> {
     directory
-        .try_clone()
-        .and_then(|directory| directory.into_std_file().sync_all())
+        .open(".")
+        .and_then(|file| file.sync_all())
         .map_err(|error| MkoError::new("local_runtime_write_failed", error.to_string()))
 }
 
