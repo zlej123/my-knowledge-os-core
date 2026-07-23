@@ -500,7 +500,7 @@ fn system_provider_metadata_walk_excludes_hidden_and_temporary_entries() {
 #[test]
 fn unsupported_hydration_detection_is_explicit_and_nonblocking() {
     let mut fixture = Fixture::new();
-    fixture.configure();
+    fixture.make_healthy();
     fs::write(fixture.provider.join("visible.pdf"), b"visible").unwrap();
     fixture.provider_entries =
         SystemDoctorEnvironment::default().inspect_provider_entries(&fixture.provider);
