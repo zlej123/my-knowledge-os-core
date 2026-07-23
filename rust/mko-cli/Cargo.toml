@@ -22,3 +22,6 @@ jsonschema.workspace = true
 lopdf = "=0.42.0"
 predicates.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+mko-windows-acl = { path = "../mko-windows-acl" }

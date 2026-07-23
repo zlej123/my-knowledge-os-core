@@ -1,9 +1,9 @@
 use std::{
     fs,
-    path::PathBuf,
-    process::Command as ProcessCommand,
     sync::atomic::{AtomicU64, Ordering},
 };
+#[cfg(target_os = "macos")]
+use std::{path::PathBuf, process::Command as ProcessCommand};
 
 use assert_cmd::Command;
 
@@ -186,6 +186,7 @@ impl Drop for SetupEnv {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn knowledge_config() -> &'static str {
     "system: my-knowledge-os\nscope: personal\ncore_version: 0.1.0\nschema_version: 1\nprovider:\n  name: personal_google_drive\n  type: google-drive-stream\n  root_env: MKO_PERSONAL_PROVIDER_ROOT\n"
 }

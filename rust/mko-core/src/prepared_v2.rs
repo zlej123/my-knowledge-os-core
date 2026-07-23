@@ -1268,11 +1268,25 @@ fn ensure_private_std_file_permissions(_file: &fs::File) -> Result<(), MkoError>
     ))
 }
 
+#[cfg(unix)]
 fn sync_cap_directory(directory: &Dir) -> Result<(), MkoError> {
     directory
         .try_clone()
         .and_then(|directory| directory.into_std_file().sync_all())
         .map_err(|error| MkoError::new("local_runtime_write_failed", error.to_string()))
+}
+
+#[cfg(windows)]
+fn sync_cap_directory(_directory: &Dir) -> Result<(), MkoError> {
+    // Windows has no supported POSIX-equivalent parent-directory fsync in this safe API layer.
+    // Session file content is flushed before linking the published entry, but parent-entry crash
+    // durability is not claimed. This matches the shared capability publisher's platform contract.
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn sync_cap_directory(_directory: &Dir) -> Result<(), MkoError> {
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]

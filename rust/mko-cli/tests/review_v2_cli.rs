@@ -10,17 +10,21 @@ use assert_cmd::Command;
 use chrono::{DateTime, Utc};
 use mko_core::{
     clock::Clock,
-    config_v2::DomainPolicyV2,
-    model_v2::ReviewTargetTypeV2,
     model_v2::{KnowledgeResponseV2, PreparedContentV2, SourceResponseV2},
-    queue_v2::{RenderedReviewCardV2, derive_queue_v2, show_review_card_v2},
+    queue_v2::{derive_queue_v2, show_review_card_v2},
     records_v2::{
         AssetRecordV2, WriteKnowledgeRecordRequestV2, WriteSourceRecordRequestV2,
         write_knowledge_record_v2, write_source_record_v2,
     },
-    review_v2::{ReviewDerivedStateV2, derive_review_state_v2},
     revision_v2::{canonical_json_bytes, canonical_json_sha256},
     scaffold_v2::scaffold_personal_kb_v2,
+};
+#[cfg(target_os = "macos")]
+use mko_core::{
+    config_v2::DomainPolicyV2,
+    model_v2::ReviewTargetTypeV2,
+    queue_v2::RenderedReviewCardV2,
+    review_v2::{ReviewDerivedStateV2, derive_review_state_v2},
 };
 use tempfile::tempdir;
 
@@ -36,6 +40,7 @@ impl Clock for FixedClock {
 struct Environment {
     root: tempfile::TempDir,
     source_id: String,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     knowledge_id: String,
 }
 

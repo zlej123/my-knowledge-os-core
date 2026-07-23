@@ -78,10 +78,18 @@ fn machine_setup_apply_displays_exact_effects_but_non_tty_cannot_mutate() {
     assert_eq!(failure["command"], "setup.apply");
     assert_eq!(failure["error"]["code"], "setup_tty_required");
     let display = String::from_utf8_lossy(&output.stderr);
+    let repository = fs::canonicalize(fixture.repository.parent().unwrap())
+        .unwrap()
+        .join(fixture.repository.file_name().unwrap());
+    let drive = fs::canonicalize(&fixture.drive).unwrap();
+    let provider = drive.join("My-Knowledge-OS-Assets/personal/inbox");
+    let repository = serde_json::to_string(repository.to_str().unwrap()).unwrap();
+    let drive = serde_json::to_string(drive.to_str().unwrap()).unwrap();
+    let provider = serde_json::to_string(provider.to_str().unwrap()).unwrap();
     assert!(display.contains("# My Knowledge OS setup approval"));
-    assert!(display.contains(fixture.repository.to_str().unwrap()));
-    assert!(display.contains(fixture.drive.to_str().unwrap()));
-    assert!(display.contains("My-Knowledge-OS-Assets/personal/inbox"));
+    assert!(display.contains(&repository));
+    assert!(display.contains(&drive));
+    assert!(display.contains(&provider));
     assert!(display.contains("profiles.yaml"));
     assert!(display.contains("Approval effect digest: sha256:"));
     fixture.assert_targets_unchanged();

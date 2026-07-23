@@ -189,16 +189,15 @@ fn rejects_non_pdf_content_with_a_pdf_suffix() {
     assert!(env.registry_files().is_empty());
 }
 
+#[cfg(unix)]
 #[test]
 fn symlinked_files_cannot_escape_provider_root() {
     let env = TestEnv::new();
     let outside = env.write_outside_file("paper.pdf", b"%PDF-fixture");
     let linked = env.provider.join("linked.pdf");
 
-    #[cfg(unix)]
     std::os::unix::fs::symlink(outside, &linked).unwrap();
 
-    #[cfg(unix)]
     assert_eq!(
         env.capture(&linked).unwrap_err().code(),
         "outside_allowed_root"

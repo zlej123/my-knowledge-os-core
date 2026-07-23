@@ -834,32 +834,59 @@ fn working_tree_and_staged_checks_apply_full_portability_rules() {
     let env = TestEnv::pending_source();
     fs::create_dir_all(env.repository.join("notes")).unwrap();
     fs::write(env.repository.join("notes/CON.txt"), "reserved\n").unwrap();
-    fs::write(env.repository.join("notes/trailing."), "trailing\n").unwrap();
-    fs::write(env.repository.join("notes/forbidden:name.md"), "colon\n").unwrap();
+    #[cfg(not(windows))]
+    {
+        fs::write(env.repository.join("notes/trailing."), "trailing\n").unwrap();
+        fs::write(env.repository.join("notes/forbidden:name.md"), "colon\n").unwrap();
+    }
     let long_path = format!("notes/{}/{}/long.md", "a".repeat(120), "b".repeat(120));
     fs::create_dir_all(env.repository.join(Path::new(&long_path).parent().unwrap())).unwrap();
     fs::write(env.repository.join(&long_path), "long\n").unwrap();
+    let expected_issue_count = if cfg!(windows) { 2 } else { 4 };
 
     let working = env.check();
+    let working_portability = working
+        .issues
+        .iter()
+        .filter(|issue| issue.code == "path_not_portable")
+        .collect::<Vec<_>>();
     assert!(
-        working
-            .issues
-            .iter()
-            .filter(|issue| issue.code == "path_not_portable")
-            .count()
-            >= 4
+        working_portability.len() >= expected_issue_count,
+        "working-tree portability issues: {working_portability:#?}"
     );
 
     git(&env.repository, &["init"]);
+    #[cfg(not(windows))]
     git(&env.repository, &["add", "."]);
+    #[cfg(windows)]
+    {
+        git(&env.repository, &["config", "core.protectNTFS", "false"]);
+        git(&env.repository, &["config", "core.longpaths", "true"]);
+        git(
+            &env.repository,
+            &["add", "--all", "--", ":(top)**", ":(exclude)notes/**"],
+        );
+        let blob = git_output(&env.repository, &["hash-object", "-w", "knowledge-os.yaml"]);
+        let reserved = format!("100644,{blob},notes/CON.txt");
+        let long = format!("100644,{blob},{long_path}");
+        git(
+            &env.repository,
+            &["update-index", "--add", "--cacheinfo", &reserved],
+        );
+        git(
+            &env.repository,
+            &["update-index", "--add", "--cacheinfo", &long],
+        );
+    }
     let staged = check_repository(CheckRequest::new(&env.repository).with_staged(true)).unwrap();
+    let staged_portability = staged
+        .issues
+        .iter()
+        .filter(|issue| issue.code == "path_not_portable")
+        .collect::<Vec<_>>();
     assert!(
-        staged
-            .issues
-            .iter()
-            .filter(|issue| issue.code == "path_not_portable")
-            .count()
-            >= 4
+        staged_portability.len() >= expected_issue_count,
+        "staged portability issues: {staged_portability:#?}"
     );
 }
 
@@ -1266,4 +1293,16 @@ fn git(repository: &Path, arguments: &[&str]) {
         .status()
         .unwrap();
     assert!(status.success(), "git command failed: {arguments:?}");
+}
+
+#[cfg(windows)]
+fn git_output(repository: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git command failed: {arguments:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }

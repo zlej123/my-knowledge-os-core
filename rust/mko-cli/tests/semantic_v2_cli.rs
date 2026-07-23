@@ -160,4 +160,8 @@ fn make_owner_only(path: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
     }
+    #[cfg(windows)]
+    mko_windows_acl::apply_owner_only_to_path(path, mko_windows_acl::Inheritance::None).unwrap();
+    #[cfg(not(any(unix, windows)))]
+    let _ = path;
 }

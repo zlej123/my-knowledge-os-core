@@ -783,7 +783,13 @@ fn projected_canonical_path(path: &Path) -> Result<PathBuf, MkoError> {
     let mut missing = Vec::new();
     loop {
         match fs::symlink_metadata(candidate) {
-            Ok(_) => {
+            Ok(metadata) => {
+                if !missing.is_empty() && !metadata.is_dir() {
+                    return Err(MkoError::new(
+                        "profile_path_invalid",
+                        "machine profile destination has a non-directory ancestor",
+                    ));
+                }
                 let mut projected = fs::canonicalize(candidate).map_err(|error| {
                     MkoError::new(
                         "profile_path_invalid",

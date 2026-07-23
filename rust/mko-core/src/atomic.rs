@@ -10,7 +10,7 @@ use atomic_write_file::AtomicWriteFile;
 use cap_std::fs::{Dir, OpenOptions as CapOpenOptions, OpenOptionsExt};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 use crate::error::MkoError;
 
@@ -18,7 +18,10 @@ const LOCK_WAIT: Duration = Duration::from_secs(1);
 const LOCK_RETRY: Duration = Duration::from_millis(10);
 const PUBLICATION_STALE_TTL: ChronoDuration = ChronoDuration::minutes(15);
 const PUBLICATION_SCAN_ENTRY_LIMIT: usize = 64;
+#[cfg(not(windows))]
 const PUBLICATION_SCAN_TIME_LIMIT: Duration = Duration::from_millis(100);
+#[cfg(windows)]
+const PUBLICATION_SCAN_TIME_LIMIT: Duration = LOCK_WAIT;
 const PUBLICATION_RECORD_BYTE_LIMIT: u64 = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -474,6 +477,7 @@ impl<'a> CapabilityPublicationLock<'a> {
     {
         let lock_filename = format!(".{filename}.publish.lock");
         let deadline = Instant::now() + LOCK_WAIT;
+        let mut saw_lock_contention = false;
         loop {
             if Instant::now() >= deadline {
                 return Err(publication_locked_error());
@@ -485,9 +489,15 @@ impl<'a> CapabilityPublicationLock<'a> {
                 scan_deadline,
                 &mut after_quarantine_discovery,
             ) {
-                if error.code() == "registry_locked" && Instant::now() < deadline {
-                    thread::sleep(LOCK_RETRY);
-                    continue;
+                if error.code() == "registry_locked" {
+                    saw_lock_contention = true;
+                    if Instant::now() < deadline {
+                        thread::sleep(LOCK_RETRY);
+                        continue;
+                    }
+                }
+                if error.code() == "registry_scan_limit" && saw_lock_contention {
+                    return Err(publication_locked_error());
                 }
                 return Err(error);
             }
@@ -516,9 +526,15 @@ impl<'a> CapabilityPublicationLock<'a> {
                             identity,
                             Some(&expected_contents),
                         );
-                        if error.code() == "registry_locked" && Instant::now() < deadline {
-                            thread::sleep(LOCK_RETRY);
-                            continue;
+                        if error.code() == "registry_locked" {
+                            saw_lock_contention = true;
+                            if Instant::now() < deadline {
+                                thread::sleep(LOCK_RETRY);
+                                continue;
+                            }
+                        }
+                        if error.code() == "registry_scan_limit" && saw_lock_contention {
+                            return Err(publication_locked_error());
                         }
                         return Err(error);
                     }
@@ -530,6 +546,7 @@ impl<'a> CapabilityPublicationLock<'a> {
                     });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    saw_lock_contention = true;
                     if Instant::now() >= deadline {
                         return Err(publication_locked_error());
                     }
@@ -872,6 +889,9 @@ where
     after_quarantine_discovery(&quarantines);
     for quarantine in quarantines {
         check_publication_deadline(deadline)?;
+        if publication_entry_identity_nonblocking(directory, &quarantine.filename).is_none() {
+            return Err(publication_locked_error());
+        }
         let valid = quarantine.authenticated && quarantine.record.is_some();
         if valid && !publication_record_is_stale(quarantine.record.as_ref().unwrap(), deadline)? {
             return Err(publication_locked_error());
@@ -948,9 +968,15 @@ fn publication_record_is_stale(
         return Ok(false);
     }
     check_publication_deadline(deadline)?;
-    let system = System::new_all();
+    let pid = Pid::from_u32(record.pid);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
     check_publication_deadline(deadline)?;
-    Ok(system.process(Pid::from_u32(record.pid)).is_none())
+    Ok(system.process(pid).is_none())
 }
 
 fn registry_scan_limit_error() -> MkoError {
@@ -1176,10 +1202,12 @@ mod tests {
 
     use cap_std::{ambient_authority, fs::Dir};
 
+    #[cfg(unix)]
+    use super::read_publication_record_with_hook;
     use super::{
         AtomicWriteResult, CapabilityPublicationLock, CleanupDurabilityEvent,
-        PublicationLockRecord, cleanup_capability_entry_with_observer,
-        read_publication_record_with_hook, stable_capability_identity, write_new,
+        PublicationLockRecord, cleanup_capability_entry_with_observer, stable_capability_identity,
+        write_new,
     };
 
     static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);

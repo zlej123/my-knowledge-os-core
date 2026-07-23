@@ -72,7 +72,7 @@ For a create, start, or setup request, collect setup inputs in this order, one q
 Before planning, show these as three distinct destinations:
 
 - local Personal KB directory: the working Git repository outside Google Drive;
-- Google Drive Inbox: `<drive-root>/My-Knowledge-OS-Assets/personal/inbox`;
+- Google Drive Inbox: the My-Knowledge-OS-Assets/personal/inbox directory under the Drive root;
 - GitHub remote: the private repository URL, used for manual history synchronization.
 
 Use the default local KB directory unless the user requests another path. Check the GitHub remote

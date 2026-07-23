@@ -250,7 +250,7 @@ pub(crate) fn scan_provider_catalog_metadata_first_with_deadline(
     scan_provider_catalog_metadata_first_inner(request, deadline, || {}, &mut |_| {})
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 fn scan_provider_catalog_metadata_first_with_after_walk(
     request: ProviderScanRequest,
     elapsed_clock: &dyn ElapsedClock,
@@ -260,7 +260,7 @@ fn scan_provider_catalog_metadata_first_with_after_walk(
     scan_provider_catalog_metadata_first_inner(request, &deadline, after_walk, &mut |_| {})
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 fn scan_provider_catalog_metadata_first_with_before_file_open(
     request: ProviderScanRequest,
     elapsed_clock: &dyn ElapsedClock,
@@ -905,17 +905,6 @@ fn verify_windows_file_still_current(
     Ok(())
 }
 
-#[cfg(windows)]
-fn current_hydration_disposition(
-    _: &Dir,
-    _: &str,
-    metadata: &Metadata,
-) -> Result<ProviderHydrationDisposition, String> {
-    use cap_std::fs::MetadataExt;
-
-    Ok(windows_hydration_disposition(metadata.file_attributes()))
-}
-
 #[cfg(not(windows))]
 fn current_hydration_disposition(
     directory: &Dir,
@@ -1163,25 +1152,33 @@ fn configure_nofollow(_options: &mut OpenOptions, _directory: bool) {}
 
 #[cfg(test)]
 mod metadata_walk_tests {
+    #[cfg(unix)]
+    use std::path::Path;
     use std::{
         cell::Cell,
         fs,
-        path::{Path, PathBuf},
+        path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
     };
 
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
+    #[cfg(unix)]
+    use super::ProviderCatalogEntry;
     #[cfg(not(windows))]
     use super::open_enumerated_file;
     use super::{
-        DEFAULT_SCAN_LIMITS, ElapsedClock, ProviderCatalogEntry, ProviderMetadataAccess,
-        ProviderScanRequest, ScanLimits, inspect_provider_metadata_with_observer,
-        inspect_windows_enumerated_pdf, materialize_metadata_entry,
-        scan_provider_catalog_metadata_first_with_after_walk,
+        DEFAULT_SCAN_LIMITS, ElapsedClock, ProviderMetadataAccess, ScanLimits,
+        inspect_provider_metadata_with_observer, inspect_windows_enumerated_pdf,
+        materialize_metadata_entry,
+    };
+    #[cfg(not(windows))]
+    use super::{
+        ProviderScanRequest, scan_provider_catalog_metadata_first_with_after_walk,
         scan_provider_catalog_metadata_first_with_before_file_open,
     };
+    #[cfg(unix)]
     use crate::fingerprint::fingerprint_file;
 
     struct FixedElapsedClock;
@@ -1373,6 +1370,7 @@ mod metadata_walk_tests {
         assert!(error.contains("identity changed"), "{error}");
     }
 
+    #[cfg(not(windows))]
     fn assert_identity_race_warning(scan: &super::ProviderCatalogScan) {
         assert!(!scan.scan_complete);
         assert!(!scan.mutation_safe);
@@ -1491,6 +1489,7 @@ mod metadata_walk_tests {
         assert_eq!(only_readable_fingerprint(&scan), expected);
     }
 
+    #[cfg(unix)]
     fn only_readable_fingerprint(scan: &super::ProviderCatalogScan) -> crate::model::Fingerprint {
         let [ProviderCatalogEntry::Readable(pdf)] = scan.entries.as_slice() else {
             panic!("expected exactly one readable PDF: {:?}", scan.warnings);

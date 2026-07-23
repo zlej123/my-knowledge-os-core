@@ -5,11 +5,11 @@ use std::{
     sync::{
         Arc, Barrier,
         atomic::{AtomicU64, Ordering},
-        mpsc,
     },
     thread,
-    time::Duration,
 };
+#[cfg(unix)]
+use std::{sync::mpsc, time::Duration};
 
 use chrono::{DateTime, Utc};
 use mko_core::{

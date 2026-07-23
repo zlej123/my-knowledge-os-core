@@ -829,11 +829,14 @@ mod lock_scan_tests {
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
+    #[cfg(unix)]
     use super::read_lock_asset_ids_with_after_open;
     use crate::provider_scan::{DEFAULT_SCAN_LIMITS, ElapsedClock, ScanDeadline};
 
+    #[cfg(unix)]
     struct FixedElapsedClock;
 
+    #[cfg(unix)]
     impl ElapsedClock for FixedElapsedClock {
         fn elapsed_ms(&self) -> u64 {
             0

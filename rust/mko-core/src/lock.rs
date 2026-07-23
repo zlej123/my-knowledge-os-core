@@ -12,7 +12,7 @@ use cap_std::{
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 use crate::{
     clock::{Clock, SystemClock},
@@ -1386,17 +1386,24 @@ fn current_hostname() -> Result<String, MkoError> {
 }
 
 fn same_host_process_is_live(pid: u32) -> bool {
-    let system = System::new_all();
-    system.process(Pid::from_u32(pid)).is_some()
+    let pid = Pid::from_u32(pid);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    system.process(pid).is_some()
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::time::{Duration, Instant};
     use std::{
         fs,
         io::{self, Write},
         sync::atomic::{AtomicU64, Ordering},
-        time::{Duration, Instant},
     };
 
     use cap_std::{ambient_authority, fs::Dir};
@@ -1404,10 +1411,12 @@ mod tests {
 
     use super::{
         AssetLock, CleanupDurabilityEvent, LockRecord, LockState, TakeoverGuard,
-        create_lock_with_writer, inspect_locks, read_lock_record, read_quarantine_record_with_hook,
+        create_lock_with_writer, inspect_locks, read_lock_record,
         reap_authoritative_quarantine_with_observer, remove_if_owned_with_observer,
-        remove_stale_entry_with_observer, scan_authoritative_quarantines, stable_file_identity,
+        remove_stale_entry_with_observer, scan_authoritative_quarantines,
     };
+    #[cfg(unix)]
+    use super::{read_quarantine_record_with_hook, stable_file_identity};
     use crate::clock::Clock;
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);

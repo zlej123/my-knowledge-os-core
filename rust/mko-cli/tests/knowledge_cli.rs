@@ -162,10 +162,12 @@ fn knowledge_write_rejects_an_unknown_asset_with_a_path_free_golden() {
         .stdout
         .clone();
 
-    assert_eq!(
-        output,
-        include_bytes!("../../../tests/fixtures/json-v1/knowledge-asset-missing.json")
-    );
+    let expected = include_bytes!("../../../tests/fixtures/json-v1/knowledge-asset-missing.json")
+        .iter()
+        .copied()
+        .filter(|byte| *byte != b'\r')
+        .collect::<Vec<_>>();
+    assert_eq!(output, expected);
     assert!(!String::from_utf8_lossy(&output).contains(&env.repository.display().to_string()));
 }
 

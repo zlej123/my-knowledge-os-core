@@ -489,7 +489,8 @@ fn knowledge_os_skill_is_discoverable_in_korean_and_english() {
     let path = knowledge_os_skill_path();
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("{} must exist and be readable: {error}", path.display()));
-    let frontmatter = text
+    let normalized = text.replace("\r\n", "\n");
+    let frontmatter = normalized
         .strip_prefix("---\n")
         .and_then(|rest| rest.split_once("\n---\n"))
         .map(|(frontmatter, _)| frontmatter)
@@ -518,6 +519,7 @@ fn knowledge_os_skill_exposes_only_the_v2_core_workflow() {
     let commands = executable_surfaces(&text);
     let allowed = [
         "pwsh",
+        "powershell.exe",
         "./scripts/install.sh",
         "mko --version",
         "mko setup",
@@ -588,6 +590,7 @@ fn knowledge_os_skill_defines_the_knowledge_extraction_flow() {
         &text,
         &[
             "pwsh",
+            "powershell.exe",
             "./scripts/install.sh",
             "mko --version",
             "mko setup",

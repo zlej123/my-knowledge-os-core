@@ -682,27 +682,27 @@ impl Drop for Snapshot {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        sync::{Arc, mpsc},
-        thread,
-        time::Duration,
-    };
+    use std::{fs, sync::Arc};
+    #[cfg(unix)]
+    use std::{sync::mpsc, thread, time::Duration};
 
     use cap_std::{ambient_authority, fs::Dir};
 
+    use super::Snapshot;
+    #[cfg(unix)]
     use super::{
-        PROCESSOR_VERSION, PROMPT_VERSION, PreparedSourceBundle, Snapshot, TRUST,
-        VersionedComponent, load_prepared_source_bundle_with_before_open, runtime_paths,
-        write_runtime,
+        PROCESSOR_VERSION, PROMPT_VERSION, PreparedSourceBundle, TRUST, VersionedComponent,
+        load_prepared_source_bundle_with_before_open, runtime_paths, write_runtime,
     };
+    use crate::fingerprint::fingerprint_open_file;
+    #[cfg(unix)]
     use crate::{
-        fingerprint::fingerprint_open_file,
         model::Fingerprint,
         pdf::{EXTRACTOR_NAME, EXTRACTOR_VERSION},
         version::KNOWLEDGE_CONTRACT_VERSION,
     };
 
+    #[cfg(unix)]
     fn bundle(asset_id: &str, title: &str) -> PreparedSourceBundle {
         let hash = asset_id.strip_prefix("personal-asset-").unwrap();
         PreparedSourceBundle {

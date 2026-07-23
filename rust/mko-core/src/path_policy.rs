@@ -329,16 +329,20 @@ fn reject_windows_component(value: &str) -> Result<(), MkoError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::{
         fs,
         sync::atomic::{AtomicU64, Ordering},
     };
 
+    #[cfg(unix)]
+    use super::provider_path_with_before_open;
     use super::{
         MAX_PORTABLE_COMPONENT_BYTES, MAX_PORTABLE_RELATIVE_PATH_BYTES,
-        provider_path_with_before_open, validate_portable_relative_path,
+        validate_portable_relative_path,
     };
 
+    #[cfg(unix)]
     static NEXT_TEST_ENV: AtomicU64 = AtomicU64::new(0);
 
     #[cfg(unix)]

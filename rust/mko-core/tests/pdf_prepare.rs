@@ -439,6 +439,7 @@ fn prepared_replacement_with_external_symlink_cannot_report_success() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn prepared_replacement_with_empty_directory_cannot_report_success() {
     let env = TestEnv::with_pdf(&["original"]);
@@ -466,6 +467,7 @@ fn prepared_replacement_with_empty_directory_cannot_report_success() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn prepared_replacement_with_different_file_cannot_report_success() {
     let env = TestEnv::with_pdf(&["original"]);

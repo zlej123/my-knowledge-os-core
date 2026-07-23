@@ -723,7 +723,8 @@ fn assert_golden(actual: &Value, expected: &str) {
     let _: Value = serde_json::from_str(expected).unwrap();
     let mut actual_bytes = serde_json::to_vec_pretty(actual).unwrap();
     actual_bytes.push(b'\n');
-    assert_eq!(actual_bytes, expected.as_bytes());
+    let normalized_expected = expected.replace("\r\n", "\n");
+    assert_eq!(actual_bytes, normalized_expected.as_bytes());
     assert!(
         !String::from_utf8(actual_bytes)
             .unwrap()
