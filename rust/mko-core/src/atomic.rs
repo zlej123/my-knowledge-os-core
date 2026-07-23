@@ -836,6 +836,7 @@ fn scan_publication_quarantines(
             match read_publication_record_with_hook(directory, &name, deadline, || {}) {
                 Ok((record, identity)) => (record, Some(identity)),
                 Err(error) if error.code() == "registry_scan_limit" => return Err(error),
+                Err(error) if error.code() == "registry_quarantine_invalid" => return Err(error),
                 Err(_) => {
                     check_publication_deadline(deadline)?;
                     let identity = publication_entry_identity_nonblocking(directory, &name);
