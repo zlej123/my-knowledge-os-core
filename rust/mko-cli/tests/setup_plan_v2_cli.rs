@@ -29,16 +29,24 @@ impl Fixture {
     }
 
     #[allow(deprecated)]
+    fn command(&self) -> Command {
+        let mut command = Command::cargo_bin("mko").unwrap();
+        command
+            .env("HOME", &self.home)
+            .env("APPDATA", self.home.join("AppData/Roaming"))
+            .env("XDG_CONFIG_HOME", self.home.join(".config"))
+            .current_dir(self._root.path());
+        command
+    }
+
     fn plan(&self) -> serde_json::Value {
-        let output = Command::cargo_bin("mko")
-            .unwrap()
+        let output = self
+            .command()
             .args(["setup", "plan", "--repo"])
             .arg(&self.repository)
             .arg("--drive-root")
             .arg(&self.drive)
             .args(["--format", "json-v2"])
-            .env("HOME", &self.home)
-            .current_dir(self._root.path())
             .assert()
             .success()
             .get_output()
@@ -66,11 +74,9 @@ fn machine_setup_apply_displays_exact_effects_but_non_tty_cannot_mutate() {
     fixture.assert_targets_unchanged();
 
     let plan_id = plan["data"]["plan_id"].as_str().unwrap();
-    let assertion = Command::cargo_bin("mko")
-        .unwrap()
+    let assertion = fixture
+        .command()
         .args(["setup", "apply", "--plan", plan_id, "--format", "json-v2"])
-        .env("HOME", &fixture.home)
-        .current_dir(fixture._root.path())
         .assert()
         .code(1);
     let output = assertion.get_output();
@@ -103,11 +109,9 @@ fn stale_setup_plan_is_rejected_without_target_mutation() {
     fs::create_dir(&fixture.repository).unwrap();
     fs::write(fixture.repository.join("unplanned.txt"), b"changed").unwrap();
     let plan_id = plan["data"]["plan_id"].as_str().unwrap();
-    let output = Command::cargo_bin("mko")
-        .unwrap()
+    let output = fixture
+        .command()
         .args(["setup", "apply", "--plan", plan_id, "--format", "json-v2"])
-        .env("HOME", &fixture.home)
-        .current_dir(fixture._root.path())
         .assert()
         .code(1)
         .get_output()
@@ -213,11 +217,9 @@ fn real_tty_setup_apply_requires_the_exact_phrase_and_is_single_use() {
             .is_file()
     );
 
-    let replay = Command::cargo_bin("mko")
-        .unwrap()
+    let replay = fixture
+        .command()
         .args(["setup", "apply", "--plan", plan_id, "--format", "json-v2"])
-        .env("HOME", &fixture.home)
-        .current_dir(fixture._root.path())
         .assert()
         .code(1)
         .get_output()
