@@ -203,6 +203,34 @@ fn platform_specific_paths_normalize_to_identical_logical_transcripts() {
 }
 
 #[test]
+fn unsupported_hydration_normalizes_to_the_portable_healthy_check() {
+    let mut transcript = json!({
+        "steps": [{
+            "result": {
+                "command": "doctor",
+                "data": {
+                    "checks": [{
+                        "code": "provider_hydration_unsupported",
+                        "message": "Personal PDF placeholder metadata is unsupported on this platform",
+                        "path": "/provider"
+                    }]
+                }
+            }
+        }]
+    });
+
+    normalize_transcript(&mut transcript);
+
+    let check = &transcript["steps"][0]["result"]["data"]["checks"][0];
+    assert_eq!(check["code"], "provider_hydration");
+    assert_eq!(
+        check["message"],
+        "Personal PDF placeholder metadata is healthy"
+    );
+    assert_eq!(check["path"], "<PROVIDER>");
+}
+
+#[test]
 fn windows_forward_slash_root_leak_is_rejected() {
     let transcript = json!({
         "steps": [{
