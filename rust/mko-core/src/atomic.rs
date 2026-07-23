@@ -83,6 +83,7 @@ where
             .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
         file.sync_all()
             .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+        #[cfg(not(unix))]
         drop(file);
         parent_directory
             .rename(&temporary, &parent_directory, filename)
@@ -274,6 +275,7 @@ where
             .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
         file.sync_all()
             .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+        #[cfg(not(unix))]
         drop(file);
         before_final_validation()?;
         validate_current()?;
@@ -318,6 +320,7 @@ where
             .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
         file.sync_all()
             .map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
+        #[cfg(not(unix))]
         drop(file);
         before_final_validation()?;
         validate_current()?;
@@ -460,6 +463,8 @@ struct CapabilityPublicationLock<'a> {
     filename: String,
     expected_contents: String,
     identity: StableCapabilityIdentity,
+    #[cfg(unix)]
+    _file: cap_std::fs::File,
 }
 
 impl<'a> CapabilityPublicationLock<'a> {
@@ -543,6 +548,8 @@ impl<'a> CapabilityPublicationLock<'a> {
                         filename: lock_filename,
                         expected_contents,
                         identity,
+                        #[cfg(unix)]
+                        _file: file,
                     });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -1086,6 +1093,8 @@ struct PublicationLock {
     filename: String,
     expected_contents: String,
     identity: StableCapabilityIdentity,
+    #[cfg(unix)]
+    _file: cap_std::fs::File,
 }
 
 impl PublicationLock {
@@ -1144,6 +1153,8 @@ impl PublicationLock {
                         filename: lock_filename,
                         expected_contents,
                         identity,
+                        #[cfg(unix)]
+                        _file: file,
                     });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {

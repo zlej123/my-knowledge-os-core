@@ -156,6 +156,8 @@ pub struct AssetLock {
     asset_id: String,
     owner_token: String,
     identity: StableFileIdentity,
+    #[cfg(unix)]
+    _file: cap_std::fs::File,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -174,6 +176,8 @@ pub struct RepositoryMutationLock {
     repository_root: PathBuf,
     owner_token: String,
     identity: StableFileIdentity,
+    #[cfg(unix)]
+    _file: cap_std::fs::File,
 }
 
 impl std::fmt::Debug for RepositoryMutationLock {
@@ -486,6 +490,8 @@ struct TakeoverGuard<'a> {
     filename: String,
     owner_token: String,
     identity: StableFileIdentity,
+    #[cfg(unix)]
+    _file: cap_std::fs::File,
 }
 
 impl<'a> TakeoverGuard<'a> {
@@ -572,6 +578,8 @@ impl<'a> TakeoverGuard<'a> {
             filename,
             owner_token,
             identity,
+            #[cfg(unix)]
+            _file: file,
         })
     }
 }
@@ -675,6 +683,8 @@ fn create_repository_mutation_lock(
         repository_root: repository_root.to_path_buf(),
         owner_token,
         identity,
+        #[cfg(unix)]
+        _file: file,
     })
 }
 
@@ -734,6 +744,8 @@ where
         asset_id: asset_id.into(),
         owner_token,
         identity,
+        #[cfg(unix)]
+        _file: file,
     })
 }
 
