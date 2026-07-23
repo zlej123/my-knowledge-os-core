@@ -19,7 +19,7 @@ jobs:
         if: runner.os == 'Windows'
       - run: cargo clippy --workspace --all-targets -- -D warnings
         working-directory: rust
-      - run: cargo test --workspace
+      - run: cargo test --workspace -- --test-threads=1
         working-directory: rust
       - run: cargo test -p mko-cli --test adapter_policy --test my_knowledge_os_skill
         working-directory: rust
