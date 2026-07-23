@@ -1277,11 +1277,14 @@ mod tests {
         original.write_all(original_contents.as_bytes()).unwrap();
         original.sync_all().unwrap();
         let original_identity = stable_capability_identity(&original).unwrap();
+        #[cfg(windows)]
         drop(original);
         directory.remove_file(filename).unwrap();
         directory
             .write(filename, original_contents.as_bytes())
             .unwrap();
+        #[cfg(not(windows))]
+        drop(original);
 
         let mut durability = Vec::new();
         cleanup_capability_entry_with_observer(

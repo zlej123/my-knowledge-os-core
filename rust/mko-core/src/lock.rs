@@ -1676,11 +1676,16 @@ mod tests {
         directory
             .write(&filename, serde_json::to_vec(&original).unwrap())
             .unwrap();
-        let original_identity = read_lock_record(&directory, &filename).unwrap().1;
+        let original_file = directory.open(&filename).unwrap();
+        let original_identity = super::stable_file_identity(&original_file).unwrap();
+        #[cfg(windows)]
+        drop(original_file);
         directory.remove_file(&filename).unwrap();
         directory
             .write(&filename, serde_json::to_vec(&original).unwrap())
             .unwrap();
+        #[cfg(not(windows))]
+        drop(original_file);
 
         let mut durability = Vec::new();
         remove_if_owned_with_observer(
