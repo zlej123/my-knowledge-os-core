@@ -63,8 +63,19 @@ If setup is missing, create a non-mutating plan:
 mko setup plan --format json-v2
 ```
 
-Display every returned step, logical destination, effect, expiry, and digest. Then stop and ask the
-user to run the exact apply command in a real terminal:
+Display every returned step, logical destination, effect, expiry, and digest. Then stop and ask
+whether the user wants Codex to open the approval terminal.
+
+On Windows, after the user explicitly asks to continue, run the bundled helper with host approval:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "SKILL_ROOT\scripts\open-setup-approval.ps1" -PlanId "CORE_PLAN_ID" -MkoPath "ABSOLUTE_MKO_EXE"
+```
+
+This opens a visible PowerShell window with the apply command already running. Tell the user to
+review the displayed paths and type Core's exact approval phrase in that window. Do not ask the
+user to copy a long plan command when the helper is available. If opening a visible terminal is
+unavailable, fall back to asking the user to run the exact command in a real terminal:
 
 ```bash
 mko setup apply --plan "CORE_PLAN_ID" --format json-v2
@@ -74,8 +85,8 @@ Core revalidates the plan under the machine-local setup/profile lock, displays t
 repository, Drive account, provider Inbox and profile paths plus every create/modify effect, and
 accepts only its revision/effect-bound exact phrase from a real TTY. Never treat chat text, a host
 command-approval UI, an agent-generated flag, or possession of a plan ID as setup approval. Do not
-simulate terminal approval. A setup approval never authorizes review approval, judgment, Git, or
-another mutation.
+simulate terminal approval, type into the approval window, or use computer-control tools to submit
+the phrase. A setup approval never authorizes review approval, judgment, Git, or another mutation.
 
 For review display, use only the v2 machine surfaces:
 
