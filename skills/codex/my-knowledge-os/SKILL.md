@@ -57,6 +57,30 @@ Use these terms consistently:
 
 ## Setup and read-only requests
 
+For a create, start, or setup request, collect setup inputs in this order, one question at a time:
+
+1. Confirm the user wants to create or connect a Personal KB. Do not repeat this question when the
+   original request is already explicit.
+2. Ask for the absolute Google Drive sync root. If the user does not have one, explain how to
+   install or start Google Drive for desktop, sign in, choose a local sync location, and return its
+   absolute path. Stop until that path exists.
+3. Ask for the private GitHub repository URL that will store the KB history. If the user does not
+   have one, explain how to create an empty private repository without a README, license, or
+   `.gitignore`, then ask for its HTTPS URL. Offer to create it only after a separate explicit
+   request. Never create a public repository.
+
+Before planning, show these as three distinct destinations:
+
+- local Personal KB directory: the working Git repository outside Google Drive;
+- Google Drive Inbox: `<drive-root>/My-Knowledge-OS-Assets/personal/inbox`;
+- GitHub remote: the private repository URL, used for manual history synchronization.
+
+Use the default local KB directory unless the user requests another path. Check the GitHub remote
+read-only before using it. If it already has commits, clone and inspect it instead of overwriting
+or combining histories. If it is empty, complete setup locally first, then separately ask before
+initializing Git or adding `origin`. Setup approval never authorizes Git initialization, remote
+configuration, commit, or push.
+
 If setup is missing, create a non-mutating plan:
 
 ```bash
