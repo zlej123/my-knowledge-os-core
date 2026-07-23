@@ -256,6 +256,7 @@ impl Env {
         command
             .env("HOME", &self.home)
             .env("APPDATA", config_home(&self.home))
+            .env("XDG_CONFIG_HOME", config_home(&self.home))
             .current_dir(&self.root);
         command
     }
@@ -266,9 +267,14 @@ fn config_home(home: &std::path::Path) -> PathBuf {
     home.join("AppData/Roaming")
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 fn config_home(home: &std::path::Path) -> PathBuf {
     home.join("Library/Application Support")
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn config_home(home: &std::path::Path) -> PathBuf {
+    home.join(".config")
 }
 
 impl Drop for Env {
