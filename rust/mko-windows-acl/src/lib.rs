@@ -61,6 +61,16 @@ pub struct AclInspection {
     pub entries: Vec<AceInspection>,
 }
 
+impl AclInspection {
+    pub fn is_owner_only_full_control(&self) -> bool {
+        self.owner_is_current_user
+            && self.dacl_is_protected
+            && self.entries.len() == 1
+            && self.entries[0].allows_current_user
+            && self.entries[0].access_mask == FULL_CONTROL_MASK
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EffectiveAccess {
     ReadDirectory,
@@ -219,9 +229,17 @@ pub fn apply_owner_only_to_path(path: &Path, inheritance: Inheritance) -> Result
 }
 
 pub fn apply_owner_only_to_file(file: &fs::File) -> Result<AclInspection, Error> {
+    apply_owner_only_to_file_handle(file, Inheritance::None)?;
     let path = final_path(file)?;
-    apply_owner_only_to_path(&path, Inheritance::None)?;
     inspect_path(&path)
+}
+
+pub fn apply_owner_only_to_file_handle(
+    file: &fs::File,
+    inheritance: Inheritance,
+) -> Result<(), Error> {
+    let path = final_path(file)?;
+    apply_owner_only_to_path(&path, inheritance)
 }
 
 pub fn inspect_path(path: &Path) -> Result<AclInspection, Error> {
@@ -449,14 +467,15 @@ mod tests {
 
     use super::{
         AclInspection, EffectiveAccess, Error, ErrorKind, FULL_CONTROL_MASK, FileIdentity,
-        Inheritance, apply_owner_only_to_file, apply_owner_only_to_path, check_effective_access,
-        file_identity, inspect_path,
+        Inheritance, apply_owner_only_to_file, apply_owner_only_to_file_handle,
+        apply_owner_only_to_path, check_effective_access, file_identity, inspect_path,
     };
 
     #[test]
     fn public_acl_operations_are_safe_function_pointers() {
         let _: fn(&Path, Inheritance) -> Result<(), Error> = apply_owner_only_to_path;
         let _: fn(&fs::File) -> Result<AclInspection, Error> = apply_owner_only_to_file;
+        let _: fn(&fs::File, Inheritance) -> Result<(), Error> = apply_owner_only_to_file_handle;
         let _: fn(&Path) -> Result<AclInspection, Error> = inspect_path;
         let _: fn(&fs::File) -> std::io::Result<FileIdentity> = file_identity;
     }
@@ -499,6 +518,7 @@ mod tests {
     }
 
     fn assert_owner_only(inspection: &AclInspection) {
+        assert!(inspection.is_owner_only_full_control());
         assert!(inspection.owner_is_current_user);
         assert!(inspection.dacl_is_protected);
         assert_eq!(inspection.entries.len(), 1);
