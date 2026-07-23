@@ -1,0 +1,606 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-knowledge-os.local/schemas/v2/machine-output.schema.json",
+  "title": "My Knowledge OS machine envelope v2",
+  "oneOf": [
+    { "$ref": "#/$defs/setup_plan_success" },
+    { "$ref": "#/$defs/setup_apply_success" },
+    { "$ref": "#/$defs/add_success" },
+    { "$ref": "#/$defs/source_prepare_success" },
+    { "$ref": "#/$defs/source_write_success" },
+    { "$ref": "#/$defs/knowledge_write_success" },
+    { "$ref": "#/$defs/queue_success" },
+    { "$ref": "#/$defs/show_success" },
+    { "$ref": "#/$defs/review_open_success" },
+    { "$ref": "#/$defs/review_feedback_success" },
+    { "$ref": "#/$defs/dashboard_success" },
+    { "$ref": "#/$defs/failure" }
+  ],
+  "$defs": {
+    "command": {
+      "enum": [
+        "setup.plan",
+        "setup.apply",
+        "add",
+        "source.prepare",
+        "source.write",
+        "knowledge.write",
+        "check",
+        "status",
+        "queue",
+        "show",
+        "review.open",
+        "review.feedback",
+        "dashboard",
+        "doctor",
+        "sync.status"
+      ]
+    },
+    "next_action": {
+      "enum": [
+        "none",
+        "configure",
+        "hydrate",
+        "add",
+        "prepare",
+        "write_source",
+        "write_knowledge",
+        "review",
+        "repair",
+        "preserve_user_edit",
+        "retry",
+        "sync"
+      ]
+    },
+    "empty_object": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 0
+    },
+    "queue_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "item_id",
+        "target_ids",
+        "title",
+        "item_type",
+        "state",
+        "revisions",
+        "next_action"
+      ],
+      "properties": {
+        "item_id": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "target_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
+        "title": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "item_type": { "enum": ["source", "knowledge", "combined"] },
+        "state": {
+          "enum": [
+            "unreviewed",
+            "deferred",
+            "changes_requested",
+            "revised_unreviewed",
+            "blocked"
+          ]
+        },
+        "revisions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
+        "next_action": { "enum": ["display", "regenerate", "diagnose"] }
+      }
+    },
+    "add_single_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asset_id", "outcome", "registry_path", "logical_locator"],
+      "properties": {
+        "asset_id": {
+          "type": "string",
+          "pattern": "^personal-asset-[0-9a-f]{64}$"
+        },
+        "outcome": { "enum": ["created", "existing"] },
+        "registry_path": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "logical_locator": { "type": "string", "minLength": 1, "maxLength": 32768 }
+      }
+    },
+    "add_batch_item_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "next_action"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "next_action": { "$ref": "#/$defs/next_action" }
+      }
+    },
+    "add_batch_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logical_locator", "asset_id", "outcome", "error"],
+      "properties": {
+        "logical_locator": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "asset_id": {
+          "anyOf": [
+            { "type": "string", "pattern": "^personal-asset-[0-9a-f]{64}$" },
+            { "type": "null" }
+          ]
+        },
+        "outcome": {
+          "anyOf": [{ "enum": ["created", "existing"] }, { "type": "null" }]
+        },
+        "error": {
+          "anyOf": [{ "$ref": "#/$defs/add_batch_item_error" }, { "type": "null" }]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "asset_id": { "type": "string" },
+            "outcome": { "type": "string" },
+            "error": { "type": "null" }
+          }
+        },
+        {
+          "properties": {
+            "asset_id": { "type": "null" },
+            "outcome": { "type": "null" },
+            "error": { "type": "object" }
+          }
+        }
+      ]
+    },
+    "add_batch_warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "logical_locator"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "logical_locator": { "type": ["string", "null"], "maxLength": 32768 }
+      }
+    },
+    "add_batch_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "scan_complete", "remaining", "warnings"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 20,
+          "items": { "$ref": "#/$defs/add_batch_item" }
+        },
+        "scan_complete": { "type": "boolean" },
+        "remaining": { "type": "integer", "minimum": 0 },
+        "warnings": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/add_batch_warning" }
+        }
+      }
+    },
+    "add_data": {
+      "oneOf": [
+        { "$ref": "#/$defs/add_single_data" },
+        { "$ref": "#/$defs/add_batch_data" }
+      ]
+    },
+    "source_prepare_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset_id",
+        "bundle_id",
+        "content_digest",
+        "bundle_path",
+        "outcome"
+      ],
+      "properties": {
+        "asset_id": {
+          "type": "string",
+          "pattern": "^personal-asset-[0-9a-f]{64}$"
+        },
+        "bundle_id": {
+          "type": "string",
+          "pattern": "^prepared-content-sha256-[0-9a-f]{64}$"
+        },
+        "content_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "bundle_path": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "outcome": { "enum": ["created", "existing"] }
+      }
+    },
+    "record_write_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_id",
+        "revision",
+        "revision_path",
+        "current_path",
+        "outcome",
+        "projection_state"
+      ],
+      "properties": {
+        "record_id": {
+          "type": "string",
+          "pattern": "^personal-(source|knowledge)-[0-9a-f]{64}$"
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "revision_path": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "current_path": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "outcome": { "enum": ["created", "existing", "replaced"] },
+        "projection_state": { "enum": ["current", "repair_required", "stale"] }
+      }
+    },
+    "queue_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "scan_complete", "remaining", "next_cursor"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": { "$ref": "#/$defs/queue_item" }
+        },
+        "scan_complete": { "type": "boolean" },
+        "remaining": { "type": "integer", "minimum": 0 },
+        "next_cursor": { "type": ["string", "null"], "maxLength": 4096 }
+      }
+    },
+    "show_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_id", "displayed_revision", "review_head_id", "state"],
+      "properties": {
+        "record_id": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "displayed_revision": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "review_head_id": {
+          "type": ["string", "null"],
+          "maxLength": 4096
+        },
+        "state": {
+          "enum": [
+            "unreviewed",
+            "deferred",
+            "changes_requested",
+            "revised_unreviewed",
+            "approved",
+            "blocked"
+          ]
+        }
+      }
+    },
+    "show_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "item_id",
+        "card_markdown",
+        "card_digest",
+        "effect_digest",
+        "targets"
+      ],
+      "properties": {
+        "item_id": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "card_markdown": { "type": "string", "minLength": 1, "maxLength": 67108864 },
+        "card_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "effect_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": { "$ref": "#/$defs/show_target" }
+        }
+      }
+    },
+    "review_session_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_type", "record_id", "displayed_revision", "review_head_id"],
+      "properties": {
+        "record_type": { "enum": ["source", "knowledge"] },
+        "record_id": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "displayed_revision": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "review_head_id": { "type": ["string", "null"], "maxLength": 4096 }
+      }
+    },
+    "review_open_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "expires_at",
+        "single_use",
+        "card_markdown",
+        "card_digest",
+        "effect_digest",
+        "targets",
+        "approval_mode"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "pattern": "^mko-review-session-[0-9a-f]{64}$"
+        },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "single_use": { "const": true },
+        "card_markdown": { "type": "string", "minLength": 1, "maxLength": 67108864 },
+        "card_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "effect_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": { "$ref": "#/$defs/review_session_target" }
+        },
+        "approval_mode": { "const": "tty" }
+      }
+    },
+    "review_feedback_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["review_id", "target_ids"],
+      "properties": {
+        "review_id": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "target_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        }
+      }
+    },
+    "dashboard_file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind", "manifest_owned", "state", "next_action"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "kind": { "enum": ["view_definition", "record_projection"] },
+        "manifest_owned": { "type": "boolean" },
+        "state": {
+          "enum": ["current", "missing", "stale", "user_modified", "unowned", "orphaned"]
+        },
+        "next_action": { "$ref": "#/$defs/next_action" }
+      }
+    },
+    "dashboard_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_state",
+        "projection_state",
+        "manifest_owned_drift",
+        "next_action",
+        "items",
+        "scan_complete",
+        "remaining",
+        "next_cursor"
+      ],
+      "properties": {
+        "canonical_state": { "enum": ["ready", "blocked"] },
+        "projection_state": { "enum": ["current", "repair_required"] },
+        "manifest_owned_drift": { "type": "boolean" },
+        "next_action": { "$ref": "#/$defs/next_action" },
+        "items": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": { "$ref": "#/$defs/dashboard_file" }
+        },
+        "scan_complete": { "type": "boolean" },
+        "remaining": { "type": "integer", "minimum": 0 },
+        "next_cursor": { "type": ["string", "null"], "maxLength": 4096 }
+      }
+    },
+    "setup_plan_step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_id", "effect", "destination", "requires_human_approval"],
+      "properties": {
+        "step_id": {
+          "enum": ["scaffold_repository", "ensure_provider_inbox", "ensure_dashboard", "configure_profile"]
+        },
+        "effect": { "enum": ["read", "create", "modify"] },
+        "destination": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "requires_human_approval": { "type": "boolean" }
+      }
+    },
+    "setup_plan_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan_id",
+        "expires_at",
+        "single_use",
+        "precondition_digest",
+        "effect_digest",
+        "steps",
+        "approval_mode",
+        "next_action"
+      ],
+      "properties": {
+        "plan_id": { "type": "string", "pattern": "^mko-setup-plan-[0-9a-f]{64}$" },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "single_use": { "const": true },
+        "precondition_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "effect_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "steps": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/setup_plan_step" }
+        },
+        "approval_mode": { "const": "tty" },
+        "next_action": { "enum": ["approve_plan", "none"] }
+      }
+    },
+    "setup_apply_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plan_id", "repository_root", "provider_root", "profile_changed"],
+      "properties": {
+        "plan_id": { "type": "string", "pattern": "^mko-setup-plan-[0-9a-f]{64}$" },
+        "repository_root": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "provider_root": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "profile_changed": { "type": "boolean" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable", "next_action", "details"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "retryable": { "type": "boolean" },
+        "next_action": { "$ref": "#/$defs/next_action" },
+        "details": { "$ref": "#/$defs/empty_object" }
+      }
+    },
+    "add_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "add" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/add_data" }
+      }
+    },
+    "setup_plan_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "setup.plan" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/setup_plan_data" }
+      }
+    },
+    "setup_apply_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "setup.apply" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/setup_apply_data" }
+      }
+    },
+    "source_prepare_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "source.prepare" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/source_prepare_data" }
+      }
+    },
+    "source_write_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "source.write" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/record_write_data" }
+      }
+    },
+    "knowledge_write_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "knowledge.write" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/record_write_data" }
+      }
+    },
+    "queue_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "queue" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/queue_data" }
+      }
+    },
+    "show_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "show" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/show_data" }
+      }
+    },
+    "review_open_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "review.open" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/review_open_data" }
+      }
+    },
+    "review_feedback_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "review.feedback" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/review_feedback_data" }
+      }
+    },
+    "dashboard_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "dashboard" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/dashboard_data" }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "error"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "$ref": "#/$defs/command" },
+        "result": { "const": "error" },
+        "error": { "$ref": "#/$defs/error" }
+      }
+    }
+  }
+}

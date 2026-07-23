@@ -1,0 +1,22 @@
+{
+  "schema_version": 2,
+  "command": "review.open",
+  "result": "ok",
+  "data": {
+    "session_id": "mko-review-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expires_at": "2026-07-23T01:15:00Z",
+    "single_use": true,
+    "card_markdown": "# Review card\n\nExact display.\n",
+    "card_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "effect_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "targets": [
+      {
+        "record_type": "source",
+        "record_id": "personal-source-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "displayed_revision": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "review_head_id": null
+      }
+    ],
+    "approval_mode": "tty"
+  }
+}

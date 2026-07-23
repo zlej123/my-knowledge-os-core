@@ -1,0 +1,12 @@
+{
+  "schema_version": 2,
+  "command": "source.prepare",
+  "result": "ok",
+  "data": {
+    "asset_id": "personal-asset-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "bundle_id": "prepared-content-sha256-123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0",
+    "content_digest": "sha256:123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0",
+    "bundle_path": "/runtime/prepared/prepared-content-sha256-123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0.json",
+    "outcome": "created"
+  }
+}

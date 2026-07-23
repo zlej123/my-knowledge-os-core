@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-knowledge-os.local/schemas/v2/knowledge-response.schema.json",
+  "title": "My Knowledge OS knowledge response v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "synthesis", "units"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "synthesis": { "type": "string", "minLength": 1, "maxLength": 262144 },
+    "units": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": { "$ref": "#/$defs/unit" }
+    }
+  },
+  "$defs": {
+    "text_span_utf8": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "table_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row_start", "row_end", "column_start", "column_end"],
+      "properties": {
+        "row_start": { "type": "integer", "minimum": 0 },
+        "row_end": { "type": "integer", "minimum": 0 },
+        "column_start": { "type": "integer", "minimum": 0 },
+        "column_end": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "evidence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["block_id", "locator"],
+      "properties": {
+        "block_id": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "locator": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "text_span_utf8": {
+          "anyOf": [{ "$ref": "#/$defs/text_span_utf8" }, { "type": "null" }]
+        },
+        "table_range": {
+          "anyOf": [{ "$ref": "#/$defs/table_range" }, { "type": "null" }]
+        }
+      },
+      "not": {
+        "required": ["text_span_utf8", "table_range"],
+        "properties": {
+          "text_span_utf8": { "type": "object" },
+          "table_range": { "type": "object" }
+        }
+      }
+    },
+    "unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "title", "body", "confidence", "basis", "evidence_refs", "tags"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "fact",
+            "definition",
+            "formula",
+            "result",
+            "interpretation",
+            "hypothesis",
+            "counterargument",
+            "uncertainty",
+            "open_question"
+          ]
+        },
+        "title": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "body": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "confidence": { "enum": ["high", "medium", "low"] },
+        "basis": { "enum": ["evidence", "missing_evidence", "conflicting_evidence"] },
+        "evidence_refs": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": { "$ref": "#/$defs/evidence_ref" }
+        },
+        "tags": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": { "type": "string", "maxLength": 4096 }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": { "enum": ["fact", "definition", "formula", "result"] }
+            }
+          },
+          "then": {
+            "properties": {
+              "basis": { "const": "evidence" },
+              "evidence_refs": { "minItems": 1 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "basis": { "enum": ["missing_evidence", "conflicting_evidence"] }
+            }
+          },
+          "then": {
+            "properties": {
+              "kind": { "enum": ["counterargument", "uncertainty", "open_question"] }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

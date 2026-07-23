@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "command": "add",
+  "result": "ok",
+  "data": {
+    "scan_complete": false,
+    "items": [
+      {
+        "provider_locator": "inbox/new-paper.pdf",
+        "user_state": "registered",
+        "next_action": "prepare",
+        "asset_id": "asset-002",
+        "add_outcome": "created",
+        "error": null
+      },
+      {
+        "provider_locator": "inbox/known-paper.pdf",
+        "user_state": "review_pending",
+        "next_action": "review",
+        "asset_id": "asset-003",
+        "add_outcome": "existing",
+        "error": null
+      },
+      {
+        "provider_locator": "inbox/broken.pdf",
+        "user_state": "blocked",
+        "next_action": "repair",
+        "asset_id": null,
+        "add_outcome": null,
+        "error": {
+          "code": "invalid_pdf",
+          "message": "The PDF could not be validated.",
+          "recovery": {
+            "kind": "repair"
+          }
+        }
+      }
+    ],
+    "remaining": 4
+  }
+}

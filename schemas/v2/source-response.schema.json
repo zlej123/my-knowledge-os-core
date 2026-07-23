@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-knowledge-os.local/schemas/v2/source-response.schema.json",
+  "title": "My Knowledge OS source response v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "title",
+    "authors",
+    "publication_date",
+    "one_sentence_summary",
+    "general_summary",
+    "key_claims",
+    "limitations",
+    "tags",
+    "knowledge_recommendation"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "title": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "authors": { "$ref": "#/$defs/string_array" },
+    "publication_date": {
+      "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }]
+    },
+    "one_sentence_summary": { "type": "string", "minLength": 1, "maxLength": 65536 },
+    "general_summary": { "type": "string", "minLength": 1, "maxLength": 262144 },
+    "key_claims": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "$ref": "#/$defs/key_claim" }
+    },
+    "limitations": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "$ref": "#/$defs/limitation" }
+    },
+    "tags": { "$ref": "#/$defs/string_array" },
+    "knowledge_recommendation": { "$ref": "#/$defs/knowledge_recommendation" }
+  },
+  "$defs": {
+    "string_array": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "type": "string", "maxLength": 4096 }
+    },
+    "text_span_utf8": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "table_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row_start", "row_end", "column_start", "column_end"],
+      "properties": {
+        "row_start": { "type": "integer", "minimum": 0 },
+        "row_end": { "type": "integer", "minimum": 0 },
+        "column_start": { "type": "integer", "minimum": 0 },
+        "column_end": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "evidence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["block_id", "locator"],
+      "properties": {
+        "block_id": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "locator": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "text_span_utf8": {
+          "anyOf": [{ "$ref": "#/$defs/text_span_utf8" }, { "type": "null" }]
+        },
+        "table_range": {
+          "anyOf": [{ "$ref": "#/$defs/table_range" }, { "type": "null" }]
+        }
+      },
+      "not": {
+        "required": ["text_span_utf8", "table_range"],
+        "properties": {
+          "text_span_utf8": { "type": "object" },
+          "table_range": { "type": "object" }
+        }
+      }
+    },
+    "key_claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "evidence_refs"],
+      "properties": {
+        "text": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1024,
+          "items": { "$ref": "#/$defs/evidence_ref" }
+        }
+      }
+    },
+    "limitation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "basis", "evidence_refs"],
+      "properties": {
+        "text": { "type": "string", "minLength": 1, "maxLength": 65536 },
+        "basis": { "enum": ["stated", "observed_missing_evidence"] },
+        "evidence_refs": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": { "$ref": "#/$defs/evidence_ref" }
+        }
+      },
+      "if": { "properties": { "basis": { "const": "stated" } } },
+      "then": { "properties": { "evidence_refs": { "minItems": 1 } } }
+    },
+    "knowledge_recommendation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome", "reasons"],
+      "properties": {
+        "outcome": { "enum": ["recommend", "reference_only", "archive"] },
+        "reasons": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": { "type": "string", "minLength": 1, "maxLength": 65536 }
+        }
+      }
+    }
+  }
+}

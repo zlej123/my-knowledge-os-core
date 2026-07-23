@@ -1,0 +1,31 @@
+{
+  "schema_version": 2,
+  "synthesis": "A grounded synthesis with clearly separated analysis.",
+  "units": [
+    {
+      "kind": "fact",
+      "title": "Reported result",
+      "body": "The document reports an example result.",
+      "confidence": "high",
+      "basis": "evidence",
+      "evidence_refs": [
+        {
+          "block_id": "block-0002",
+          "locator": "page:2/table:1",
+          "text_span_utf8": null,
+          "table_range": {"row_start": 0, "row_end": 1, "column_start": 0, "column_end": 2}
+        }
+      ],
+      "tags": ["example"]
+    },
+    {
+      "kind": "open_question",
+      "title": "External validity",
+      "body": "The document does not establish broader external validity.",
+      "confidence": "low",
+      "basis": "missing_evidence",
+      "evidence_refs": [],
+      "tags": []
+    }
+  ]
+}

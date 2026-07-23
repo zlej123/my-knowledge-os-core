@@ -10,9 +10,10 @@ use unicode_normalization::UnicodeNormalization;
 use crate::{
     atomic::{AtomicWriteResult, write_new, write_replace},
     clock::{Clock, SystemClock},
-    config::load_capture_config,
+    config::{CaptureConfig, load_capture_config},
+    context::ResolvedPersonalContext,
     error::MkoError,
-    fingerprint::{asset_id, fingerprint_open_file, validate_pdf_content},
+    fingerprint::{FileSnapshot, asset_id, fingerprint_open_file, validate_pdf_content},
     front_matter::{parse_markdown, render_markdown},
     lock::AssetLock,
     model::{AssetRecord, AssetStatus, Classification, LastError, LastSuccessfulStep, Provider},
@@ -24,11 +25,14 @@ use crate::{
 pub struct CaptureRequest {
     repository_root: PathBuf,
     local_config_path: Option<PathBuf>,
+    resolved_context: Option<ResolvedPersonalContext>,
     file: PathBuf,
     title: Option<String>,
     domains: Vec<String>,
     slug: Option<String>,
     captured_at: DateTime<Utc>,
+    expected_fingerprint: Option<String>,
+    expected_size_bytes: Option<u64>,
 }
 
 impl CaptureRequest {
@@ -36,16 +40,24 @@ impl CaptureRequest {
         Self {
             repository_root: repository_root.as_ref().to_path_buf(),
             local_config_path: None,
+            resolved_context: None,
             file: file.as_ref().to_path_buf(),
             title: None,
             domains: Vec::new(),
             slug: None,
             captured_at: Utc::now(),
+            expected_fingerprint: None,
+            expected_size_bytes: None,
         }
     }
 
     pub fn with_local_config(mut self, path: impl AsRef<Path>) -> Self {
         self.local_config_path = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn with_resolved_context(mut self, context: ResolvedPersonalContext) -> Self {
+        self.resolved_context = Some(context);
         self
     }
 
@@ -66,6 +78,12 @@ impl CaptureRequest {
 
     pub fn with_captured_at(mut self, captured_at: DateTime<Utc>) -> Self {
         self.captured_at = captured_at;
+        self
+    }
+
+    pub fn with_expected_snapshot(mut self, snapshot: &FileSnapshot) -> Self {
+        self.expected_fingerprint = Some(snapshot.fingerprint.value.clone());
+        self.expected_size_bytes = Some(snapshot.size_bytes);
         self
     }
 }
@@ -367,10 +385,13 @@ where
         ));
     }
 
-    let config = load_capture_config(
-        &request.repository_root,
-        request.local_config_path.as_deref(),
-    )?;
+    let config = match request.resolved_context.as_ref() {
+        Some(context) => CaptureConfig::from_resolved_context(context)?,
+        None => load_capture_config(
+            &request.repository_root,
+            request.local_config_path.as_deref(),
+        )?,
+    };
     let provider_path = provider_path(&config.provider_root, &request.file)?;
     let extension_is_pdf = Path::new(&provider_path.logical_path)
         .extension()
@@ -386,6 +407,19 @@ where
     let mut file = provider_path.file;
     let before = fingerprint_open_file(&mut file)?;
     validate_pdf_content(&mut file)?;
+    if request
+        .expected_fingerprint
+        .as_ref()
+        .is_some_and(|expected| expected != &before.fingerprint.value)
+        || request
+            .expected_size_bytes
+            .is_some_and(|expected| expected != before.size_bytes)
+    {
+        return Err(MkoError::new(
+            "fingerprint_changed",
+            "PDF no longer matches the snapshot selected for capture",
+        ));
+    }
     let id = asset_id(&before.fingerprint)?;
     let title = request
         .title

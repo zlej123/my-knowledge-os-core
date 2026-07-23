@@ -1,0 +1,11 @@
+{
+  "block_id": "block-0002",
+  "locator": "page:2/table:1",
+  "text_span_utf8": null,
+  "table_range": {
+    "row_start": 0,
+    "row_end": 1,
+    "column_start": 0,
+    "column_end": 2
+  }
+}

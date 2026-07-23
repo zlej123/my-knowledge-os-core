@@ -1,0 +1,13 @@
+{
+  "schema_version": 2,
+  "record_type": "source",
+  "record_id": "personal-source-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "revision": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "evidence_basis": {
+    "bundle_id": "prepared-content-sha256-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "content_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "asset_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "extractor_name": "pdf-text",
+    "extractor_version": "2.0.0"
+  }
+}

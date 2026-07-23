@@ -1,0 +1,301 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-knowledge-os.local/schemas/machine-output-v1.schema.json",
+  "title": "My Knowledge OS machine output v1",
+  "oneOf": [
+    { "$ref": "#/$defs/addSuccess" },
+    { "$ref": "#/$defs/prepareSuccess" },
+    { "$ref": "#/$defs/writeDraftSuccess" },
+    { "$ref": "#/$defs/checkSuccess" },
+    { "$ref": "#/$defs/inboxSuccess" },
+    { "$ref": "#/$defs/statusSuccess" },
+    { "$ref": "#/$defs/doctorSuccess" },
+    { "$ref": "#/$defs/failure" }
+  ],
+  "$defs": {
+    "command": {
+      "enum": ["add", "source.prepare", "source.write_draft", "check", "inbox", "status", "doctor"]
+    },
+    "nextAction": {
+      "enum": ["none", "configure", "hydrate", "add", "prepare", "write_draft", "review", "repair", "retry"]
+    },
+    "userState": {
+      "enum": ["new", "registered", "incomplete", "review_pending", "processed", "blocked"]
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "enum": ["configure", "hydrate", "verify_backup", "fix_permissions", "resolve_hook_conflict", "retry", "repair"]
+        }
+      }
+    },
+    "nullableRecovery": {
+      "oneOf": [{ "$ref": "#/$defs/recovery" }, { "type": "null" }]
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "recovery"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "recovery": { "$ref": "#/$defs/nullableRecovery" }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "path"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "path": { "type": ["string", "null"] }
+      }
+    },
+    "addData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["add_outcome", "import_outcome", "repository", "asset_id", "registry_path", "provider_locator"],
+      "properties": {
+        "add_outcome": { "enum": ["created", "existing"] },
+        "import_outcome": { "enum": ["copied", "already_in_inbox", "reused_inbox_copy"] },
+        "repository": { "type": "string" },
+        "asset_id": { "type": "string" },
+        "registry_path": { "type": "string" },
+        "provider_locator": { "type": "string" }
+      }
+    },
+    "batchItemData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_locator", "user_state", "next_action", "asset_id", "add_outcome", "error"],
+      "properties": {
+        "provider_locator": { "type": "string" },
+        "user_state": { "$ref": "#/$defs/userState" },
+        "next_action": { "$ref": "#/$defs/nextAction" },
+        "asset_id": { "type": ["string", "null"] },
+        "add_outcome": {
+          "oneOf": [{ "enum": ["created", "existing"] }, { "type": "null" }]
+        },
+        "error": {
+          "oneOf": [{ "$ref": "#/$defs/error" }, { "type": "null" }]
+        }
+      }
+    },
+    "batchAddData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scan_complete", "items", "remaining"],
+      "properties": {
+        "scan_complete": { "type": "boolean" },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/batchItemData" } },
+        "remaining": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "prepareData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asset_id", "source_id", "bundle_path"],
+      "properties": {
+        "asset_id": { "type": "string" },
+        "source_id": { "type": "string" },
+        "bundle_path": { "type": "string" }
+      }
+    },
+    "writeDraftData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["draft_outcome", "source_id", "source_path", "content_revision"],
+      "properties": {
+        "draft_outcome": { "enum": ["created", "existing", "replaced"] },
+        "source_id": { "type": "string" },
+        "source_path": { "type": "string" },
+        "content_revision": { "type": "string" }
+      }
+    },
+    "checkData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["valid", "errors", "warnings"],
+      "properties": {
+        "valid": { "type": "boolean" },
+        "errors": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } },
+        "warnings": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } }
+      }
+    },
+    "scanLimitsData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_entries", "max_total_bytes", "max_elapsed_ms", "max_depth", "max_batch_items"],
+      "properties": {
+        "max_entries": { "type": "integer", "minimum": 0 },
+        "max_total_bytes": { "type": "integer", "minimum": 0 },
+        "max_elapsed_ms": { "type": "integer", "minimum": 0 },
+        "max_depth": { "type": "integer", "minimum": 0 },
+        "max_batch_items": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "inboxItemData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_locator", "user_state", "asset_id", "next_action"],
+      "properties": {
+        "provider_locator": { "type": "string" },
+        "user_state": { "$ref": "#/$defs/userState" },
+        "asset_id": { "type": ["string", "null"] },
+        "next_action": { "$ref": "#/$defs/nextAction" }
+      }
+    },
+    "inboxData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scan_complete", "scan_limits", "items", "errors", "warnings"],
+      "properties": {
+        "scan_complete": { "type": "boolean" },
+        "scan_limits": { "$ref": "#/$defs/scanLimitsData" },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/inboxItemData" } },
+        "errors": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } },
+        "warnings": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["new", "registered", "incomplete", "review_pending", "processed", "blocked"],
+      "properties": {
+        "new": { "type": "integer", "minimum": 0 },
+        "registered": { "type": "integer", "minimum": 0 },
+        "incomplete": { "type": "integer", "minimum": 0 },
+        "review_pending": { "type": "integer", "minimum": 0 },
+        "processed": { "type": "integer", "minimum": 0 },
+        "blocked": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "statusData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["healthy", "counts", "primary_blocker", "next_action"],
+      "properties": {
+        "healthy": { "type": "boolean" },
+        "counts": { "$ref": "#/$defs/counts" },
+        "primary_blocker": {
+          "oneOf": [{ "$ref": "#/$defs/diagnostic" }, { "type": "null" }]
+        },
+        "next_action": { "$ref": "#/$defs/nextAction" }
+      }
+    },
+    "doctorCheckData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "status", "message", "path", "recovery"],
+      "properties": {
+        "code": { "type": "string" },
+        "status": { "enum": ["healthy", "warning", "blocked"] },
+        "message": { "type": "string" },
+        "path": { "type": ["string", "null"] },
+        "recovery": { "$ref": "#/$defs/nullableRecovery" }
+      }
+    },
+    "doctorData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["healthy", "checks", "next_action"],
+      "properties": {
+        "healthy": { "type": "boolean" },
+        "checks": { "type": "array", "items": { "$ref": "#/$defs/doctorCheckData" } },
+        "next_action": { "$ref": "#/$defs/nextAction" }
+      }
+    },
+    "addSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "command": { "const": "add" },
+        "result": { "const": "ok" },
+        "data": { "oneOf": [{ "$ref": "#/$defs/addData" }, { "$ref": "#/$defs/batchAddData" }] }
+      }
+    },
+    "prepareSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "command": { "const": "source.prepare" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/prepareData" }
+      }
+    },
+    "writeDraftSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "command": { "const": "source.write_draft" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/writeDraftData" }
+      }
+    },
+    "checkSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "command": { "const": "check" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/checkData" }
+      }
+    },
+    "inboxSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "command": { "const": "inbox" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/inboxData" }
+      }
+    },
+    "statusSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "command": { "const": "status" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/statusData" }
+      }
+    },
+    "doctorSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "command": { "const": "doctor" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/doctorData" }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "error"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "command": { "$ref": "#/$defs/command" },
+        "result": { "const": "error" },
+        "error": { "$ref": "#/$defs/error" }
+      }
+    }
+  }
+}

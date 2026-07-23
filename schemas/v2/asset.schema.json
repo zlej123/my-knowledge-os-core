@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-knowledge-os.local/schemas/v2/asset.schema.json",
+  "title": "My Knowledge OS Asset v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "record_type", "fingerprint", "title_fallback", "media_type", "provider"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "id": { "type": "string", "pattern": "^personal-asset-[a-f0-9]{64}$" },
+    "record_type": { "const": "asset" },
+    "fingerprint": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "title_fallback": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "media_type": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_type", "logical_locator", "size_bytes", "modified_at"],
+      "properties": {
+        "provider_type": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "logical_locator": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "modified_at": {
+          "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }]
+        }
+      }
+    }
+  }
+}

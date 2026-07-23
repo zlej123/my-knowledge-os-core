@@ -39,10 +39,20 @@ pub fn validate_pdf_content(file: &mut File) -> Result<(), MkoError> {
 }
 
 pub fn fingerprint_open_file(file: &mut File) -> Result<FileSnapshot, MkoError> {
+    fingerprint_open_file_with_guard(file, &mut || Ok(()))
+}
+
+pub(crate) fn fingerprint_open_file_with_guard(
+    file: &mut File,
+    guard: &mut dyn FnMut() -> Result<(), MkoError>,
+) -> Result<FileSnapshot, MkoError> {
+    guard()?;
     let metadata = file.metadata().map_err(io_error)?;
+    guard()?;
     file.seek(SeekFrom::Start(0)).map_err(io_error)?;
-    let fingerprint = fingerprint_reader(file, metadata.len())?;
+    let fingerprint = fingerprint_reader_with_guard(file, metadata.len(), guard)?;
     file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+    guard()?;
     let modified_at = metadata.modified().map_err(io_error)?;
     Ok(FileSnapshot {
         fingerprint,
@@ -52,6 +62,14 @@ pub fn fingerprint_open_file(file: &mut File) -> Result<FileSnapshot, MkoError> 
 }
 
 fn fingerprint_reader(file: &mut impl Read, size_bytes: u64) -> Result<Fingerprint, MkoError> {
+    fingerprint_reader_with_guard(file, size_bytes, &mut || Ok(()))
+}
+
+fn fingerprint_reader_with_guard(
+    file: &mut impl Read,
+    size_bytes: u64,
+    guard: &mut dyn FnMut() -> Result<(), MkoError>,
+) -> Result<Fingerprint, MkoError> {
     if size_bytes > MAX_ASSET_BYTES {
         return Err(MkoError::new(
             "file_too_large",
@@ -62,7 +80,9 @@ fn fingerprint_reader(file: &mut impl Read, size_bytes: u64) -> Result<Fingerpri
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
+        guard()?;
         let read = file.read(&mut buffer).map_err(io_error)?;
+        guard()?;
         if read == 0 {
             break;
         }

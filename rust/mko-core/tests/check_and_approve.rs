@@ -144,9 +144,26 @@ struct MutatingTerminal {
     replacement: Vec<u8>,
 }
 
+enum SourceEntryMutation {
+    Delete,
+    ReplaceWithDirectory,
+}
+
+struct SourceEntryMutationTerminal {
+    input: String,
+    output: String,
+    source_path: PathBuf,
+    mutation: SourceEntryMutation,
+}
+
 struct PublicationMutator {
     source_path: PathBuf,
     replacement: Vec<u8>,
+}
+
+struct AssetEntryMutationObserver {
+    asset_path: PathBuf,
+    replace_with_directory: bool,
 }
 
 #[cfg(unix)]
@@ -198,6 +215,20 @@ impl ApprovalObserver for PublicationMutator {
     }
 }
 
+impl ApprovalObserver for AssetEntryMutationObserver {
+    fn before_publication(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn before_asset_cas_entry_validation(&mut self) -> io::Result<()> {
+        fs::remove_file(&self.asset_path)?;
+        if self.replace_with_directory {
+            fs::create_dir(&self.asset_path)?;
+        }
+        Ok(())
+    }
+}
+
 impl ApprovalTerminal for MutatingTerminal {
     fn stdin_is_terminal(&self) -> bool {
         true
@@ -214,6 +245,30 @@ impl ApprovalTerminal for MutatingTerminal {
 
     fn read_line(&mut self, output: &mut String) -> io::Result<usize> {
         fs::write(&self.source_path, &self.replacement)?;
+        output.push_str(&self.input);
+        Ok(self.input.len())
+    }
+}
+
+impl ApprovalTerminal for SourceEntryMutationTerminal {
+    fn stdin_is_terminal(&self) -> bool {
+        true
+    }
+
+    fn stdout_is_terminal(&self) -> bool {
+        true
+    }
+
+    fn write_all(&mut self, text: &str) -> io::Result<()> {
+        self.output.push_str(text);
+        Ok(())
+    }
+
+    fn read_line(&mut self, output: &mut String) -> io::Result<usize> {
+        fs::remove_file(&self.source_path)?;
+        if matches!(self.mutation, SourceEntryMutation::ReplaceWithDirectory) {
+            fs::create_dir(&self.source_path)?;
+        }
         output.push_str(&self.input);
         Ok(self.input.len())
     }
@@ -489,6 +544,150 @@ fn source_changed_immediately_before_publication_is_not_overwritten() {
             .unwrap()
             .asset_status,
         AssetStatus::ReviewPending
+    );
+}
+
+#[test]
+fn source_deleted_before_cas_entry_validation_maps_to_source_changed() {
+    let env = TestEnv::pending_source();
+    let mut terminal = SourceEntryMutationTerminal {
+        input: format!("APPROVE {}\n", env.source_id),
+        output: String::new(),
+        source_path: env.source_path.clone(),
+        mutation: SourceEntryMutation::Delete,
+    };
+
+    let error = approve_source_with_terminal_and_clock(
+        ApproveSourceRequest::new(&env.repository, &env.source_id),
+        &mut terminal,
+        &env.clock,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "source_changed_during_approval");
+    assert!(!env.source_path.exists());
+    assert_eq!(
+        read_asset(&env.repository, &env.asset_id)
+            .unwrap()
+            .asset_status,
+        AssetStatus::ReviewPending
+    );
+}
+
+#[test]
+fn source_type_replaced_before_cas_entry_validation_maps_to_source_changed() {
+    let env = TestEnv::pending_source();
+    let mut terminal = SourceEntryMutationTerminal {
+        input: format!("APPROVE {}\n", env.source_id),
+        output: String::new(),
+        source_path: env.source_path.clone(),
+        mutation: SourceEntryMutation::ReplaceWithDirectory,
+    };
+
+    let error = approve_source_with_terminal_and_clock(
+        ApproveSourceRequest::new(&env.repository, &env.source_id),
+        &mut terminal,
+        &env.clock,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "source_changed_during_approval");
+    assert!(env.source_path.is_dir());
+    assert_eq!(
+        read_asset(&env.repository, &env.asset_id)
+            .unwrap()
+            .asset_status,
+        AssetStatus::ReviewPending
+    );
+}
+
+#[test]
+fn asset_deleted_before_cas_entry_validation_maps_to_asset_changed() {
+    let env = TestEnv::pending_source();
+    let asset_path = env
+        .repository
+        .join("assets/registry")
+        .join(format!("{}.md", env.asset_id));
+    let mut terminal = FakeTerminal {
+        stdin_tty: true,
+        stdout_tty: true,
+        input: format!("APPROVE {}\n", env.source_id),
+        output: String::new(),
+    };
+    let mut observer = AssetEntryMutationObserver {
+        asset_path: asset_path.clone(),
+        replace_with_directory: false,
+    };
+
+    let error = approve_source_with_terminal_clock_and_observer(
+        ApproveSourceRequest::new(&env.repository, &env.source_id),
+        &mut terminal,
+        &env.clock,
+        &mut observer,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "asset_changed_during_approval");
+    assert_eq!(
+        error.message(),
+        format!(
+            "Source was durably approved, but Asset {} is missing or is not a regular file, so its transition to processed did not occur. Restore the original Asset record manually from Git or backup, then run `mko check --repo \"{}\"` to verify the Source/Asset state before any further approval attempt",
+            env.asset_id,
+            fs::canonicalize(&env.repository).unwrap().display()
+        )
+    );
+    assert!(!asset_path.exists());
+    assert_eq!(
+        parse_markdown::<SourceRecord>(&fs::read_to_string(&env.source_path).unwrap())
+            .unwrap()
+            .metadata
+            .status,
+        SourceStatus::Approved
+    );
+}
+
+#[test]
+fn asset_type_replaced_before_cas_entry_validation_maps_to_asset_changed() {
+    let env = TestEnv::pending_source();
+    let asset_path = env
+        .repository
+        .join("assets/registry")
+        .join(format!("{}.md", env.asset_id));
+    let mut terminal = FakeTerminal {
+        stdin_tty: true,
+        stdout_tty: true,
+        input: format!("APPROVE {}\n", env.source_id),
+        output: String::new(),
+    };
+    let mut observer = AssetEntryMutationObserver {
+        asset_path: asset_path.clone(),
+        replace_with_directory: true,
+    };
+
+    let error = approve_source_with_terminal_clock_and_observer(
+        ApproveSourceRequest::new(&env.repository, &env.source_id),
+        &mut terminal,
+        &env.clock,
+        &mut observer,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "asset_changed_during_approval");
+    assert_eq!(
+        error.message(),
+        format!(
+            "Source was durably approved, but Asset {} is missing or is not a regular file, so its transition to processed did not occur. Restore the original Asset record manually from Git or backup, then run `mko check --repo \"{}\"` to verify the Source/Asset state before any further approval attempt",
+            env.asset_id,
+            fs::canonicalize(&env.repository).unwrap().display()
+        )
+    );
+    assert!(asset_path.is_dir());
+    assert_eq!(
+        parse_markdown::<SourceRecord>(&fs::read_to_string(&env.source_path).unwrap())
+            .unwrap()
+            .metadata
+            .status,
+        SourceStatus::Approved
     );
 }
 

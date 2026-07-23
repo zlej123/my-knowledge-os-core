@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "command": "doctor",
+  "result": "error",
+  "error": {
+    "code": "configuration_unreadable",
+    "message": "The configuration could not be inspected.",
+    "recovery": {
+      "kind": "configure"
+    }
+  }
+}

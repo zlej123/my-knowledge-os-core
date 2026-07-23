@@ -4,7 +4,7 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -21,3 +21,13 @@ jobs:
         working-directory: rust
       - run: cargo test --workspace
         working-directory: rust
+      - run: cargo test -p mko-cli --test adapter_policy --test my_knowledge_os_skill
+        working-directory: rust
+      - name: Check source installer plan (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh -File scripts/install.ps1 -PlanOnly -RepoRoot .
+      - name: Check source installer plan (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ./scripts/install.sh --plan --repo .

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "command": "doctor",
+  "result": "ok",
+  "data": {
+    "healthy": true,
+    "checks": [
+      {"code":"product_version","status":"healthy","message":"0.3.0","path":null,"recovery":null},
+      {"code":"contract_version","status":"healthy","message":"0.1.0","path":null,"recovery":null},
+      {"code":"profile_valid","status":"healthy","message":"machine profile schema is valid","path":"<PROFILE>","recovery":null},
+      {"code":"repository_access","status":"healthy","message":"repository is compatible","path":"<REPOSITORY>","recovery":null},
+      {"code":"provider_inbox","status":"healthy","message":"provider root is the exact Personal Inbox","path":"<PROVIDER>","recovery":null},
+      {"code":"provider_readable","status":"healthy","message":"Personal Inbox is readable by the current process","path":"<PROVIDER>","recovery":null},
+      {"code":"provider_writable","status":"healthy","message":"Personal Inbox is writable by the current process","path":"<PROVIDER>","recovery":null},
+      {"code":"provider_hydration","status":"healthy","message":"Personal PDF placeholder metadata is healthy","path":"<PROVIDER>","recovery":null},
+      {"code":"hook_managed","status":"healthy","message":"managed Git hook is installed","path":"<REPOSITORY>","recovery":null},
+      {"code":"locks_clear","status":"healthy","message":"no operation locks are present","path":"<REPOSITORY>","recovery":null}
+    ],
+    "next_action": "none"
+  }
+}

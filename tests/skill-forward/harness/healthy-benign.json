@@ -1,0 +1,167 @@
+{
+  "fixture": "benign-paper.pdf",
+  "prepared_bundle": {
+    "asset_id": "personal-asset-0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd",
+    "core_version": "0.1.0",
+    "extractor": {
+      "name": "pdf-extract",
+      "version": "0.12.0"
+    },
+    "fingerprint": {
+      "method": "sha256",
+      "value": "sha256:0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd"
+    },
+    "logical_path": "benign-paper.pdf",
+    "pages": [
+      "\n\nA Deterministic Paper. Deterministic fixtures support repeatable validation."
+    ],
+    "processor_version": "source-v1",
+    "prompt_version": "codex-source-v1",
+    "schema_version": 1,
+    "source_id": "personal-source-0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd",
+    "title_hint": "benign-paper",
+    "trust": "untrusted_document_text"
+  },
+  "steps": [
+    {
+      "command": "mko doctor --format json-v1",
+      "result": {
+        "command": "doctor",
+        "data": {
+          "checks": [
+            {
+              "code": "product_version",
+              "message": "0.3.0",
+              "path": null,
+              "recovery": null,
+              "status": "healthy"
+            },
+            {
+              "code": "contract_version",
+              "message": "0.1.0",
+              "path": null,
+              "recovery": null,
+              "status": "healthy"
+            },
+            {
+              "code": "profile_valid",
+              "message": "machine profile schema is valid",
+              "path": "<PROFILE>",
+              "recovery": null,
+              "status": "healthy"
+            },
+            {
+              "code": "repository_access",
+              "message": "repository is compatible",
+              "path": "<REPOSITORY>",
+              "recovery": null,
+              "status": "healthy"
+            },
+            {
+              "code": "provider_inbox",
+              "message": "provider root is the exact Personal Inbox",
+              "path": "<PROVIDER>",
+              "recovery": null,
+              "status": "healthy"
+            },
+            {
+              "code": "provider_readable",
+              "message": "Personal Inbox is readable by the current process",
+              "path": "<PROVIDER>",
+              "recovery": null,
+              "status": "healthy"
+            },
+            {
+              "code": "provider_writable",
+              "message": "Personal Inbox is writable by the current process",
+              "path": "<PROVIDER>",
+              "recovery": null,
+              "status": "healthy"
+            },
+            {
+              "code": "provider_hydration",
+              "message": "Personal PDF placeholder metadata is healthy",
+              "path": "<PROVIDER>",
+              "recovery": null,
+              "status": "healthy"
+            },
+            {
+              "code": "hook_managed",
+              "message": "managed Git hook is installed",
+              "path": "<REPOSITORY>",
+              "recovery": null,
+              "status": "healthy"
+            },
+            {
+              "code": "locks_clear",
+              "message": "no operation locks are present",
+              "path": "<REPOSITORY>",
+              "recovery": null,
+              "status": "healthy"
+            }
+          ],
+          "healthy": true,
+          "next_action": "none"
+        },
+        "result": "ok",
+        "schema_version": 1
+      }
+    },
+    {
+      "command": "mko add \"<SELECTED>/benign-paper.pdf\" --format json-v1",
+      "result": {
+        "command": "add",
+        "data": {
+          "add_outcome": "created",
+          "asset_id": "personal-asset-0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd",
+          "import_outcome": "copied",
+          "provider_locator": "benign-paper.pdf",
+          "registry_path": "assets/registry/personal-asset-0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd.md",
+          "repository": "<REPOSITORY>"
+        },
+        "result": "ok",
+        "schema_version": 1
+      }
+    },
+    {
+      "command": "mko source prepare --asset-id \"personal-asset-0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd\" --output \".knowledge-os/runtime/prepared/personal-asset-0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd.json\" --format json-v1",
+      "result": {
+        "command": "source.prepare",
+        "data": {
+          "asset_id": "personal-asset-0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd",
+          "bundle_path": "<REPOSITORY>/.knowledge-os/runtime/prepared/personal-asset-0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd.json",
+          "source_id": "personal-source-0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd"
+        },
+        "result": "ok",
+        "schema_version": 1
+      }
+    },
+    {
+      "command": "mko source write-draft --bundle \".knowledge-os/runtime/prepared/personal-asset-0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd.json\" --response \"<RUNTIME>/semantic-response.json\" --format json-v1",
+      "result": {
+        "command": "source.write_draft",
+        "data": {
+          "content_revision": "<CONTENT_REVISION>",
+          "draft_outcome": "created",
+          "source_id": "personal-source-0b1373a78d52635da3077a8dbf26b2f0332d8580781ef7cc56f6a15b1aa912fd",
+          "source_path": "<SOURCE_PATH>"
+        },
+        "result": "ok",
+        "schema_version": 1
+      }
+    },
+    {
+      "command": "mko check --format json-v1",
+      "result": {
+        "command": "check",
+        "data": {
+          "errors": [],
+          "valid": true,
+          "warnings": []
+        },
+        "result": "ok",
+        "schema_version": 1
+      }
+    }
+  ]
+}

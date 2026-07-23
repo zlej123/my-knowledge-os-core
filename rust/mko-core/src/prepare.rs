@@ -6,13 +6,13 @@ use std::{
 
 use cap_std::{
     ambient_authority,
-    fs::{Dir, File, OpenOptions},
+    fs::{Dir, File, OpenOptions, OpenOptionsExt},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CORE_VERSION,
-    config::load_capture_config,
+    config::{CaptureConfig, load_capture_config},
+    context::ResolvedPersonalContext,
     error::MkoError,
     fingerprint::{FileSnapshot, fingerprint_open_file, validate_pdf_content},
     lock::AssetLock,
@@ -22,6 +22,7 @@ use crate::{
         EXTRACTOR_NAME, EXTRACTOR_VERSION, extract_pdf_pages_in_child, validate_extracted_pages,
     },
     registry::{mark_asset_extracted, read_asset},
+    version::KNOWLEDGE_CONTRACT_VERSION,
 };
 
 pub const PROCESSOR_VERSION: &str = "source-v1";
@@ -34,6 +35,7 @@ static NEXT_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
 pub struct PrepareRequest {
     repository_root: PathBuf,
     local_config_path: Option<PathBuf>,
+    resolved_context: Option<ResolvedPersonalContext>,
     asset_id: String,
     output: PathBuf,
     clear_stale_lock: bool,
@@ -48,6 +50,7 @@ impl PrepareRequest {
         Self {
             repository_root: repository_root.as_ref().to_path_buf(),
             local_config_path: None,
+            resolved_context: None,
             asset_id: asset_id.into(),
             output: output.as_ref().to_path_buf(),
             clear_stale_lock: false,
@@ -56,6 +59,11 @@ impl PrepareRequest {
 
     pub fn with_local_config(mut self, path: impl AsRef<Path>) -> Self {
         self.local_config_path = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn with_resolved_context(mut self, context: ResolvedPersonalContext) -> Self {
+        self.resolved_context = Some(context);
         self
     }
 
@@ -93,6 +101,17 @@ pub fn load_prepared_source_bundle(
     repository_root: &Path,
     requested: &Path,
 ) -> Result<PreparedSourceBundle, MkoError> {
+    load_prepared_source_bundle_with_before_open(repository_root, requested, || {})
+}
+
+fn load_prepared_source_bundle_with_before_open<F>(
+    repository_root: &Path,
+    requested: &Path,
+    before_open: F,
+) -> Result<PreparedSourceBundle, MkoError>
+where
+    F: FnOnce(),
+{
     let requested_repository_root = repository_root.to_path_buf();
     let repository_root = crate::path_policy::canonical_directory(
         &requested_repository_root,
@@ -109,11 +128,21 @@ pub fn load_prepared_source_bundle(
         asset_id,
         requested,
     )?;
-    let public_path = PathBuf::from("prepared").join(&runtime.output_name);
+    before_open();
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_bundle_nofollow(&mut options);
     let file = runtime
-        .runtime
-        .open(&public_path)
+        .prepared
+        .open_with(&runtime.output_name, &options)
         .map_err(|_| runtime_publication_error())?;
+    let metadata = file.metadata().map_err(|_| runtime_publication_error())?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > MAX_PREPARED_BUNDLE_BYTES
+    {
+        return Err(runtime_publication_error());
+    }
     let mut bytes = Vec::new();
     file.take(MAX_PREPARED_BUNDLE_BYTES + 1)
         .read_to_end(&mut bytes)
@@ -129,6 +158,29 @@ pub fn load_prepared_source_bundle(
     validate_prepared_bundle_contract(&bundle, asset_id)?;
     Ok(bundle)
 }
+
+#[cfg(target_os = "linux")]
+fn configure_bundle_nofollow(options: &mut OpenOptions) {
+    const O_NONBLOCK: i32 = 0x800;
+    const O_NOFOLLOW: i32 = 0x20_000;
+    options.custom_flags(O_NOFOLLOW | O_NONBLOCK);
+}
+
+#[cfg(target_os = "macos")]
+fn configure_bundle_nofollow(options: &mut OpenOptions) {
+    const O_NONBLOCK: i32 = 0x4;
+    const O_NOFOLLOW: i32 = 0x100;
+    options.custom_flags(O_NOFOLLOW | O_NONBLOCK);
+}
+
+#[cfg(windows)]
+fn configure_bundle_nofollow(options: &mut OpenOptions) {
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn configure_bundle_nofollow(_options: &mut OpenOptions) {}
 
 fn validate_prepared_bundle_contract(
     bundle: &PreparedSourceBundle,
@@ -148,7 +200,7 @@ fn validate_prepared_bundle_contract(
         || bundle.trust != TRUST
         || bundle.extractor.name != EXTRACTOR_NAME
         || bundle.extractor.version != EXTRACTOR_VERSION
-        || bundle.core_version != CORE_VERSION
+        || bundle.core_version != KNOWLEDGE_CONTRACT_VERSION
         || bundle.processor_version != PROCESSOR_VERSION
         || bundle.prompt_version != PROMPT_VERSION
     {
@@ -177,14 +229,22 @@ pub fn prepare_source_with_extractor<F>(
 where
     F: FnOnce(File, &FileSnapshot) -> Result<Vec<String>, MkoError>,
 {
-    let config = load_capture_config(
-        &request.repository_root,
-        request.local_config_path.as_deref(),
-    )?;
+    let config = match request.resolved_context.as_ref() {
+        Some(context) => CaptureConfig::from_resolved_context(context)?,
+        None => load_capture_config(
+            &request.repository_root,
+            request.local_config_path.as_deref(),
+        )?,
+    };
+    let requested_repository_root = request
+        .resolved_context
+        .as_ref()
+        .map(|context| context.repository_root.as_path())
+        .unwrap_or(&request.repository_root);
     let source_id = source_id(&request.asset_id)?;
     let runtime = runtime_paths(
         &config.repository_root,
-        &request.repository_root,
+        requested_repository_root,
         &request.asset_id,
         &request.output,
     )?;
@@ -253,7 +313,7 @@ where
             name: EXTRACTOR_NAME.into(),
             version: EXTRACTOR_VERSION.into(),
         },
-        core_version: CORE_VERSION.into(),
+        core_version: KNOWLEDGE_CONTRACT_VERSION.into(),
         processor_version: PROCESSOR_VERSION.into(),
         prompt_version: PROMPT_VERSION.into(),
     };
@@ -622,12 +682,50 @@ impl Drop for Snapshot {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::Arc};
+    use std::{
+        fs,
+        sync::{Arc, mpsc},
+        thread,
+        time::Duration,
+    };
 
     use cap_std::{ambient_authority, fs::Dir};
 
-    use super::{Snapshot, runtime_paths, write_runtime};
-    use crate::fingerprint::fingerprint_open_file;
+    use super::{
+        PROCESSOR_VERSION, PROMPT_VERSION, PreparedSourceBundle, Snapshot, TRUST,
+        VersionedComponent, load_prepared_source_bundle_with_before_open, runtime_paths,
+        write_runtime,
+    };
+    use crate::{
+        fingerprint::fingerprint_open_file,
+        model::Fingerprint,
+        pdf::{EXTRACTOR_NAME, EXTRACTOR_VERSION},
+        version::KNOWLEDGE_CONTRACT_VERSION,
+    };
+
+    fn bundle(asset_id: &str, title: &str) -> PreparedSourceBundle {
+        let hash = asset_id.strip_prefix("personal-asset-").unwrap();
+        PreparedSourceBundle {
+            schema_version: 1,
+            asset_id: asset_id.into(),
+            source_id: asset_id.replacen("asset", "source", 1),
+            fingerprint: Fingerprint {
+                method: "sha256".into(),
+                value: format!("sha256:{hash}"),
+            },
+            title_hint: title.into(),
+            logical_path: "paper.pdf".into(),
+            pages: vec!["Fixture page".into()],
+            trust: TRUST.into(),
+            extractor: VersionedComponent {
+                name: EXTRACTOR_NAME.into(),
+                version: EXTRACTOR_VERSION.into(),
+            },
+            core_version: KNOWLEDGE_CONTRACT_VERSION.into(),
+            processor_version: PROCESSOR_VERSION.into(),
+            prompt_version: PROMPT_VERSION.into(),
+        }
+    }
 
     #[test]
     fn snapshot_copy_rejects_mutation_that_is_restored_before_final_provider_check() {
@@ -726,5 +824,137 @@ mod tests {
             fs::read(retained.join(&runtime.output_name)).unwrap(),
             b"retained bundle"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_loader_uses_retained_prepared_directory_after_public_directory_swap() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = root.path().join("repository");
+        let outside = root.path().join("outside");
+        fs::create_dir(&repository).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let asset_id = format!("personal-asset-{}", "c".repeat(64));
+        let output = repository
+            .join(".knowledge-os/runtime/prepared")
+            .join(format!("{asset_id}.json"));
+        let runtime = runtime_paths(&repository, &repository, &asset_id, &output).unwrap();
+        let expected = bundle(&asset_id, "Retained bundle");
+        write_runtime(
+            &runtime.prepared,
+            &runtime.output_name,
+            &serde_json::to_vec(&expected).unwrap(),
+        )
+        .unwrap();
+        let attacker = bundle(&asset_id, "Attacker bundle");
+        fs::write(
+            outside.join(&runtime.output_name),
+            serde_json::to_vec(&attacker).unwrap(),
+        )
+        .unwrap();
+        let prepared = repository.join(".knowledge-os/runtime/prepared");
+        let retained = repository.join(".knowledge-os/runtime/prepared-retained");
+
+        let loaded = load_prepared_source_bundle_with_before_open(&repository, &output, || {
+            fs::rename(&prepared, &retained).unwrap();
+            std::os::unix::fs::symlink(&outside, &prepared).unwrap();
+        })
+        .unwrap();
+
+        assert_eq!(loaded, expected);
+        assert_ne!(loaded, attacker);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_loader_rejects_entry_symlink_swapped_after_path_validation() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = root.path().join("repository");
+        let outside = root.path().join("outside");
+        fs::create_dir(&repository).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let asset_id = format!("personal-asset-{}", "d".repeat(64));
+        let output = repository
+            .join(".knowledge-os/runtime/prepared")
+            .join(format!("{asset_id}.json"));
+        let runtime = runtime_paths(&repository, &repository, &asset_id, &output).unwrap();
+        let expected = bundle(&asset_id, "Expected bundle");
+        write_runtime(
+            &runtime.prepared,
+            &runtime.output_name,
+            &serde_json::to_vec(&expected).unwrap(),
+        )
+        .unwrap();
+        let attacker_path = outside.join("attacker.json");
+        fs::write(
+            &attacker_path,
+            serde_json::to_vec(&bundle(&asset_id, "Attacker bundle")).unwrap(),
+        )
+        .unwrap();
+        let saved = output.with_extension("saved");
+
+        let error = load_prepared_source_bundle_with_before_open(&repository, &output, || {
+            fs::rename(&output, &saved).unwrap();
+            std::os::unix::fs::symlink(&attacker_path, &output).unwrap();
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code(), "runtime_publication_invalid");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_loader_rejects_entry_fifo_swapped_after_path_validation_without_blocking() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = root.path().join("repository");
+        fs::create_dir(&repository).unwrap();
+        let asset_id = format!("personal-asset-{}", "e".repeat(64));
+        let output = repository
+            .join(".knowledge-os/runtime/prepared")
+            .join(format!("{asset_id}.json"));
+        let runtime = runtime_paths(&repository, &repository, &asset_id, &output).unwrap();
+        write_runtime(
+            &runtime.prepared,
+            &runtime.output_name,
+            &serde_json::to_vec(&bundle(&asset_id, "Expected bundle")).unwrap(),
+        )
+        .unwrap();
+        let saved = output.with_extension("saved");
+        let repository_for_worker = repository.clone();
+        let output_for_worker = output.clone();
+        let fifo = output.clone();
+        let (sender, receiver) = mpsc::channel();
+
+        let worker = thread::spawn(move || {
+            let result = load_prepared_source_bundle_with_before_open(
+                &repository_for_worker,
+                &output_for_worker,
+                || {
+                    fs::rename(&output_for_worker, &saved).unwrap();
+                    assert!(
+                        std::process::Command::new("mkfifo")
+                            .arg(&output_for_worker)
+                            .status()
+                            .unwrap()
+                            .success()
+                    );
+                },
+            );
+            sender.send(result).unwrap();
+        });
+
+        let result = match receiver.recv_timeout(Duration::from_millis(250)) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                drop(fs::OpenOptions::new().write(true).open(&fifo).unwrap());
+                let _ = receiver.recv_timeout(Duration::from_secs(1));
+                worker.join().unwrap();
+                panic!("prepared bundle loader blocked while opening a FIFO replacement");
+            }
+            Err(error) => panic!("prepared bundle loader disconnected: {error}"),
+        };
+        worker.join().unwrap();
+
+        assert_eq!(result.unwrap_err().code(), "runtime_publication_invalid");
     }
 }

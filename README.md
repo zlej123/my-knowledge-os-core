@@ -1,105 +1,186 @@
-# My Knowledge OS Core
+# My Knowledge OS
 
-`mko` is the versioned, deterministic Rust Core for My Knowledge OS.
+My Knowledge OS는 PDF 원본, 근거 기반 요약, LLM 분석, 사람의 판단을 섞지 않고 보존하는
+Git + Markdown 개인 지식 시스템입니다.
 
-## Responsibility boundary
+- Google Drive Inbox에는 원본 PDF를 둡니다.
+- Private Git 저장소에는 Asset 메타데이터와 불변 Source/Knowledge revision을 둡니다.
+- Obsidian은 생성된 projection을 읽는 화면입니다.
+- LLM은 초안을 만들지만 승인·커밋·푸시하지 않습니다.
 
-The Core owns deterministic work: validating provider paths and scope, calculating PDF fingerprints and IDs, reading and writing Registry records, extracting text, validating schemas and state transitions, calculating content revisions, managing locks and atomic writes, running checks, and performing human-only approval.
+## 가장 쉬운 시작
 
-An LLM supplies meaning only: structured semantic JSON containing a General Summary, Domain Perspective, and related knowledge candidates. It never writes Registry YAML or Source Markdown, assigns IDs or states, changes approval metadata, approves content, commits, or pushes. A Codex adapter orchestrates the Core and LLM; it does not bypass the Core.
+현재 v0.3 소스 설치는 CLI와 Codex Skill을 함께 설치합니다. 이 경로는 Rust 1.97 이상이
+필요하며 `mko setup`이나 Knowledge 저장소 변경을 자동 실행하지 않습니다.
 
-## v0.1 boundary
+Windows PowerShell:
 
-v0.1 is a Personal PDF vertical slice: one `personal-kb`, local-readable PDFs from the Google Drive streaming filesystem adapter, typed Source drafts, revision-bound human approval, and manual Git commit/push. It excludes Shared and Work scopes, other document formats, Drive API/OAuth/watchers, agent approval, automatic commit/push, automatic regeneration of approved Sources, databases, vector search, and RAG.
+```powershell
+pwsh -File scripts/install.ps1 -PlanOnly
+pwsh -File scripts/install.ps1 -Yes
+```
 
-The stable top-level command groups are `asset`, `source`, `check`, `human`, and `hooks`.
+macOS:
 
-## Install
+```bash
+./scripts/install.sh --plan
+./scripts/install.sh --yes
+```
 
-Install [Rust](https://www.rust-lang.org/tools/install) with `rustup`. This repository pins Rust 1.97.0 in `rust-toolchain.toml`. From the repository root, install the CLI with the locked dependency graph:
+설치 후 Codex를 다시 시작하고 다음처럼 요청합니다.
+
+```text
+My Knowledge OS 시작해줘
+```
+
+스크립트는 기존 Skill을 삭제하지 않고 먼저 timestamped backup으로 이동합니다. Windows에서는
+Cargo bin 경로를 사용자 PATH에 중복 없이 추가하며, macOS에서는 PATH에 없을 경우 추가할 정확한
+경로를 안내합니다. Rust가 없는 clean machine용 checksum 고정 릴리스 바이너리 설치는 다음
+배포 절취선이며, 그 전까지 Cargo가 개발 설치 fallback입니다.
+
+수동 개발 설치:
 
 ```bash
 cargo install --path rust/mko-cli --locked
 ```
 
-The Personal KB is a separate private Git repository. Its committed `knowledge-os.yaml` names the Google Drive streaming provider, but the machine-specific provider root belongs in an untracked local file. For example, create `~/.config/mko/personal.yaml` with:
+Skill만 수동 설치해야 한다면 canonical 폴더
+`skills/codex/my-knowledge-os`를 `${CODEX_HOME:-$HOME/.codex}/skills/my-knowledge-os`에
+복사합니다. Windows에서 `CODEX_HOME`이 없다면 `%USERPROFILE%\.codex`를 사용합니다.
 
-```yaml
-provider_root: <absolute-path-to-google-drive-personal-inbox>
-```
-
-Replace the angle-bracket value with the locally mounted, fully hydrated Personal Inbox directory. Do not commit this file or an absolute provider path. You may pass it with `--local-config` or set `MKO_LOCAL_CONFIG` to its path.
-
-Initialize the managed pre-commit hook once in the Personal KB:
+실제 터미널에서 최초 설정을 한 번 실행합니다.
 
 ```bash
-mko hooks install --repo <personal-kb>
+mko setup
 ```
 
-The installer writes `.githooks/pre-commit` and configures `core.hooksPath`. `mko check` reports `hook_missing` or `hook_not_configured` if that protection is absent.
-
-## Operate the Personal PDF workflow
-
-Capture a hydrated PDF from within the configured provider root:
+설정은 비변경 계획과 실제 TTY 적용의 두 단계로 실행합니다.
 
 ```bash
-mko asset capture --repo <personal-kb> --local-config ~/.config/mko/personal.yaml --file <provider-pdf> --json
+mko setup plan --format json-v2
+# 실제 터미널에서 Core가 다시 표시한 정확한 경로와 효과를 확인한 뒤
+mko setup apply --plan <core-plan-id> --format json-v2
 ```
 
-Record the returned Asset ID. Prepare the bounded, untrusted extraction bundle at its canonical runtime location:
+계획은 15분 뒤 만료되고 한 번만 사용할 수 있으며, 파일·프로필·목적지가 바뀌면 적용 전
+무효화됩니다. 채팅 승인이나 호스트의 일반 명령 승인만으로는 적용할 수 없고, Core가 표시한
+card/effect digest에 묶인 정확한 문구를 실제 TTY에 입력해야 합니다. 또는 `mko setup`의
+사람용 터미널 흐름을 사용할 수 있습니다.
+
+설정 화면은 사용할 Personal KB와 Google Drive Inbox의 정확한 경로를 보여주고 `y` 확인
+전에는 아무것도 만들지 않습니다. 기본 KB는 `~/My-Knowledge-OS`이고 Git 저장소는 Google
+Drive 바깥에 둡니다. 다른 위치는 `mko setup --repo <path>`로 선택할 수 있습니다.
+
+성공하면 출력된 Personal Inbox에 PDF를 복사한 뒤, 폴더 전체를 한 번에 등록할 수 있습니다.
 
 ```bash
-mko source prepare --repo <personal-kb> --local-config ~/.config/mko/personal.yaml --asset-id <asset-id> --output <personal-kb>/.knowledge-os/runtime/prepared/<asset-id>.json
+mko add --inbox
 ```
 
-Run the Codex `process-asset` adapter to produce typed semantic JSON from that bundle, then let the Core write the canonical pending Source:
+한 파일만 선택해 등록할 수도 있습니다.
 
 ```bash
-mko source write-draft --repo <personal-kb> --bundle <personal-kb>/.knowledge-os/runtime/prepared/<asset-id>.json --response <semantic-response.json> --json
+mko add "/Google Drive/.../My-Knowledge-OS-Assets/personal/inbox/paper.pdf"
 ```
 
-The semantic response is input only. The Core owns Source Markdown, IDs, relations, states, and `content_revision`. If a pending draft would change, inspect it first and rerun with `--replace-pending`; an approved Source is immutable.
-
-Review the Source text and the repository diff manually. Approval is deliberately interactive and revision-bound:
+10 MiB보다 큰 스트리밍 파일은 전체 다운로드/읽기 확인 후 한 번만 다시 실행합니다.
 
 ```bash
-git -C <personal-kb> diff -- sources assets/registry
-mko human approve-source --repo <personal-kb> --source-id <source-id>
+mko add "/path/in/inbox/paper.pdf" --confirm-download
 ```
 
-At the terminal prompt, confirm only after the displayed Source ID, current revision, status transition, and Git summary match the reviewed diff. Codex and other agents must never run approval, `git commit`, or `git push` for the user.
+Asset 등록은 PDF를 이동·삭제하지 않고 SHA-256 기반 메타데이터만 기록합니다.
 
-After approval, review the final diff and stage it manually. The managed hook runs the staged check before a human-created commit:
+## Codex에서 사용
+
+정식 스킬 원본은 [skills/codex/my-knowledge-os/SKILL.md](skills/codex/my-knowledge-os/SKILL.md)입니다.
+설치한 뒤 평소 말로 요청합니다.
+
+```text
+이 PDF 요약해줘
+```
+
+스킬은 다음 순서로 동작합니다.
+
+```text
+Asset 등록
+  → 정확한 PDF 내용 추출
+  → 근거 기반 Source 요약
+  → “이 내용을 지식 노트로도 등록할까요?”
+  → 사용자가 동의하면 Knowledge 초안
+  → 통합 검토 대기열
+```
+
+Knowledge는 다음 네 층을 구분합니다.
+
+1. 문서 근거가 있는 사실·정의·공식·결과
+2. `interpretation`/`hypothesis`로 표시한 LLM 분석
+3. 반론·불확실성·검증 질문
+4. 별도 승인 경로로 기록하는 사용자의 판단
+
+## 확인과 피드백
 
 ```bash
-git -C <personal-kb> diff --check
-git -C <personal-kb> add assets/registry sources .githooks
-mko check --repo <personal-kb> --staged
-git -C <personal-kb> diff --cached
-git -C <personal-kb> commit
+mko queue
+mko show <stable-id>
+mko dashboard
 ```
 
-Pushing remains a separate manual decision.
+`mko queue`와 Obsidian `HOME.md`는 같은 검토 상태를 보여줍니다. Source와 Knowledge가 같은
+PDF에서 나왔다면 하나의 결합 카드로 표시됩니다.
 
-## Provider and size failures
+Codex는 정확한 카드를 보여준 뒤 `request_changes` 또는 `defer` 피드백만 전달할 수 있습니다.
+최종 승인은 실제 터미널에서 수행합니다.
 
-Google Drive streaming files must be downloaded locally before capture. On `provider_not_hydrated` or `provider_content_unavailable`, use the Google Drive client to make the PDF available offline, wait for hydration to finish, and retry without changing the logical provider path. Do not move the document outside the configured provider root to bypass this check.
+```bash
+mko review <stable-id>
+```
 
-The automated path accepts PDFs up to 50 MiB. `file_too_large` directs larger PDFs to a manual path: verify the file and its backup, extract or split it with a trusted local tool, review the derived material, and capture only a supported PDF whose provenance is recorded. Do not add the original large binary or an extracted-text cache to Git.
+이 명령은 현재 revision과 효과를 다시 표시하고 revision-bound 확인을 요구합니다. 비대화형
+명령에는 `approve` 경로가 없습니다.
 
-Before registering an Asset that has no copy anywhere else, stop and create a verified backup outside the Personal KB. This backup trigger is mandatory for unique Assets; Google Drive sync alone is not proof of a recoverable second copy.
+## 기계 계약
 
-## Tests and live smoke checks
+에이전트는 사람용 출력 대신 엄격한 JSON v2 envelope를 사용합니다.
 
-Automated tests never call an LLM or the network. They stub LLM output with committed, versioned golden semantic JSON and use generated PDF fixtures, a fixed contract, and deterministic Core operations. A release smoke test is separate: use one user-owned, non-sensitive, hydrated Google Drive PDF; capture, prepare, run the live Codex semantic step, inspect and approve the Source interactively, run the hook, and create the commit manually. Record review time, but never store the PDF, provider absolute path, extracted-text cache, credentials, or runtime locks in Git.
+```bash
+mko setup plan --format json-v2
+# 실제 TTY 전용; 비대화형 실행은 setup_tty_required로 실패
+mko setup apply --plan <core-plan-id> --format json-v2
+mko add --inbox --format json-v2
+mko add <inbox-pdf> --format json-v2
+mko source prepare --asset-id <asset-id> --format json-v2
+mko source write-draft --bundle <bundle> --response <source-response.json> --format json-v2
+mko knowledge write --asset-id <asset-id> --bundle <bundle> --response <knowledge-response.json> --format json-v2
+mko queue --format json-v2
+mko show <stable-id> --format json-v2
+mko review-open <stable-id> --format json-v2
+mko review-feedback --input <decision.json> --format json-v2
+```
 
-## Development
+계약은 [schemas/v2](schemas/v2), 예시는 [tests/fixtures/json-v2](tests/fixtures/json-v2)에 있습니다.
+추출 전문은 `.mko/runtime/sessions/` 아래의 24시간 기기 로컬 세션 파일이며 Git과 Drive에서
+제외됩니다. 만료되면 Core가 재추출하고, 암호화 없는 영구 평문 캐시는 사용하지 않습니다.
 
-Rust 1.97.0 is pinned in `rust-toolchain.toml`. Verify the workspace with:
+## 저장소와 동기화
+
+KB는 Private GitHub 저장소로 관리하는 것을 권장합니다. Google Drive는 Asset 원본 저장소일
+뿐 Git history를 동기화하지 않습니다. 커밋·pull·push는 v0.3.0에서 수동입니다.
+
+## 개발 검증
+
+저장소 루트에서:
 
 ```bash
 scripts/fmt.sh --check
-cd rust
+```
+
+`rust/`에서:
+
+```bash
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+설계 기준은
+[v0.3 Knowledge UX spec](docs/superpowers/specs/2026-07-22-v0.3-knowledge-ux-design.md)에 있습니다.

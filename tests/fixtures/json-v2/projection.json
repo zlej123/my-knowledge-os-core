@@ -1,0 +1,12 @@
+{
+  "record_type": "source",
+  "id": "personal-source-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "title": "Example paper",
+  "current_revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "review_head_id": null,
+  "derived_state": "unreviewed",
+  "domain": "research",
+  "tags": ["example", "paper"],
+  "record_link": "sources/personal-source-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/current.yaml",
+  "asset_link": "assets/registry/personal-asset-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.yaml"
+}

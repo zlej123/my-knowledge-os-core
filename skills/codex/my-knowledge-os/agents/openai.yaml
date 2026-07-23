@@ -1,0 +1,4 @@
+interface:
+  display_name: "My Knowledge OS"
+  short_description: "설치와 설정부터 개인 PDF 지식화 및 검토 대기열 관리까지"
+  default_prompt: "$my-knowledge-os를 사용해 My Knowledge OS를 시작하거나 선택한 개인 PDF를 검토 대기 지식 초안으로 정리해 주세요."

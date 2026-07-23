@@ -72,6 +72,31 @@ mod acceptance {
         assert_eq!(registry_markdown_files(&env.repository).len(), 1);
     }
 
+    pub fn spaces_and_non_ascii_paths() {
+        let env = TestEnv::new();
+        let macos = env.pdf(
+            "macOS Drive/개인 문서/논문 with spaces.pdf",
+            &["portable bytes"],
+        );
+        let windows = env.pdf(
+            "Windows Drive/개인 문서/논문 with spaces.pdf",
+            &["portable bytes"],
+        );
+
+        let first = env.capture(&macos);
+        let second = env.capture(&windows);
+        let asset_id = first["asset_id"].as_str().unwrap();
+        let bundle = env.prepare(asset_id);
+        let draft = env.write_draft(&bundle, Fixture::Semantic);
+
+        assert_eq!(first["result"], "created");
+        assert_eq!(second["result"], "existing");
+        assert_eq!(first["asset_id"], second["asset_id"]);
+        assert_eq!(draft["result"], "created");
+        assert_eq!(registry_markdown_files(&env.repository).len(), 1);
+        assert_eq!(source_markdown_files(&env.repository).len(), 1);
+    }
+
     pub fn process_reuse() {
         let env = TestEnv::new();
         let pdf = env.pdf("paper.pdf", &["deterministic"]);
@@ -1110,6 +1135,11 @@ fn a14_concurrent_lock() {
 #[test]
 fn a15_agent_cannot_approve() {
     acceptance::agent_cannot_approve();
+}
+
+#[test]
+fn a16_spaces_and_non_ascii_paths_are_portable() {
+    acceptance::spaces_and_non_ascii_paths();
 }
 
 #[test]

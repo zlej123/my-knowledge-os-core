@@ -176,7 +176,7 @@ fn stale_asset_lock_requires_an_explicit_clear_request() {
             .with_timezone(&Utc),
         command: "interrupted-operation".into(),
         asset_id: asset_id.clone(),
-        owner_token: "interrupted-owner".into(),
+        owner_token: format!("1-1-{}", "a".repeat(32)),
     };
     fs::write(&lock_path, serde_json::to_vec(&record).unwrap()).unwrap();
 
@@ -292,7 +292,11 @@ fn concurrent_stale_clearers_leave_one_live_lock_intact() {
             .collect::<Vec<_>>()
     });
 
-    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results.iter().filter(|result| result.is_ok()).count(),
+        1,
+        "concurrent stale-clear results: {results:?}"
+    );
     assert!(lock_path.exists());
 }
 

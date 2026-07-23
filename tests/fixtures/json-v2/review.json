@@ -1,0 +1,16 @@
+{
+  "schema_version": 2,
+  "id": "personal-review-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "record_type": "review",
+  "targets": [
+    {
+      "record_type": "source",
+      "record_id": "personal-source-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "displayed_revision": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "decision": "request_changes",
+      "feedback": "Clarify the reported limitation.",
+      "supersedes_review_id": null
+    }
+  ],
+  "created_at": "2026-07-22T00:00:00Z"
+}

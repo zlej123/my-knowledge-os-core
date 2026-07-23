@@ -22,10 +22,18 @@ serde-saphyr.workspace = true
 sha2.workspace = true
 sysinfo.workspace = true
 hostname.workspace = true
+getrandom.workspace = true
 pdf-extract.workspace = true
 regex.workspace = true
 unicode-normalization.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+mko-windows-acl = { path = "../mko-windows-acl" }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "=0.30.1", features = ["fs"] }
+
 [dev-dependencies]
+jsonschema.workspace = true
 lopdf = "=0.42.0"
 tempfile.workspace = true

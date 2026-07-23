@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "command": "inbox",
+  "result": "error",
+  "error": {
+    "code": "inbox_unavailable",
+    "message": "The inbox is not configured.",
+    "recovery": {
+      "kind": "configure"
+    }
+  }
+}

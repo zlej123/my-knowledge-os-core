@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "command": "status",
+  "result": "ok",
+  "data": {
+    "healthy": false,
+    "counts": {
+      "new": 0,
+      "registered": 1,
+      "incomplete": 1,
+      "review_pending": 0,
+      "processed": 4,
+      "blocked": 1
+    },
+    "primary_blocker": {
+      "code": "repository_unreadable",
+      "message": "The repository is not readable.",
+      "path": "/knowledge"
+    },
+    "next_action": "repair"
+  }
+}

@@ -17,6 +17,17 @@ static NEXT_TEST_ENV: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 #[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
+fn version_reports_the_product_release() {
+    Command::cargo_bin("mko")
+        .unwrap()
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mko 0.3.0"));
+}
+
+#[test]
+#[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
 fn help_exposes_v01_command_groups() {
     Command::cargo_bin("mko")
         .unwrap()
@@ -75,16 +86,16 @@ fn asset_capture_emits_complete_json_for_runtime_errors() {
         .stdout
         .clone();
 
-    assert_eq!(
-        parse_json(&output),
-        json!({
-            "result": "error",
-            "error": {
-                "code": "invalid_pdf",
-                "message": "file does not have a PDF signature",
-            }
-        })
-    );
+    let expected = json!({
+        "result": "error",
+        "error": {
+            "code": "invalid_pdf",
+            "message": "file does not have a PDF signature",
+        }
+    });
+    let mut expected_bytes = serde_json::to_vec(&expected).unwrap();
+    expected_bytes.push(b'\n');
+    assert_eq!(output, expected_bytes);
 }
 
 #[test]
@@ -114,6 +125,74 @@ fn asset_capture_emits_complete_json_for_usage_errors() {
             }
         })
     );
+}
+
+#[test]
+#[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
+fn legacy_json_usage_errors_remain_byte_frozen_for_source_commands() {
+    let cases = [
+        (
+            ["source", "prepare", "--json"].as_slice(),
+            b"{\"error\":{\"code\":\"usage\",\"message\":\"error: unexpected argument '--json' found\\n\\nUsage: mko source prepare [OPTIONS] --repo <REPO> --asset-id <ASSET_ID> --output <OUTPUT>\\n\\nFor more information, try '--help'.\\n\"},\"result\":\"error\"}\n"
+                .as_slice(),
+        ),
+        (
+            ["source", "write-draft", "--json"].as_slice(),
+            b"{\"error\":{\"code\":\"usage\",\"message\":\"error: the following required arguments were not provided:\\n  --repo <REPO>\\n  --bundle <BUNDLE>\\n  --response <RESPONSE>\\n\\nUsage: mko source write-draft --repo <REPO> --bundle <BUNDLE> --response <RESPONSE> --json\\n\\nFor more information, try '--help'.\\n\"},\"result\":\"error\"}\n"
+                .as_slice(),
+        ),
+        (
+            ["source", "repair-state", "--json"].as_slice(),
+            b"{\"error\":{\"code\":\"usage\",\"message\":\"error: the following required arguments were not provided:\\n  --repo <REPO>\\n  --asset-id <ASSET_ID>\\n\\nUsage: mko source repair-state --repo <REPO> --asset-id <ASSET_ID> --json\\n\\nFor more information, try '--help'.\\n\"},\"result\":\"error\"}\n"
+                .as_slice(),
+        ),
+    ];
+
+    for (arguments, expected_stdout) in cases {
+        let output = Command::cargo_bin("mko")
+            .unwrap()
+            .args(arguments)
+            .assert()
+            .code(2)
+            .get_output()
+            .clone();
+        assert_eq!(output.stdout, expected_stdout);
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
+#[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
+fn every_malformed_argument_equal_to_json_selects_frozen_legacy_json_output() {
+    let cases = [
+        (
+            vec!["--json"],
+            b"{\"error\":{\"code\":\"usage\",\"message\":\"error: unexpected argument '--json' found\\n\\nUsage: mko <COMMAND>\\n\\nFor more information, try '--help'.\\n\"},\"result\":\"error\"}\n"
+                .as_slice(),
+        ),
+        (
+            vec!["not-a-command", "--json"],
+            b"{\"error\":{\"code\":\"usage\",\"message\":\"error: unrecognized subcommand 'not-a-command'\\n\\nUsage: mko <COMMAND>\\n\\nFor more information, try '--help'.\\n\"},\"result\":\"error\"}\n"
+                .as_slice(),
+        ),
+        (
+            vec!["--", "--json"],
+            b"{\"error\":{\"code\":\"usage\",\"message\":\"error: unrecognized subcommand '--json'\\n\\nUsage: mko <COMMAND>\\n\\nFor more information, try '--help'.\\n\"},\"result\":\"error\"}\n"
+                .as_slice(),
+        ),
+    ];
+
+    for (arguments, expected_stdout) in cases {
+        let output = Command::cargo_bin("mko")
+            .unwrap()
+            .args(arguments)
+            .assert()
+            .code(2)
+            .get_output()
+            .clone();
+        assert_eq!(output.stdout, expected_stdout);
+        assert!(output.stderr.is_empty());
+    }
 }
 
 #[test]
@@ -217,7 +296,7 @@ fn source_prepare_uses_the_hidden_worker_and_publishes_a_runtime_bundle() {
         .join(".knowledge-os/runtime/prepared")
         .join(format!("{asset_id}.json"));
 
-    Command::cargo_bin("mko")
+    let stdout = Command::cargo_bin("mko")
         .unwrap()
         .args([
             "source",
@@ -233,7 +312,17 @@ fn source_prepare_uses_the_hidden_worker_and_publishes_a_runtime_bundle() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("prepared"));
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        stdout,
+        format!(
+            "prepared {asset_id} {}\n",
+            asset_id.replacen("asset", "source", 1)
+        )
+        .into_bytes()
+    );
 
     let bundle: Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
     assert_eq!(bundle["asset_id"], asset_id);
@@ -330,6 +419,7 @@ fn source_write_draft_consumes_typed_json_and_emits_complete_json() {
         .stdout
         .clone();
 
+    let raw_output = output.clone();
     let output = parse_json(&output);
     assert_eq!(output["result"], "created");
     assert_eq!(output["source_id"], asset_id.replacen("asset", "source", 1));
@@ -345,6 +435,15 @@ fn source_write_draft_consumes_typed_json_and_emits_complete_json() {
             .unwrap()
             .starts_with("sha256:")
     );
+    let mut expected_bytes = serde_json::to_vec(&json!({
+        "result": output["result"],
+        "source_id": output["source_id"],
+        "source_path": output["source_path"],
+        "content_revision": output["content_revision"],
+    }))
+    .unwrap();
+    expected_bytes.push(b'\n');
+    assert_eq!(raw_output, expected_bytes);
 }
 
 #[test]

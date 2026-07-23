@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "command": "doctor",
+  "result": "ok",
+  "data": {
+    "healthy": false,
+    "checks": [
+      {"code":"product_version","status":"healthy","message":"0.3.0","path":null,"recovery":null},
+      {"code":"contract_version","status":"healthy","message":"0.1.0","path":null,"recovery":null},
+      {"code":"profile_unreadable","status":"blocked","message":"machine profile could not be read or validated","path":"<PROFILE>","recovery":{"kind":"configure"}},
+      {"code":"repository_access","status":"healthy","message":"repository is compatible","path":"<REPOSITORY>","recovery":null},
+      {"code":"provider_root_invalid","status":"blocked","message":"provider root must be the exact Personal Inbox","path":"<ACCOUNT_ROOT>","recovery":{"kind":"configure"}},
+      {"code":"hook_missing","status":"blocked","message":"managed Git hook is not installed","path":"<REPOSITORY>","recovery":{"kind":"repair"}},
+      {"code":"locks_clear","status":"healthy","message":"no operation locks are present","path":"<REPOSITORY>","recovery":null}
+    ],
+    "next_action": "configure"
+  }
+}

@@ -1,0 +1,1 @@
+{"schema_version":1,"command":"check","result":"error","error":{"code":"repository_root_invalid","message":"The repository could not be checked.","recovery":null}}

@@ -1,0 +1,40 @@
+{
+  "schema_version": 2,
+  "title": "Example paper",
+  "authors": ["Example Author"],
+  "publication_date": "2026-07-22",
+  "one_sentence_summary": "The document presents an example result.",
+  "general_summary": "A bounded summary grounded in the prepared content.",
+  "key_claims": [
+    {
+      "text": "The reported result is supported by the example evidence.",
+      "evidence_refs": [
+        {
+          "block_id": "block-0001",
+          "locator": "page:1",
+          "text_span_utf8": {"start": 0, "end": 8},
+          "table_range": null
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    {
+      "text": "The document reports a limited evaluation.",
+      "basis": "stated",
+      "evidence_refs": [
+        {
+          "block_id": "block-0001",
+          "locator": "page:1",
+          "text_span_utf8": null,
+          "table_range": null
+        }
+      ]
+    }
+  ],
+  "tags": ["example"],
+  "knowledge_recommendation": {
+    "outcome": "recommend",
+    "reasons": ["The document contains a reusable grounded result."]
+  }
+}

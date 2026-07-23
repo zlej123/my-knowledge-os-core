@@ -1,12 +1,12 @@
 use chrono_tz::Asia::Seoul;
 
 use crate::{
-    CORE_VERSION,
     error::MkoError,
     model::{AssetRecord, ReviewStatus, SourceRecord, SourceStatus},
     pdf::{EXTRACTOR_NAME, EXTRACTOR_VERSION},
     prepare::{PROCESSOR_VERSION, PROMPT_VERSION},
     revision::calculate_source_revision,
+    version::KNOWLEDGE_CONTRACT_VERSION,
 };
 
 const BODY_SECTIONS: [&str; 11] = [
@@ -38,7 +38,7 @@ pub fn validate_canonical_source(
         || source.relations.asset_ids.as_slice() != [asset.id.as_str()]
         || source.generation.extractor_name != EXTRACTOR_NAME
         || source.generation.extractor_version != EXTRACTOR_VERSION
-        || source.generation.core_version != CORE_VERSION
+        || source.generation.core_version != KNOWLEDGE_CONTRACT_VERSION
         || source.generation.processor_version != PROCESSOR_VERSION
         || source.generation.prompt_version != PROMPT_VERSION
         || source.generation.asset_fingerprint != asset.fingerprint.value

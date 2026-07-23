@@ -19,18 +19,19 @@ use serde::Serialize;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
-    CORE_VERSION,
+    asset_validation::validate_canonical_asset,
     canonical_source::validate_canonical_source,
     error::MkoError,
     front_matter::parse_markdown,
     hooks::PRE_COMMIT_SCRIPT,
-    model::{AssetRecord, AssetStatus, Classification, ReviewStatus, SourceRecord, SourceStatus},
+    knowledge::{KnowledgeRecord, validate_knowledge_asset_contract, validate_knowledge_record},
+    model::{AssetRecord, AssetStatus, ReviewStatus, SourceRecord, SourceStatus},
     path_policy::validate_portable_relative_path,
     pdf::{EXTRACTOR_NAME, EXTRACTOR_VERSION},
     prepare::{PROCESSOR_VERSION, PROMPT_VERSION},
     revision::calculate_source_revision,
     secret,
-    state::validate_asset_state,
+    version::KNOWLEDGE_CONTRACT_VERSION,
 };
 
 const MAX_CHECK_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -131,6 +132,7 @@ pub fn check_repository(request: CheckRequest) -> Result<CheckReport, MkoError> 
 fn inspect_files(repository_root: &Path, files: &[RepositoryFile], issues: &mut Vec<CheckIssue>) {
     let mut assets = BTreeMap::<String, (String, AssetRecord)>::new();
     let mut sources = Vec::<(String, SourceRecord, String)>::new();
+    let mut knowledge_notes = Vec::<(String, KnowledgeRecord, String)>::new();
     let mut collision_keys = BTreeMap::<String, String>::new();
 
     for file in files {
@@ -187,6 +189,11 @@ fn inspect_files(repository_root: &Path, files: &[RepositoryFile], issues: &mut 
                 Ok((source, body)) => sources.push((file.path.clone(), source, body)),
                 Err(error) => issues.push(parse_issue(&file.path, error)),
             }
+        } else if file.path.starts_with("knowledge/") && file.path.ends_with(".md") {
+            match parse_utf8_markdown::<KnowledgeRecord>(file) {
+                Ok((record, body)) => knowledge_notes.push((file.path.clone(), record, body)),
+                Err(error) => issues.push(parse_issue(&file.path, error)),
+            }
         }
     }
 
@@ -231,6 +238,49 @@ fn inspect_files(repository_root: &Path, files: &[RepositoryFile], issues: &mut 
                 "more than one canonical Source relates to the same Asset",
                 Some(format!(
                     "compare with {other} and keep one canonical Source"
+                )),
+            ));
+        }
+    }
+
+    let mut knowledge_assets = BTreeMap::<String, String>::new();
+    for (path, record, body) in &knowledge_notes {
+        for validation in validate_knowledge_record(path, record, body) {
+            issues.push(issue(
+                &validation.code,
+                Some(&validation.path),
+                None,
+                &validation.message,
+                None,
+            ));
+        }
+        if let Some((_, asset)) = assets.get(&record.asset_id) {
+            for validation in validate_knowledge_asset_contract(path, record, asset) {
+                issues.push(issue(
+                    &validation.code,
+                    Some(&validation.path),
+                    None,
+                    &validation.message,
+                    None,
+                ));
+            }
+        } else {
+            issues.push(issue(
+                "relation_missing",
+                Some(path),
+                None,
+                "knowledge note references an absent Asset Registry record",
+                None,
+            ));
+        }
+        if let Some(other) = knowledge_assets.insert(record.asset_id.clone(), path.clone()) {
+            issues.push(issue(
+                "relation_conflict",
+                Some(path),
+                None,
+                "more than one Knowledge note relates to the same Asset",
+                Some(format!(
+                    "compare with {other} and keep one canonical Knowledge note"
                 )),
             ));
         }
@@ -295,39 +345,14 @@ fn inspect_files(repository_root: &Path, files: &[RepositoryFile], issues: &mut 
 }
 
 fn validate_asset(path: &str, asset: &AssetRecord, issues: &mut Vec<CheckIssue>) {
-    let hash = valid_prefixed_hash(&asset.id, "personal-asset-");
-    let expected_path = format!("assets/registry/{}.md", asset.id);
-    if hash.is_none()
-        || path != expected_path
-        || asset.record_type != "asset"
-        || asset.schema_version != 1
-        || asset.scope != "personal"
-        || asset.classification != Classification::Personal
-        || asset.asset_class != "document"
-        || asset.media_type != "application/pdf"
-        || asset.provider.r#type != "google-drive-stream"
-        || asset.fingerprint.method != "sha256"
-        || hash.is_some_and(|hash| asset.fingerprint.value != format!("sha256:{hash}"))
-    {
+    for validation in validate_canonical_asset(path, asset) {
         issues.push(issue(
-            "registry_invalid",
+            &validation.code,
             Some(path),
             None,
-            "Asset identity, Scope, schema, path, or fingerprint is not canonical",
+            &validation.message,
             None,
         ));
-    }
-    if !portable_relative_path(&asset.provider.locator) {
-        issues.push(issue(
-            "path_not_portable",
-            Some(path),
-            None,
-            "Provider locator must be a portable relative path",
-            None,
-        ));
-    }
-    if let Err(error) = validate_asset_state(asset) {
-        issues.push(parse_issue(path, error));
     }
 }
 
@@ -349,7 +374,7 @@ fn validate_source(
         || !canonical_source_path(path, source)
         || source.generation.extractor_name != EXTRACTOR_NAME
         || source.generation.extractor_version != EXTRACTOR_VERSION
-        || source.generation.core_version != CORE_VERSION
+        || source.generation.core_version != KNOWLEDGE_CONTRACT_VERSION
         || source.generation.processor_version != PROCESSOR_VERSION
         || source.generation.prompt_version != PROMPT_VERSION
     {

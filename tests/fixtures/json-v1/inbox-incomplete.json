@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "command": "inbox",
+  "result": "ok",
+  "data": {
+    "scan_complete": false,
+    "scan_limits": {
+      "max_entries": 1000,
+      "max_total_bytes": 1073741824,
+      "max_elapsed_ms": 5000,
+      "max_depth": 4,
+      "max_batch_items": 20
+    },
+    "items": [
+      {
+        "provider_locator": "inbox/pending.pdf",
+        "user_state": "incomplete",
+        "asset_id": "asset-004",
+        "next_action": "retry"
+      }
+    ],
+    "errors": [],
+    "warnings": [
+      {
+        "code": "scan_limit_reached",
+        "message": "The inbox scan reached its time limit.",
+        "path": null
+      }
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "command": "add",
+  "result": "error",
+  "error": {
+    "code": "inbox_unavailable",
+    "message": "The inbox could not be scanned.",
+    "recovery": {
+      "kind": "configure"
+    }
+  }
+}

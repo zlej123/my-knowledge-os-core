@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-knowledge-os.local/schemas/v2/current-pointer.schema.json",
+  "title": "My Knowledge OS current pointer v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "record_type", "record_id", "revision", "evidence_basis"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "record_type": { "enum": ["source", "knowledge"] },
+    "record_id": { "type": "string", "pattern": "^personal-(source|knowledge)-[a-f0-9]{64}$" },
+    "revision": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "evidence_basis": { "$ref": "#/$defs/evidence_basis" }
+  },
+  "$defs": {
+    "evidence_basis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bundle_id", "content_digest", "asset_fingerprint", "extractor_name", "extractor_version"],
+      "properties": {
+        "bundle_id": { "type": "string", "pattern": "^prepared-content-sha256-[a-f0-9]{64}$" },
+        "content_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "asset_fingerprint": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "extractor_name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "extractor_version": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    }
+  }
+}
