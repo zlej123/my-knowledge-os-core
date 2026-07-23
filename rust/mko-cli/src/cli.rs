@@ -2574,7 +2574,11 @@ fn legacy_usage_error(args: &[std::ffi::OsString]) -> Option<MkoError> {
     if !legacy_json_requested_from_invalid_arguments(args) {
         return None;
     }
-    LegacyCli::try_parse_from(args)
+    let mut normalized = args.to_vec();
+    if let Some(program) = normalized.first_mut() {
+        *program = "mko".into();
+    }
+    LegacyCli::try_parse_from(normalized)
         .err()
         .map(|error| MkoError::new("usage", error.to_string()))
 }

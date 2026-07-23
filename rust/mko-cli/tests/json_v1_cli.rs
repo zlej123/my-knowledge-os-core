@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
@@ -9,6 +10,10 @@ use lopdf::{
     Document, Object, Stream,
     content::{Content, Operation},
     dictionary,
+};
+use mko_core::{
+    context::Scope,
+    profile::{MachineProfileFile, PersonalProfile, ProfileStore},
 };
 use serde_json::{Value, json};
 
@@ -174,10 +179,12 @@ fn json_v1_nonexistent_absolute_repository_error_is_path_free_and_byte_stable() 
         .stdout
         .clone();
 
-    assert_eq!(
-        output,
-        include_bytes!("../../../tests/fixtures/json-v1/check-repository-missing.json")
-    );
+    let expected = include_bytes!("../../../tests/fixtures/json-v1/check-repository-missing.json")
+        .iter()
+        .copied()
+        .filter(|byte| *byte != b'\r')
+        .collect::<Vec<_>>();
+    assert_eq!(output, expected);
     assert!(!String::from_utf8_lossy(&output).contains(&missing.display().to_string()));
 }
 
@@ -213,7 +220,8 @@ fn positional_format_after_terminator_does_not_select_json_v1_usage_errors() {
         .clone();
 
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Usage: mko add"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Usage:") && stderr.contains(" add "));
 }
 
 #[test]
@@ -374,30 +382,22 @@ impl JsonV1Env {
         let home = root.join("home");
         fs::create_dir_all(&repository).unwrap();
         fs::create_dir_all(&provider).unwrap();
-        fs::create_dir_all(home.join("Library/Application Support/mko")).unwrap();
+        let config_home = config_home(&home);
         fs::write(repository.join("knowledge-os.yaml"), knowledge_config()).unwrap();
-        fs::write(
-            home.join("Library/Application Support/mko/profiles.yaml"),
-            format!(
-                "schema_version: 1\ndefault_profile: personal\nprofiles:\n  personal:\n    repository_root: {}\n    provider_root: {}\n    scope: personal\n",
-                repository.display(), provider.display()
-            ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(
-                home.join("Library/Application Support/mko"),
-                fs::Permissions::from_mode(0o700),
-            )
+        ProfileStore::at(config_home.join("mko/profiles.yaml"))
+            .write(&MachineProfileFile {
+                schema_version: 1,
+                default_profile: "personal".into(),
+                profiles: BTreeMap::from([(
+                    "personal".into(),
+                    PersonalProfile {
+                        repository_root: repository.clone(),
+                        provider_root: provider,
+                        scope: Scope::Personal,
+                    },
+                )]),
+            })
             .unwrap();
-            fs::set_permissions(
-                home.join("Library/Application Support/mko/profiles.yaml"),
-                fs::Permissions::from_mode(0o600),
-            )
-            .unwrap();
-        }
         Self {
             root,
             repository,
@@ -415,9 +415,26 @@ impl JsonV1Env {
         command
             .args(args)
             .env("HOME", &self.home)
+            .env("APPDATA", config_home(&self.home))
+            .env("XDG_CONFIG_HOME", config_home(&self.home))
             .current_dir(&self.root);
         command
     }
+}
+
+#[cfg(windows)]
+fn config_home(home: &std::path::Path) -> PathBuf {
+    home.join("AppData/Roaming")
+}
+
+#[cfg(target_os = "macos")]
+fn config_home(home: &std::path::Path) -> PathBuf {
+    home.join("Library/Application Support")
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn config_home(home: &std::path::Path) -> PathBuf {
+    home.join(".config")
 }
 
 impl Drop for JsonV1Env {

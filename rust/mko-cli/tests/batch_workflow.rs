@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
@@ -8,10 +9,12 @@ use assert_cmd::Command;
 use mko_cli::batch_add_data;
 use mko_core::{
     add::{BatchAddResult, BatchItemResult},
+    context::Scope,
     json_v1::{
         AddOutcome, AddPayload, JsonV1Error, JsonV1Success, NextAction, Recovery, RecoveryKind,
         SuccessResult, UserState,
     },
+    profile::{MachineProfileFile, PersonalProfile, ProfileStore},
 };
 use serde_json::Value;
 
@@ -219,28 +222,27 @@ impl Env {
         let repository = root.join("repository");
         let provider = root.join("provider");
         let home = root.join("home");
-        let config_home = home.join("Library/Application Support/mko");
+        let config_home = config_home(&home);
         fs::create_dir_all(&repository).unwrap();
         fs::create_dir_all(&provider).unwrap();
-        fs::create_dir_all(&config_home).unwrap();
         fs::write(
             repository.join("knowledge-os.yaml"),
             "system: my-knowledge-os\nscope: personal\ncore_version: 0.1.0\nschema_version: 1\nprovider:\n  name: personal_google_drive\n  type: google-drive-stream\n  root_env: MKO_PERSONAL_PROVIDER_ROOT\n",
         ).unwrap();
-        fs::write(
-            config_home.join("profiles.yaml"),
-            format!("schema_version: 1\ndefault_profile: personal\nprofiles:\n  personal:\n    repository_root: {}\n    provider_root: {}\n    scope: personal\n", repository.display(), provider.display()),
-        ).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&config_home, fs::Permissions::from_mode(0o700)).unwrap();
-            fs::set_permissions(
-                config_home.join("profiles.yaml"),
-                fs::Permissions::from_mode(0o600),
-            )
+        ProfileStore::at(config_home.join("mko/profiles.yaml"))
+            .write(&MachineProfileFile {
+                schema_version: 1,
+                default_profile: "personal".into(),
+                profiles: BTreeMap::from([(
+                    "personal".into(),
+                    PersonalProfile {
+                        repository_root: repository,
+                        provider_root: provider.clone(),
+                        scope: Scope::Personal,
+                    },
+                )]),
+            })
             .unwrap();
-        }
         Self {
             root,
             provider,
@@ -251,9 +253,28 @@ impl Env {
     #[allow(deprecated)]
     fn command(&self) -> Command {
         let mut command = Command::cargo_bin("mko").unwrap();
-        command.env("HOME", &self.home).current_dir(&self.root);
+        command
+            .env("HOME", &self.home)
+            .env("APPDATA", config_home(&self.home))
+            .env("XDG_CONFIG_HOME", config_home(&self.home))
+            .current_dir(&self.root);
         command
     }
+}
+
+#[cfg(windows)]
+fn config_home(home: &std::path::Path) -> PathBuf {
+    home.join("AppData/Roaming")
+}
+
+#[cfg(target_os = "macos")]
+fn config_home(home: &std::path::Path) -> PathBuf {
+    home.join("Library/Application Support")
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn config_home(home: &std::path::Path) -> PathBuf {
+    home.join(".config")
 }
 
 impl Drop for Env {

@@ -1218,7 +1218,16 @@ fn set_private_directory(path: &Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn set_private_directory(path: &Path) {
+    mko_windows_acl::apply_owner_only_to_path(
+        path,
+        mko_windows_acl::Inheritance::ContainersAndObjects,
+    )
+    .unwrap();
+}
+
+#[cfg(not(any(unix, windows)))]
 fn set_private_directory(_path: &Path) {}
 
 #[cfg(unix)]

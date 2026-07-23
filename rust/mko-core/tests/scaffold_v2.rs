@@ -1,4 +1,6 @@
-use std::{fs, path::Path};
+use std::fs;
+#[cfg(unix)]
+use std::path::Path;
 
 use mko_core::{
     config_v2::{KnowledgeConfigV2, SCHEMA_VERSION_V2},
@@ -114,6 +116,7 @@ fn config_reader_rejects_a_symlink_without_following_it() {
     );
 }
 
+#[cfg(unix)]
 fn directory_is_empty(path: &Path) -> bool {
     fs::read_dir(path).unwrap().next().is_none()
 }

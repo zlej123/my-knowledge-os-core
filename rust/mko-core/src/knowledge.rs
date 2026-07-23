@@ -1165,8 +1165,8 @@ fn write_new_knowledge_capability(
 #[cfg(unix)]
 fn sync_knowledge_directory(directory: &Dir) -> Result<(), MkoError> {
     directory
-        .try_clone()
-        .and_then(|directory| directory.into_std_file().sync_all())
+        .open(".")
+        .and_then(|file| file.sync_all())
         .map_err(|error| MkoError::new("knowledge_write_failed", error.to_string()))
 }
 

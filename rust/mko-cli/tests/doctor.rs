@@ -228,20 +228,39 @@ fn assert_json_golden(fixture: &Fixture, output: &[u8], golden: &str) {
 fn normalize_paths(fixture: &Fixture, output: &[u8]) -> Value {
     let mut value: Value = serde_json::from_slice(output).unwrap();
     let repository = fs::canonicalize(&fixture.repository).unwrap();
-    let profile = fixture.profile_store().path().display().to_string();
     let repository = repository.display().to_string();
     let provider = fixture.provider.display().to_string();
     let account_root = fixture.account_root.display().to_string();
+    normalize_profile_check_path(&mut value);
     normalize_check_paths(
         &mut value,
         &[
-            (&profile, "<PROFILE>"),
             (&repository, "<REPOSITORY>"),
             (&provider, "<PROVIDER>"),
             (&account_root, "<ACCOUNT_ROOT>"),
         ],
     );
     value
+}
+
+fn normalize_profile_check_path(value: &mut Value) {
+    let Some(checks) = value
+        .get_mut("data")
+        .and_then(|data| data.get_mut("checks"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for check in checks {
+        if check
+            .get("code")
+            .and_then(Value::as_str)
+            .is_some_and(|code| code.starts_with("profile_"))
+            && check.get("path").is_some_and(Value::is_string)
+        {
+            check["path"] = Value::String("<PROFILE>".into());
+        }
+    }
 }
 
 fn normalize_check_paths(value: &mut Value, replacements: &[(&str, &str)]) {

@@ -12,7 +12,7 @@ use cap_std::{
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 use crate::{
     clock::{Clock, SystemClock},
@@ -156,6 +156,8 @@ pub struct AssetLock {
     asset_id: String,
     owner_token: String,
     identity: StableFileIdentity,
+    #[cfg(unix)]
+    _file: cap_std::fs::File,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -174,6 +176,8 @@ pub struct RepositoryMutationLock {
     repository_root: PathBuf,
     owner_token: String,
     identity: StableFileIdentity,
+    #[cfg(unix)]
+    _file: cap_std::fs::File,
 }
 
 impl std::fmt::Debug for RepositoryMutationLock {
@@ -486,6 +490,8 @@ struct TakeoverGuard<'a> {
     filename: String,
     owner_token: String,
     identity: StableFileIdentity,
+    #[cfg(unix)]
+    _file: cap_std::fs::File,
 }
 
 impl<'a> TakeoverGuard<'a> {
@@ -572,6 +578,8 @@ impl<'a> TakeoverGuard<'a> {
             filename,
             owner_token,
             identity,
+            #[cfg(unix)]
+            _file: file,
         })
     }
 }
@@ -675,6 +683,8 @@ fn create_repository_mutation_lock(
         repository_root: repository_root.to_path_buf(),
         owner_token,
         identity,
+        #[cfg(unix)]
+        _file: file,
     })
 }
 
@@ -734,6 +744,8 @@ where
         asset_id: asset_id.into(),
         owner_token,
         identity,
+        #[cfg(unix)]
+        _file: file,
     })
 }
 
@@ -1386,17 +1398,24 @@ fn current_hostname() -> Result<String, MkoError> {
 }
 
 fn same_host_process_is_live(pid: u32) -> bool {
-    let system = System::new_all();
-    system.process(Pid::from_u32(pid)).is_some()
+    let pid = Pid::from_u32(pid);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    system.process(pid).is_some()
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::time::{Duration, Instant};
     use std::{
         fs,
         io::{self, Write},
         sync::atomic::{AtomicU64, Ordering},
-        time::{Duration, Instant},
     };
 
     use cap_std::{ambient_authority, fs::Dir};
@@ -1404,10 +1423,12 @@ mod tests {
 
     use super::{
         AssetLock, CleanupDurabilityEvent, LockRecord, LockState, TakeoverGuard,
-        create_lock_with_writer, inspect_locks, read_lock_record, read_quarantine_record_with_hook,
+        create_lock_with_writer, inspect_locks, read_lock_record,
         reap_authoritative_quarantine_with_observer, remove_if_owned_with_observer,
-        remove_stale_entry_with_observer, scan_authoritative_quarantines, stable_file_identity,
+        remove_stale_entry_with_observer, scan_authoritative_quarantines,
     };
+    #[cfg(unix)]
+    use super::{read_quarantine_record_with_hook, stable_file_identity};
     use crate::clock::Clock;
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -1667,11 +1688,16 @@ mod tests {
         directory
             .write(&filename, serde_json::to_vec(&original).unwrap())
             .unwrap();
-        let original_identity = read_lock_record(&directory, &filename).unwrap().1;
+        let original_file = directory.open(&filename).unwrap();
+        let original_identity = super::stable_file_identity(&original_file).unwrap();
+        #[cfg(windows)]
+        drop(original_file);
         directory.remove_file(&filename).unwrap();
         directory
             .write(&filename, serde_json::to_vec(&original).unwrap())
             .unwrap();
+        #[cfg(not(windows))]
+        drop(original_file);
 
         let mut durability = Vec::new();
         remove_if_owned_with_observer(

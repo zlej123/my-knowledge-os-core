@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
@@ -9,6 +10,10 @@ use lopdf::{
     Document, Object, Stream,
     content::{Content, Operation},
     dictionary,
+};
+use mko_core::{
+    context::Scope,
+    profile::{MachineProfileFile, PersonalProfile, ProfileStore},
 };
 
 static NEXT_ENV: AtomicU64 = AtomicU64::new(0);
@@ -110,30 +115,22 @@ impl AddEnv {
         let home = root.join("home");
         fs::create_dir_all(&repository).unwrap();
         fs::create_dir_all(&provider).unwrap();
-        fs::create_dir_all(home.join("Library/Application Support/mko")).unwrap();
+        let config_home = config_home(&home);
         fs::write(repository.join("knowledge-os.yaml"), knowledge_config()).unwrap();
-        fs::write(
-            home.join("Library/Application Support/mko/profiles.yaml"),
-            format!(
-                "schema_version: 1\ndefault_profile: personal\nprofiles:\n  personal:\n    repository_root: {}\n    provider_root: {}\n    scope: personal\n",
-                repository.display(), provider.display()
-            ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(
-                home.join("Library/Application Support/mko"),
-                fs::Permissions::from_mode(0o700),
-            )
+        ProfileStore::at(config_home.join("mko/profiles.yaml"))
+            .write(&MachineProfileFile {
+                schema_version: 1,
+                default_profile: "personal".into(),
+                profiles: BTreeMap::from([(
+                    "personal".into(),
+                    PersonalProfile {
+                        repository_root: repository,
+                        provider_root: provider.clone(),
+                        scope: Scope::Personal,
+                    },
+                )]),
+            })
             .unwrap();
-            fs::set_permissions(
-                home.join("Library/Application Support/mko/profiles.yaml"),
-                fs::Permissions::from_mode(0o600),
-            )
-            .unwrap();
-        }
         Self {
             root,
             provider,
@@ -151,6 +148,8 @@ impl AddEnv {
         command
             .args(args)
             .env("HOME", &self.home)
+            .env("APPDATA", config_home(&self.home))
+            .env("XDG_CONFIG_HOME", config_home(&self.home))
             .current_dir(&self.root);
         command
     }
@@ -160,6 +159,21 @@ impl Drop for AddEnv {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[cfg(windows)]
+fn config_home(home: &std::path::Path) -> PathBuf {
+    home.join("AppData/Roaming")
+}
+
+#[cfg(target_os = "macos")]
+fn config_home(home: &std::path::Path) -> PathBuf {
+    home.join("Library/Application Support")
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn config_home(home: &std::path::Path) -> PathBuf {
+    home.join(".config")
 }
 
 fn knowledge_config() -> &'static str {

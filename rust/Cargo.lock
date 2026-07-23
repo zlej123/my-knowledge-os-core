@@ -1247,6 +1247,7 @@ dependencies = [
  "jsonschema",
  "lopdf",
  "mko-core",
+ "mko-windows-acl",
  "predicates",
  "serde",
  "serde_json",

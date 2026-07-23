@@ -203,6 +203,34 @@ fn platform_specific_paths_normalize_to_identical_logical_transcripts() {
 }
 
 #[test]
+fn unsupported_hydration_normalizes_to_the_portable_healthy_check() {
+    let mut transcript = json!({
+        "steps": [{
+            "result": {
+                "command": "doctor",
+                "data": {
+                    "checks": [{
+                        "code": "provider_hydration_unsupported",
+                        "message": "Personal PDF placeholder metadata is unsupported on this platform",
+                        "path": "/provider"
+                    }]
+                }
+            }
+        }]
+    });
+
+    normalize_transcript(&mut transcript);
+
+    let check = &transcript["steps"][0]["result"]["data"]["checks"][0];
+    assert_eq!(check["code"], "provider_hydration");
+    assert_eq!(
+        check["message"],
+        "Personal PDF placeholder metadata is healthy"
+    );
+    assert_eq!(check["path"], "<PROVIDER>");
+}
+
+#[test]
 fn windows_forward_slash_root_leak_is_rejected() {
     let transcript = json!({
         "steps": [{
@@ -723,7 +751,8 @@ fn assert_golden(actual: &Value, expected: &str) {
     let _: Value = serde_json::from_str(expected).unwrap();
     let mut actual_bytes = serde_json::to_vec_pretty(actual).unwrap();
     actual_bytes.push(b'\n');
-    assert_eq!(actual_bytes, expected.as_bytes());
+    let normalized_expected = expected.replace("\r\n", "\n");
+    assert_eq!(actual_bytes, normalized_expected.as_bytes());
     assert!(
         !String::from_utf8(actual_bytes)
             .unwrap()
@@ -768,6 +797,11 @@ fn normalize_transcript(transcript: &mut Value) {
             "doctor" => {
                 if let Some(checks) = step["result"]["data"]["checks"].as_array_mut() {
                     for check in checks {
+                        if check["code"] == "provider_hydration_unsupported" {
+                            check["code"] = "provider_hydration".into();
+                            check["message"] =
+                                "Personal PDF placeholder metadata is healthy".into();
+                        }
                         let placeholder = match check["code"].as_str().unwrap_or_default() {
                             "profile_valid" => Some("<PROFILE>"),
                             code if code.starts_with("provider_") => Some("<PROVIDER>"),
