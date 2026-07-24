@@ -91,6 +91,28 @@ mko add "/path/in/inbox/paper.pdf" --confirm-download
 
 Asset 등록은 PDF를 이동·삭제하지 않고 SHA-256 기반 메타데이터만 기록합니다.
 
+## Telegram 연결 준비
+
+Telegram 채널은 BotFather에서 사용자가 직접 만든 봇 하나와 본인의 username이 설정된 개인
+채팅을 연결합니다.
+토큰은 명령 인자·환경변수·설정 파일로 받지 않고, 실제 터미널의 숨김 입력을 거쳐 macOS
+Keychain 또는 Windows Credential Manager의 단일 결합 자격 증명에만 저장합니다.
+
+```bash
+mko telegram connect --profile personal
+mko telegram status --profile personal
+mko telegram disconnect --profile personal
+```
+
+`connect`는 봇 토큰을 `getMe`로 확인한 뒤 5분짜리 일회성 Telegram 링크를 표시합니다. 그
+링크에서 시작 버튼을 누르면 연결될 개인 채팅·봇·발신자·기기·허용 범위를 다시 보여주고,
+실제 터미널에 정확한 승인 문구를 입력한 경우에만 저장합니다. `disconnect`도 같은 방식으로
+정확한 삭제 효과를 확인합니다. 토큰을 `--token`으로 전달하는 방식은 제공하지 않습니다.
+
+현재 구현 범위는 안전한 채널 연결과 상태 관리까지입니다. Telegram 메시지를 지속적으로
+가져와 General/Finance Capture로 등록하는 polling worker와 cursor/receipt 복구는 다음
+마일스톤이므로, 연결 완료를 자동 지식 수집 완료로 해석하지 않습니다.
+
 ## Codex에서 사용
 
 정식 스킬 원본은 [skills/codex/my-knowledge-os/SKILL.md](skills/codex/my-knowledge-os/SKILL.md)입니다.

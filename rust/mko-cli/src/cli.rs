@@ -1,8 +1,16 @@
 use std::{
-    io::{IsTerminal, Write},
+    fs,
+    io::{IsTerminal, Read, Write},
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
+
+use chrono::Utc;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use mko_core::{
     add::{AddInput, AddRequest, AddRunResult, BackupAttestation, add as add_input},
@@ -10,6 +18,12 @@ use mko_core::{
     asset_v2::{
         AssetRegistrationOutcomeV2, HydrationConfirmationV2, RegisterAssetRequestV2,
         RegisterInboxAssetsRequestV2, register_inbox_pdf_assets_v2, register_pdf_asset_v2,
+    },
+    capture_v1::{
+        CaptureChannelV1, CaptureInputV1, ClassifierProposalV1, MAX_CAPTURE_ENVELOPE_BYTES_V1,
+        MAX_CLASSIFIER_PROPOSAL_BYTES_V1, RouteOutcomeKindV1, RouteRejectionReasonV1,
+        RoutingAuthorityV1, RoutingNextActionV1, SubjectScopeV1, parse_capture_envelope_v1,
+        parse_classifier_proposal_v1, resolve_route_v1,
     },
     check::{CheckReport, CheckRequest, check_repository},
     clock::SystemClock,
@@ -35,10 +49,13 @@ use mko_core::{
     },
     json_v2::{
         AddBatchDataV2, AddBatchItemErrorV2, AddBatchItemV2, AddBatchWarningV2, AddDataV2,
-        AddOutcomeV2, AddSingleDataV2, DashboardCanonicalStateDataV2, DashboardDataV2,
-        DashboardFileDataV2, DashboardFileKindDataV2, DashboardFileStateDataV2,
-        DashboardProjectionStateDataV2, JsonV2Command, JsonV2Success, NextActionV2,
-        SetupApplyDataV2,
+        AddOutcomeV2, AddSingleDataV2, CaptureChannelV2, CaptureInputTypeV2, CaptureProposalDataV2,
+        CaptureRouteDataV2, CaptureRouteOutcomeV2, CaptureRoutingAuthorityV2,
+        CaptureRoutingRejectionV2, CaptureScopeV2, CaptureValidateDataV2,
+        DashboardCanonicalStateDataV2, DashboardDataV2, DashboardFileDataV2,
+        DashboardFileKindDataV2, DashboardFileStateDataV2, DashboardProjectionStateDataV2,
+        JsonV2Command, JsonV2Success, NextActionV2, SetupApplyDataV2, TelegramConnectionStateV2,
+        TelegramStatusDataV2,
     },
     knowledge::{
         ConceptKind, ConceptMatch, KnowledgeSearchQuery, WriteKnowledgeRequest, approve_knowledge,
@@ -63,6 +80,13 @@ use mko_core::{
     },
     status::{StatusReport, status_from_inbox},
 };
+use mko_telegram::{
+    binding::TelegramBindingV1,
+    connection::{OsTelegramConnectionStore, TelegramConnectionRef, TelegramConnectionStore},
+    pairing::{PAIRING_NONCE_BYTES_V1, PairingCandidateV1, PairingSessionStateV1, open_pairing_v1},
+    secret::TelegramBotToken,
+    transport::{HttpTelegramBotApi, TelegramBotApi},
+};
 
 use crate::{
     batch_add_data,
@@ -70,6 +94,7 @@ use crate::{
         emit_encoded_json, emit_json_v1, emit_json_v1_failure, emit_json_v2_failure,
         emit_json_value, emit_legacy_json_error, json_v2_next_action,
     },
+    telegram_onboarding::persist_verified_connection,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -250,6 +275,14 @@ struct LegacyRepairStateArgs {
 #[derive(Subcommand)]
 enum Command {
     Setup(SetupArgs),
+    Capture {
+        #[command(subcommand)]
+        command: CaptureCommand,
+    },
+    Telegram {
+        #[command(subcommand)]
+        command: TelegramCommand,
+    },
     Add(AddArgs),
     Asset {
         #[command(subcommand)]
@@ -333,6 +366,68 @@ struct SetupArgs {
 enum SetupCommand {
     Plan(SetupPlanArgs),
     Apply(SetupApplyArgs),
+}
+
+#[derive(Subcommand)]
+enum CaptureCommand {
+    #[command(about = "Validate a bounded CaptureEnvelope without changing any state")]
+    Validate(CaptureValidateArgs),
+    #[command(about = "Preview subject routing without authorizing or changing durable state")]
+    Route(CaptureRouteArgs),
+}
+
+#[derive(Subcommand)]
+enum TelegramCommand {
+    #[command(about = "Connect one private Telegram chat through a guided secure wizard")]
+    Connect(TelegramProfileArgs),
+    #[command(about = "Show the current Telegram connection without changing it")]
+    Status(TelegramStatusArgs),
+    #[command(about = "Remove the Telegram connection and stored bot token")]
+    Disconnect(TelegramProfileArgs),
+}
+
+#[derive(Args)]
+struct TelegramProfileArgs {
+    #[arg(long, default_value = "personal")]
+    profile: String,
+}
+
+#[derive(Args)]
+struct TelegramStatusArgs {
+    #[arg(long, default_value = "personal")]
+    profile: String,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
+}
+
+#[derive(Args)]
+struct CaptureValidateArgs {
+    #[arg(long)]
+    input: PathBuf,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
+}
+
+#[derive(Args)]
+struct CaptureRouteArgs {
+    #[arg(long)]
+    input: PathBuf,
+    #[arg(long)]
+    proposal: Option<PathBuf>,
+    #[arg(
+        long,
+        value_enum,
+        help = "Preview a matching user confirmation; this flag is not durable approval evidence"
+    )]
+    confirm: Option<CaptureConfirmScope>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CaptureConfirmScope {
+    General,
+    Finance,
 }
 
 #[derive(Args)]
@@ -720,6 +815,21 @@ enum Exit {
 fn run(cli: Cli) -> Result<Exit, MkoError> {
     match cli.command {
         Command::Setup(arguments) => setup(arguments).map(|_| Exit::Success),
+        Command::Capture {
+            command: CaptureCommand::Validate(arguments),
+        } => capture_validate(arguments).map(|_| Exit::Success),
+        Command::Capture {
+            command: CaptureCommand::Route(arguments),
+        } => capture_route(arguments).map(|_| Exit::Success),
+        Command::Telegram {
+            command: TelegramCommand::Connect(arguments),
+        } => telegram_connect(arguments).map(|_| Exit::Success),
+        Command::Telegram {
+            command: TelegramCommand::Status(arguments),
+        } => telegram_status(arguments).map(|_| Exit::Success),
+        Command::Telegram {
+            command: TelegramCommand::Disconnect(arguments),
+        } => telegram_disconnect(arguments).map(|_| Exit::Success),
         Command::Add(arguments) => add(arguments).map(|_| Exit::Success),
         Command::Asset {
             command: AssetCommand::Capture(arguments),
@@ -774,6 +884,547 @@ fn run(cli: Cli) -> Result<Exit, MkoError> {
         Command::Hooks {
             command: HooksCommand::Install(arguments),
         } => install_hook(arguments).map(|_| Exit::Success),
+    }
+}
+
+fn capture_validate(arguments: CaptureValidateArgs) -> Result<(), MkoError> {
+    let envelope = parse_capture_envelope_v1(&read_bounded_capture_input(
+        &arguments.input,
+        MAX_CAPTURE_ENVELOPE_BYTES_V1,
+        "capture_envelope_too_large",
+    )?)?;
+    let data = CaptureValidateDataV2 {
+        capture_id: envelope.capture_id,
+        channel: capture_channel(&envelope.channel),
+        input_type: capture_input_type(&envelope.input),
+        selected_scope: envelope.selected_scope.as_ref().map(capture_scope),
+    };
+    match arguments.format {
+        OutputFormat::JsonV2 => crate::output::emit_json_v2(JsonV2Success::capture_validate(data)),
+        OutputFormat::Human => {
+            println!("valid {}", data.capture_id);
+            Ok(())
+        }
+        OutputFormat::JsonV1 => Err(MkoError::new(
+            "format_unsupported",
+            "capture commands support human or json-v2 output",
+        )),
+    }
+}
+
+fn capture_route(arguments: CaptureRouteArgs) -> Result<(), MkoError> {
+    let envelope = parse_capture_envelope_v1(&read_bounded_capture_input(
+        &arguments.input,
+        MAX_CAPTURE_ENVELOPE_BYTES_V1,
+        "capture_envelope_too_large",
+    )?)?;
+    let proposal = arguments
+        .proposal
+        .as_deref()
+        .map(|path| {
+            read_bounded_capture_input(
+                path,
+                MAX_CLASSIFIER_PROPOSAL_BYTES_V1,
+                "routing_proposal_too_large",
+            )
+            .and_then(|bytes| parse_classifier_proposal_v1(&bytes))
+        })
+        .transpose()?;
+    let outcome = resolve_route_v1(
+        &envelope,
+        proposal.as_ref(),
+        arguments.confirm.map(capture_confirm_scope),
+    )?;
+    let data = CaptureRouteDataV2 {
+        capture_id: envelope.capture_id,
+        outcome: capture_route_outcome(&outcome.outcome),
+        confirmed_scope: outcome.confirmed_scope.as_ref().map(capture_scope),
+        routing_authority: outcome
+            .routing_authority
+            .as_ref()
+            .map(capture_routing_authority),
+        proposal: outcome.proposal.as_ref().map(capture_proposal),
+        next_action: match outcome.next_action {
+            Some(RoutingNextActionV1::ConfirmGeneral)
+            | Some(RoutingNextActionV1::ConfirmFinance)
+            | Some(RoutingNextActionV1::ChooseScope) => NextActionV2::ConfirmRouting,
+            None => NextActionV2::None,
+        },
+        rejection_reason: outcome
+            .rejection_reason
+            .as_ref()
+            .map(capture_rejection_reason),
+    };
+    match arguments.format {
+        OutputFormat::JsonV2 => crate::output::emit_json_v2(JsonV2Success::capture_route(data)),
+        OutputFormat::Human => {
+            println!(
+                "{} {}",
+                data.capture_id,
+                capture_route_outcome_name(&data.outcome)
+            );
+            Ok(())
+        }
+        OutputFormat::JsonV1 => Err(MkoError::new(
+            "format_unsupported",
+            "capture commands support human or json-v2 output",
+        )),
+    }
+}
+
+fn telegram_connect(arguments: TelegramProfileArgs) -> Result<(), MkoError> {
+    require_telegram_tty("connect")?;
+    let connection_reference = TelegramConnectionRef::for_profile(&arguments.profile)?;
+    let connection_store = OsTelegramConnectionStore;
+    if connection_store.contains(&connection_reference)? {
+        return Err(MkoError::new(
+            "telegram_already_connected",
+            "Telegram is already connected; disconnect it before reconnecting",
+        ));
+    }
+
+    println!("1. Telegram에서 @BotFather로 봇을 만들고 발급된 토큰을 준비하세요.");
+    let token_text =
+        rpassword::prompt_password("2. Bot token (화면에 표시되지 않음): ").map_err(|_| {
+            MkoError::new(
+                "telegram_token_read_failed",
+                "Telegram bot token could not be read from the interactive terminal",
+            )
+        })?;
+    let token = TelegramBotToken::new(token_text)?;
+    let api = HttpTelegramBotApi::default();
+    let bot = api.get_me(&token)?;
+    let expected_owner_username = read_terminal_line("3. 내 Telegram username (@ 제외): ")?
+        .trim_start_matches('@')
+        .to_owned();
+
+    let initial_updates = api.get_updates(&token, None)?;
+    let mut offset = initial_updates
+        .iter()
+        .map(|update| update.update_id.saturating_add(1))
+        .max();
+    let mut nonce = [0_u8; PAIRING_NONCE_BYTES_V1];
+    getrandom::fill(&mut nonce).map_err(|_| {
+        MkoError::new(
+            "telegram_pairing_random_failed",
+            "A secure Telegram pairing challenge could not be generated",
+        )
+    })?;
+    let device_id = telegram_device_id()?;
+    let mut pairing = open_pairing_v1(
+        &arguments.profile,
+        bot,
+        expected_owner_username,
+        &device_id,
+        nonce,
+        Utc::now(),
+    )?;
+
+    println!();
+    println!("4. 다음 링크를 5분 안에 열고 Telegram에서 시작 버튼을 누르세요.");
+    println!("{}", pairing.deep_link);
+    println!(
+        "   @{} 계정의 개인 채팅만 연결할 수 있습니다.",
+        pairing.session.expected_owner_username
+    );
+    println!("Telegram 응답을 기다리는 중...");
+
+    let deadline = Instant::now() + Duration::from_secs(5 * 60);
+    let candidate = loop {
+        if Instant::now() >= deadline {
+            pairing.session.cancel();
+            return Err(MkoError::new(
+                "telegram_pairing_expired",
+                "Telegram pairing was not completed within five minutes",
+            ));
+        }
+        let updates = api.get_updates(&token, offset)?;
+        let mut accepted = None;
+        for update in updates {
+            offset = Some(update.update_id.saturating_add(1));
+            match pairing.session.accept_update_v1(&update.json, Utc::now()) {
+                Ok(candidate) => {
+                    accepted = Some(candidate);
+                    break;
+                }
+                Err(error) if pairing.session.state == PairingSessionStateV1::Cancelled => {
+                    return Err(error);
+                }
+                Err(_) => {}
+            }
+        }
+        if let Some(candidate) = accepted {
+            break candidate;
+        }
+    };
+
+    print_telegram_connection_effects(&candidate, &connection_reference);
+    let owner_identity = candidate
+        .sender_username
+        .as_ref()
+        .map(|username| format!("@{username}"))
+        .unwrap_or_else(|| format!("id:{}", candidate.sender_id));
+    let approval_phrase = format!(
+        "CONNECT TELEGRAM {} @{} {} {}",
+        candidate.profile_id, candidate.bot.username, owner_identity, candidate.chat_id
+    );
+    println!();
+    println!("연결하려면 아래 문구를 정확히 입력하세요.");
+    println!("{approval_phrase}");
+    let confirmation = read_terminal_line("승인 문구: ")?;
+    if confirmation != approval_phrase {
+        return Err(MkoError::new(
+            "telegram_connection_cancelled",
+            "Telegram connection was cancelled before credentials were stored",
+        ));
+    }
+
+    let binding = TelegramBindingV1::new(
+        candidate.profile_id,
+        candidate.bot,
+        candidate.chat_id,
+        candidate.sender_id,
+        candidate.primary_device_id,
+        Utc::now(),
+    )?;
+    persist_verified_connection(
+        &api,
+        &connection_store,
+        &connection_reference,
+        token,
+        binding,
+    )?;
+
+    println!();
+    println!("Telegram 채널 연결 완료");
+    println!("현재 릴리스는 연결 기반만 준비하며, 자동 수집 worker는 다음 구현 단계입니다.");
+    Ok(())
+}
+
+fn telegram_status(arguments: TelegramStatusArgs) -> Result<(), MkoError> {
+    let connection_reference = TelegramConnectionRef::for_profile(&arguments.profile)?;
+    let connection_store = OsTelegramConnectionStore;
+    let connection_present = connection_store.contains(&connection_reference)?;
+    let binding = if connection_present {
+        Some(connection_store.get(&connection_reference)?)
+    } else {
+        None
+    };
+    let state = if connection_present {
+        TelegramConnectionStateV2::Connected
+    } else {
+        TelegramConnectionStateV2::Disconnected
+    };
+    let data = TelegramStatusDataV2 {
+        profile_id: arguments.profile,
+        state,
+        bot_username: binding
+            .as_ref()
+            .map(|connection| connection.binding().bot.username.clone()),
+        primary_device_id: binding.map(|connection| connection.binding().primary_device_id.clone()),
+        next_action: NextActionV2::None,
+    };
+    match arguments.format {
+        OutputFormat::Human => {
+            match data.state {
+                TelegramConnectionStateV2::Connected => {
+                    println!(
+                        "connected {} @{}",
+                        data.profile_id,
+                        data.bot_username.as_deref().unwrap_or("unknown")
+                    );
+                }
+                TelegramConnectionStateV2::Disconnected => {
+                    println!("disconnected {}", data.profile_id);
+                }
+                TelegramConnectionStateV2::Incomplete => {
+                    println!("incomplete {}", data.profile_id);
+                }
+            }
+            Ok(())
+        }
+        OutputFormat::JsonV2 => crate::output::emit_json_v2(JsonV2Success::telegram_status(data)),
+        OutputFormat::JsonV1 => Err(MkoError::new(
+            "format_unsupported",
+            "telegram status supports human or json-v2 output",
+        )),
+    }
+}
+
+fn telegram_disconnect(arguments: TelegramProfileArgs) -> Result<(), MkoError> {
+    require_telegram_tty("disconnect")?;
+    let connection_reference = TelegramConnectionRef::for_profile(&arguments.profile)?;
+    let connection_store = OsTelegramConnectionStore;
+    if !connection_store.contains(&connection_reference)? {
+        println!(
+            "Telegram is already disconnected for {}.",
+            arguments.profile
+        );
+        return Ok(());
+    }
+    println!("삭제 대상:");
+    println!("- profile: {}", arguments.profile);
+    println!(
+        "- combined Telegram credential: {} / {}",
+        connection_reference.service, connection_reference.account
+    );
+    println!("- KB 지식·원본·승인 기록은 변경하지 않음");
+    let approval_phrase = format!("DISCONNECT TELEGRAM {}", arguments.profile);
+    println!();
+    println!("해제하려면 아래 문구를 정확히 입력하세요.");
+    println!("{approval_phrase}");
+    let confirmation = read_terminal_line("승인 문구: ")?;
+    if confirmation != approval_phrase {
+        return Err(MkoError::new(
+            "telegram_disconnect_cancelled",
+            "Telegram disconnection was cancelled before mutation",
+        ));
+    }
+    connection_store.delete(&connection_reference)?;
+    println!("Telegram 연결 해제 완료: {}", arguments.profile);
+    Ok(())
+}
+
+fn require_telegram_tty(operation: &str) -> Result<(), MkoError> {
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        Ok(())
+    } else {
+        Err(MkoError::new(
+            "tty_required",
+            format!("Telegram {operation} requires a real TTY"),
+        ))
+    }
+}
+
+fn read_terminal_line(prompt: &str) -> Result<String, MkoError> {
+    print!("{prompt}");
+    std::io::stdout()
+        .flush()
+        .map_err(|_| MkoError::new("terminal_write_failed", "terminal output failed"))?;
+    let mut value = String::new();
+    std::io::stdin()
+        .read_line(&mut value)
+        .map_err(|_| MkoError::new("terminal_read_failed", "terminal input failed"))?;
+    Ok(value.trim_end_matches(['\r', '\n']).to_owned())
+}
+
+fn telegram_device_id() -> Result<String, MkoError> {
+    let host = hostname::get().map_err(|_| {
+        MkoError::new(
+            "telegram_device_identity_failed",
+            "The primary Telegram polling device could not be identified",
+        )
+    })?;
+    let host = host.to_string_lossy().to_ascii_lowercase();
+    let mut normalized = format!("{}-", std::env::consts::OS);
+    for character in host.chars().take(96) {
+        normalized.push(
+            if character.is_ascii_lowercase() || character.is_ascii_digit() {
+                character
+            } else {
+                '-'
+            },
+        );
+    }
+    while normalized.ends_with('-') {
+        normalized.pop();
+    }
+    if normalized == std::env::consts::OS {
+        normalized.push_str("-device");
+    }
+    Ok(normalized)
+}
+
+fn print_telegram_connection_effects(
+    candidate: &PairingCandidateV1,
+    connection_reference: &TelegramConnectionRef,
+) {
+    println!();
+    println!("연결 효과:");
+    println!("- profile: {}", candidate.profile_id);
+    println!("- bot: @{}", candidate.bot.username);
+    println!("- private chat: {}", candidate.chat_id);
+    println!(
+        "- sender: {} ({})",
+        candidate
+            .sender_username
+            .as_ref()
+            .map(|username| format!("@{username}"))
+            .unwrap_or_else(|| "username 없음".to_owned()),
+        candidate.sender_id
+    );
+    println!("- primary device: {}", candidate.primary_device_id);
+    println!("- capture targets: General, Finance");
+    println!("- 금지: 지식 승인, Git commit/push, Project 2035 투자 판단");
+    println!(
+        "- combined credential store: {} / {}",
+        connection_reference.service, connection_reference.account
+    );
+}
+
+fn read_bounded_capture_input(
+    path: &Path,
+    maximum_bytes: usize,
+    too_large_code: &str,
+) -> Result<Vec<u8>, MkoError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| MkoError::new("capture_input_unreadable", error.to_string()))?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > maximum_bytes as u64
+    {
+        return Err(MkoError::new(
+            if metadata.len() > maximum_bytes as u64 {
+                too_large_code
+            } else {
+                "capture_input_unreadable"
+            },
+            "capture input must be a bounded regular file",
+        ));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_capture_input_nofollow(&mut options);
+    let file = options
+        .open(path)
+        .map_err(|error| MkoError::new("capture_input_unreadable", error.to_string()))?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| MkoError::new("capture_input_unreadable", error.to_string()))?;
+    if !opened_metadata.is_file()
+        || opened_metadata.file_type().is_symlink()
+        || opened_metadata.len() > maximum_bytes as u64
+    {
+        return Err(MkoError::new(
+            if opened_metadata.len() > maximum_bytes as u64 {
+                too_large_code
+            } else {
+                "capture_input_unreadable"
+            },
+            "capture input must be a bounded regular file",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    file.take(maximum_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| MkoError::new("capture_input_unreadable", error.to_string()))?;
+    if bytes.len() > maximum_bytes {
+        return Err(MkoError::new(
+            too_large_code,
+            "capture input exceeds its bounded size",
+        ));
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn configure_capture_input_nofollow(options: &mut fs::OpenOptions) {
+    const O_NONBLOCK: i32 = 0x800;
+    const O_NOFOLLOW: i32 = 0x20_000;
+    options.custom_flags(O_NOFOLLOW | O_NONBLOCK);
+}
+
+#[cfg(target_os = "macos")]
+fn configure_capture_input_nofollow(options: &mut fs::OpenOptions) {
+    const O_NONBLOCK: i32 = 0x4;
+    const O_NOFOLLOW: i32 = 0x100;
+    options.custom_flags(O_NOFOLLOW | O_NONBLOCK);
+}
+
+#[cfg(windows)]
+fn configure_capture_input_nofollow(options: &mut fs::OpenOptions) {
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn configure_capture_input_nofollow(_options: &mut fs::OpenOptions) {}
+
+fn capture_channel(value: &CaptureChannelV1) -> CaptureChannelV2 {
+    match value {
+        CaptureChannelV1::Telegram => CaptureChannelV2::Telegram,
+    }
+}
+
+fn capture_input_type(value: &CaptureInputV1) -> CaptureInputTypeV2 {
+    match value {
+        CaptureInputV1::TelegramPdf { .. } => CaptureInputTypeV2::TelegramPdf,
+        CaptureInputV1::Youtube { .. } => CaptureInputTypeV2::Youtube,
+        CaptureInputV1::Text { .. } => CaptureInputTypeV2::Text,
+    }
+}
+
+fn capture_scope(value: &SubjectScopeV1) -> CaptureScopeV2 {
+    match value {
+        SubjectScopeV1::General => CaptureScopeV2::General,
+        SubjectScopeV1::Finance => CaptureScopeV2::Finance,
+    }
+}
+
+fn capture_confirm_scope(value: CaptureConfirmScope) -> SubjectScopeV1 {
+    match value {
+        CaptureConfirmScope::General => SubjectScopeV1::General,
+        CaptureConfirmScope::Finance => SubjectScopeV1::Finance,
+    }
+}
+
+fn capture_route_outcome(value: &RouteOutcomeKindV1) -> CaptureRouteOutcomeV2 {
+    match value {
+        RouteOutcomeKindV1::ReadyGeneral => CaptureRouteOutcomeV2::ReadyGeneral,
+        RouteOutcomeKindV1::ReadyFinance => CaptureRouteOutcomeV2::ReadyFinance,
+        RouteOutcomeKindV1::GeneralConfirmationRequired => {
+            CaptureRouteOutcomeV2::GeneralConfirmationRequired
+        }
+        RouteOutcomeKindV1::FinanceConfirmationRequired => {
+            CaptureRouteOutcomeV2::FinanceConfirmationRequired
+        }
+        RouteOutcomeKindV1::RoutingConfirmationRequired => {
+            CaptureRouteOutcomeV2::RoutingConfirmationRequired
+        }
+        RouteOutcomeKindV1::Rejected => CaptureRouteOutcomeV2::Rejected,
+    }
+}
+
+fn capture_route_outcome_name(value: &CaptureRouteOutcomeV2) -> &'static str {
+    match value {
+        CaptureRouteOutcomeV2::ReadyGeneral => "ready_general",
+        CaptureRouteOutcomeV2::ReadyFinance => "ready_finance",
+        CaptureRouteOutcomeV2::GeneralConfirmationRequired => "general_confirmation_required",
+        CaptureRouteOutcomeV2::FinanceConfirmationRequired => "finance_confirmation_required",
+        CaptureRouteOutcomeV2::RoutingConfirmationRequired => "routing_confirmation_required",
+        CaptureRouteOutcomeV2::Rejected => "rejected",
+    }
+}
+
+fn capture_routing_authority(value: &RoutingAuthorityV1) -> CaptureRoutingAuthorityV2 {
+    match value {
+        RoutingAuthorityV1::UserSelected => CaptureRoutingAuthorityV2::UserSelected,
+        RoutingAuthorityV1::UserConfirmedProposal => {
+            CaptureRoutingAuthorityV2::UserConfirmedProposal
+        }
+    }
+}
+
+fn capture_proposal(value: &ClassifierProposalV1) -> CaptureProposalDataV2 {
+    CaptureProposalDataV2 {
+        proposed_scope: capture_scope(&value.proposed_scope),
+        confidence: value.confidence,
+        mixed_subjects: value.mixed_subjects,
+        conflicting: value.conflicting,
+    }
+}
+
+fn capture_rejection_reason(value: &RouteRejectionReasonV1) -> CaptureRoutingRejectionV2 {
+    match value {
+        RouteRejectionReasonV1::ConfirmationRequiresProposal => {
+            CaptureRoutingRejectionV2::ConfirmationRequiresProposal
+        }
+        RouteRejectionReasonV1::ConfirmationDoesNotMatchProposal => {
+            CaptureRoutingRejectionV2::ConfirmationDoesNotMatchProposal
+        }
+        RouteRejectionReasonV1::ConfirmationCannotResolveMixedOrConflictingProposal => {
+            CaptureRoutingRejectionV2::ConfirmationCannotResolveMixedOrConflictingProposal
+        }
     }
 }
 
@@ -2351,6 +3002,27 @@ fn emit_json_v2_failure_or_stderr(command: JsonV2Command, error: &MkoError) {
 
 fn json_v2_command(cli: &Cli) -> Option<JsonV2Command> {
     match &cli.command {
+        Command::Capture {
+            command:
+                CaptureCommand::Validate(CaptureValidateArgs {
+                    format: OutputFormat::JsonV2,
+                    ..
+                }),
+        } => Some(JsonV2Command::CaptureValidate),
+        Command::Capture {
+            command:
+                CaptureCommand::Route(CaptureRouteArgs {
+                    format: OutputFormat::JsonV2,
+                    ..
+                }),
+        } => Some(JsonV2Command::CaptureRoute),
+        Command::Telegram {
+            command:
+                TelegramCommand::Status(TelegramStatusArgs {
+                    format: OutputFormat::JsonV2,
+                    ..
+                }),
+        } => Some(JsonV2Command::TelegramStatus),
         Command::Setup(SetupArgs {
             command:
                 Some(SetupCommand::Plan(SetupPlanArgs {
@@ -2533,6 +3205,9 @@ fn json_v2_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option
         args.get(1)?.to_str()?,
         args.get(2).and_then(|argument| argument.to_str()),
     ) {
+        ("capture", Some("validate")) => Some(JsonV2Command::CaptureValidate),
+        ("capture", Some("route")) => Some(JsonV2Command::CaptureRoute),
+        ("telegram", Some("status")) => Some(JsonV2Command::TelegramStatus),
         ("setup", Some("plan")) => Some(JsonV2Command::SetupPlan),
         ("setup", Some("apply")) => Some(JsonV2Command::SetupApply),
         ("add", _) => Some(JsonV2Command::Add),

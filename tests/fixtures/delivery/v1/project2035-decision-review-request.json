@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "package_id": "dp_project2035_decision_456_r2",
+  "source_system": "project2035",
+  "payload_type": "decision_review_request",
+  "source": {
+    "id": "decision_456",
+    "revision_id": "revision_2",
+    "content_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "classification": "personal_financial",
+  "content": {
+    "locale": "ko-KR",
+    "title": "포트폴리오 리밸런싱 검토 요청",
+    "summary": "Project 2035에서 새 리밸런싱 제안에 대한 검토를 요청했습니다.",
+    "body_markdown": "# 리밸런싱 검토 요청\n\n메시지는 검토 요청만 전달하며 투자 판단을 확정하지 않습니다.",
+    "links": [
+      {
+        "rel": "review",
+        "label": "안전한 검토 화면 열기",
+        "url": "https://example.invalid/project2035/review/decision_456/revision_2"
+      }
+    ]
+  },
+  "destinations": [
+    {
+      "channel": "telegram",
+      "profile_id": "personal_finance_alerts",
+      "render_profile": "decision_review-v1"
+    }
+  ],
+  "interaction_policy": {
+    "allowed_actions": [
+      "defer",
+      "remind_later"
+    ],
+    "decision_authority": "source_system_only"
+  },
+  "authorization": {
+    "mode": "source_policy_event",
+    "policy_id": "project2035-review-notification-v1",
+    "event_id": "notification_policy_event_456",
+    "authorized_at": "2026-07-24T11:00:00+09:00",
+    "intent_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "actor_ref": null
+  },
+  "created_at": "2026-07-24T11:00:01+09:00",
+  "expires_at": "2026-07-25T09:00:00+09:00"
+}

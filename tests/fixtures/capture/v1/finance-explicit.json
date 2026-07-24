@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "capture_id": "cap_finance_report_001",
+  "channel": "telegram",
+  "channel_identity": {
+    "profile_id": "personal_capture",
+    "chat_id": "-1001234567890",
+    "sender_id": "123456789",
+    "update_id": "9002",
+    "message_id": "43"
+  },
+  "input": {
+    "input_type": "telegram_pdf",
+    "file_id": "AgACAgIAAxkBAAIBcWJ",
+    "file_unique_id": "AQADcWJ8zY3zAAE",
+    "declared_size_bytes": 2048,
+    "mime_type": "application/pdf"
+  },
+  "selected_scope": "finance",
+  "received_at": "2026-07-24T10:01:00Z"
+}

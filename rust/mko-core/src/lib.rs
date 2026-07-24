@@ -6,6 +6,7 @@ pub mod asset_v2;
 pub mod asset_validation;
 pub mod atomic;
 pub mod canonical_source;
+pub mod capture_v1;
 pub mod catalog;
 pub mod check;
 pub mod clock;

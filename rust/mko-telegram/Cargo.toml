@@ -1,0 +1,26 @@
+[package]
+name = "mko-telegram"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "mko_telegram"
+path = "src/lib.rs"
+
+[dependencies]
+chrono.workspace = true
+hex.workspace = true
+mko-core = { path = "../mko-core" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
+ureq.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native-keyring-store"] }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { workspace = true, features = ["windows-native-keyring-store"] }

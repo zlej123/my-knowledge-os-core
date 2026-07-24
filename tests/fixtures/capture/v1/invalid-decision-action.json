@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "capture_id": "cap_invalid_decision",
+  "channel": "telegram",
+  "channel_identity": {
+    "profile_id": "personal_capture",
+    "chat_id": "-1001234567890",
+    "sender_id": "123456789",
+    "update_id": "9005",
+    "message_id": "46"
+  },
+  "input": { "input_type": "text", "text": "기업 실적 메모" },
+  "received_at": "2026-07-24T10:04:00Z",
+  "decision_action": "buy"
+}

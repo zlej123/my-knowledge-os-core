@@ -81,6 +81,24 @@ or combining histories. If it is empty, complete setup locally first, then separ
 initializing Git or adding `origin`. Setup approval never authorizes Git initialization, remote
 configuration, commit, or push.
 
+For `Telegram 연결해줘`, `텔레그램 등록`, or an equivalent onboarding request, explain that
+BotFather bot creation is the one manual external step and ask the user to run this in a real
+terminal:
+
+```bash
+mko telegram connect --profile personal
+```
+
+Never ask for the bot token in chat and never place it in an argument, environment variable, file,
+or generated command. The wizard reads it with hidden terminal input, verifies the bot, displays a
+five-minute private-chat deep link, requires the intended owner to have a Telegram username, and
+stores the exact approved token plus binding as one combined credential in macOS Keychain or
+Windows Credential Manager. Do not simulate the TTY, type the exact approval phrase for the user,
+or use computer-control tools to approve it. Use
+`mko telegram status --profile personal --format json-v2` for a read-only check. Be explicit that
+v0.3 currently prepares the secure connection only;
+continuous Telegram polling, receipt recovery, and durable Capture ingestion are not yet active.
+
 If setup is missing, create a non-mutating plan:
 
 ```bash

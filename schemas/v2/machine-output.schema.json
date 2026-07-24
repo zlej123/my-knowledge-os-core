@@ -3,6 +3,9 @@
   "$id": "https://my-knowledge-os.local/schemas/v2/machine-output.schema.json",
   "title": "My Knowledge OS machine envelope v2",
   "oneOf": [
+    { "$ref": "#/$defs/capture_validate_success" },
+    { "$ref": "#/$defs/capture_route_success" },
+    { "$ref": "#/$defs/telegram_status_success" },
     { "$ref": "#/$defs/setup_plan_success" },
     { "$ref": "#/$defs/setup_apply_success" },
     { "$ref": "#/$defs/add_success" },
@@ -19,6 +22,9 @@
   "$defs": {
     "command": {
       "enum": [
+        "capture.validate",
+        "capture.route",
+        "telegram.status",
         "setup.plan",
         "setup.apply",
         "add",
@@ -49,13 +55,88 @@
         "repair",
         "preserve_user_edit",
         "retry",
-        "sync"
+        "sync",
+        "confirm_routing"
       ]
     },
     "empty_object": {
       "type": "object",
       "additionalProperties": false,
       "maxProperties": 0
+    },
+    "capture_scope": {
+      "enum": ["general", "finance"]
+    },
+    "capture_input_type": {
+      "enum": ["telegram_pdf", "youtube", "text"]
+    },
+    "capture_proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["proposed_scope", "confidence", "mixed_subjects", "conflicting"],
+      "properties": {
+        "proposed_scope": { "$ref": "#/$defs/capture_scope" },
+        "confidence": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "mixed_subjects": { "type": "boolean" },
+        "conflicting": { "type": "boolean" }
+      }
+    },
+    "capture_validate_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capture_id", "channel", "input_type", "selected_scope"],
+      "properties": {
+        "capture_id": { "type": "string", "pattern": "^cap_[a-z0-9][a-z0-9_-]{0,126}$" },
+        "channel": { "const": "telegram" },
+        "input_type": { "$ref": "#/$defs/capture_input_type" },
+        "selected_scope": { "anyOf": [{ "$ref": "#/$defs/capture_scope" }, { "type": "null" }] }
+      }
+    },
+    "capture_route_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capture_id", "outcome", "confirmed_scope", "routing_authority", "proposal", "next_action", "rejection_reason"],
+      "properties": {
+        "capture_id": { "type": "string", "pattern": "^cap_[a-z0-9][a-z0-9_-]{0,126}$" },
+        "outcome": { "enum": ["ready_general", "ready_finance", "general_confirmation_required", "finance_confirmation_required", "routing_confirmation_required", "rejected"] },
+        "confirmed_scope": { "anyOf": [{ "$ref": "#/$defs/capture_scope" }, { "type": "null" }] },
+        "routing_authority": { "anyOf": [{ "enum": ["user_selected", "user_confirmed_proposal"] }, { "type": "null" }] },
+        "proposal": { "anyOf": [{ "$ref": "#/$defs/capture_proposal" }, { "type": "null" }] },
+        "next_action": { "$ref": "#/$defs/next_action" },
+        "rejection_reason": { "anyOf": [{ "enum": ["confirmation_requires_proposal", "confirmation_does_not_match_proposal", "confirmation_cannot_resolve_mixed_or_conflicting_proposal"] }, { "type": "null" }] }
+      }
+    },
+    "telegram_status_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile_id",
+        "state",
+        "bot_username",
+        "primary_device_id",
+        "next_action"
+      ],
+      "properties": {
+        "profile_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+        },
+        "state": {
+          "enum": ["disconnected", "connected", "incomplete"]
+        },
+        "bot_username": {
+          "type": ["string", "null"],
+          "pattern": "^[a-z][a-z0-9_]{1,28}bot$"
+        },
+        "primary_device_id": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "next_action": {
+          "enum": ["none", "repair"]
+        }
+      }
     },
     "queue_item": {
       "type": "object",
@@ -479,6 +560,39 @@
         "command": { "const": "add" },
         "result": { "const": "ok" },
         "data": { "$ref": "#/$defs/add_data" }
+      }
+    },
+    "capture_validate_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "capture.validate" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/capture_validate_data" }
+      }
+    },
+    "capture_route_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "capture.route" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/capture_route_data" }
+      }
+    },
+    "telegram_status_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "telegram.status" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/telegram_status_data" }
       }
     },
     "setup_plan_success": {

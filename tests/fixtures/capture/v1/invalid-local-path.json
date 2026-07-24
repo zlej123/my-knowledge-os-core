@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "capture_id": "cap_invalid_path",
+  "channel": "telegram",
+  "channel_identity": {
+    "profile_id": "personal_capture",
+    "chat_id": "-1001234567890",
+    "sender_id": "123456789",
+    "update_id": "9004",
+    "message_id": "45"
+  },
+  "input": { "input_type": "text", "text": "등반 강의 노트" },
+  "received_at": "2026-07-24T10:03:00Z",
+  "local_path": "/Users/owner/Downloads/private.pdf"
+}

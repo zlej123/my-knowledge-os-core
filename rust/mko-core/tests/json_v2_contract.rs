@@ -142,6 +142,7 @@ fn machine_envelope_goldens_validate_and_round_trip() {
     for bytes in [
         include_bytes!("../../../tests/fixtures/json-v2/setup-plan-success.json").as_slice(),
         include_bytes!("../../../tests/fixtures/json-v2/setup-apply-success.json").as_slice(),
+        include_bytes!("../../../tests/fixtures/json-v2/telegram-status-success.json").as_slice(),
         include_bytes!("../../../tests/fixtures/json-v2/review-open-success.json").as_slice(),
         include_bytes!("../../../tests/fixtures/json-v2/review-feedback-success.json").as_slice(),
         include_bytes!("../../../tests/fixtures/json-v2/dashboard-success.json").as_slice(),

@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "package_id": "dp_mko_knowledge_123_r7",
+  "source_system": "mko",
+  "payload_type": "knowledge_publication",
+  "source": {
+    "id": "knowledge_123",
+    "revision_id": "revision_7",
+    "content_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "classification": "personal",
+  "content": {
+    "locale": "ko-KR",
+    "title": "IMM Filter 모델 전환 지연",
+    "summary": "전이확률을 높이면 기동 대응은 빨라질 수 있지만 정상 상태 안정성과 상충할 수 있습니다.",
+    "body_markdown": "# IMM Filter 모델 전환 지연\n\n## 근거 기반 내용\n\n승인된 Knowledge revision의 본문입니다.\n\n## LLM 분석\n\n해석과 가설은 근거 기반 사실과 분리합니다.",
+    "links": [
+      {
+        "rel": "detail",
+        "label": "전체 지식노트 보기",
+        "url": "https://example.invalid/mko/knowledge/knowledge_123/revision_7"
+      }
+    ]
+  },
+  "destinations": [
+    {
+      "channel": "notion",
+      "profile_id": "personal_knowledge",
+      "render_profile": "knowledge_full-v1"
+    },
+    {
+      "channel": "telegram",
+      "profile_id": "personal_alerts",
+      "render_profile": "knowledge_summary-v1"
+    }
+  ],
+  "interaction_policy": {
+    "allowed_actions": [],
+    "decision_authority": "source_system_only"
+  },
+  "authorization": {
+    "mode": "human_event",
+    "policy_id": "mko-personal-publication-v1",
+    "event_id": "review_delivery_123",
+    "authorized_at": "2026-07-24T10:00:00+09:00",
+    "intent_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "actor_ref": "user_owner"
+  },
+  "created_at": "2026-07-24T10:00:01+09:00",
+  "expires_at": null
+}

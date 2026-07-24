@@ -85,10 +85,12 @@ fn command_key(surface: &str) -> Option<String> {
         };
         return match group {
             "check" => Some("mko check".into()),
-            "asset" | "source" | "human" | "hooks" | "knowledge" => Some(words.get(2).map_or_else(
-                || format!("mko {group}"),
-                |&action| format!("mko {group} {action}"),
-            )),
+            "asset" | "source" | "human" | "hooks" | "knowledge" | "telegram" => {
+                Some(words.get(2).map_or_else(
+                    || format!("mko {group}"),
+                    |&action| format!("mko {group} {action}"),
+                ))
+            }
             _ => Some(format!("mko {group}")),
         };
     }
@@ -532,6 +534,8 @@ fn knowledge_os_skill_exposes_only_the_v2_core_workflow() {
         "mko review-open",
         "mko review-feedback",
         "mko review",
+        "mko telegram connect",
+        "mko telegram status",
     ];
 
     validate_command_policy(&text, &allowed)
@@ -544,6 +548,7 @@ fn knowledge_os_skill_exposes_only_the_v2_core_workflow() {
             && !command.starts_with("mko --version")
             && !command.starts_with("mko setup")
             && !command.starts_with("mko review ")
+            && !command.starts_with("mko telegram connect")
         {
             assert!(
                 command.contains("--format json-v2"),
@@ -603,6 +608,8 @@ fn knowledge_os_skill_defines_the_knowledge_extraction_flow() {
             "mko review-open",
             "mko review-feedback",
             "mko review",
+            "mko telegram connect",
+            "mko telegram status",
         ],
     )
     .unwrap_or_else(|error| panic!("integrated Skill {error}"));

@@ -1,0 +1,12 @@
+{
+  "command": "telegram.status",
+  "schema_version": 2,
+  "result": "ok",
+  "data": {
+    "profile_id": "personal",
+    "state": "connected",
+    "bot_username": "mkocapturebot",
+    "primary_device_id": "macos-macbook-air",
+    "next_action": "none"
+  }
+}

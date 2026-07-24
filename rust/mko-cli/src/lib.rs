@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod cli_v2;
 pub mod output;
+mod telegram_onboarding;
 
 use mko_core::{
     add::BatchAddResult,

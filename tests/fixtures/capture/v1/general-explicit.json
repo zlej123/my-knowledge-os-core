@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "capture_id": "cap_general_lecture_001",
+  "channel": "telegram",
+  "channel_identity": {
+    "profile_id": "personal_capture",
+    "chat_id": "-1001234567890",
+    "sender_id": "123456789",
+    "update_id": "9001",
+    "message_id": "42"
+  },
+  "input": {
+    "input_type": "youtube",
+    "video_id": "dQw4w9WgXcQ",
+    "canonical_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+  },
+  "selected_scope": "general",
+  "received_at": "2026-07-24T10:00:00Z"
+}

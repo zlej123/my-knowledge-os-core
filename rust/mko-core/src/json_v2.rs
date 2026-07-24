@@ -25,6 +25,12 @@ where
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum JsonV2Command {
+    #[serde(rename = "capture.validate")]
+    CaptureValidate,
+    #[serde(rename = "capture.route")]
+    CaptureRoute,
+    #[serde(rename = "telegram.status")]
+    TelegramStatus,
     #[serde(rename = "setup.plan")]
     SetupPlan,
     #[serde(rename = "setup.apply")]
@@ -275,6 +281,109 @@ pub enum NextActionV2 {
     PreserveUserEdit,
     Retry,
     Sync,
+    ConfirmRouting,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureChannelV2 {
+    Telegram,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureInputTypeV2 {
+    TelegramPdf,
+    Youtube,
+    Text,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureScopeV2 {
+    General,
+    Finance,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureRouteOutcomeV2 {
+    ReadyGeneral,
+    ReadyFinance,
+    GeneralConfirmationRequired,
+    FinanceConfirmationRequired,
+    RoutingConfirmationRequired,
+    Rejected,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureRoutingAuthorityV2 {
+    UserSelected,
+    UserConfirmedProposal,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureRoutingRejectionV2 {
+    ConfirmationRequiresProposal,
+    ConfirmationDoesNotMatchProposal,
+    ConfirmationCannotResolveMixedOrConflictingProposal,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelegramConnectionStateV2 {
+    Disconnected,
+    Connected,
+    Incomplete,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelegramStatusDataV2 {
+    pub profile_id: String,
+    pub state: TelegramConnectionStateV2,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub bot_username: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub primary_device_id: Option<String>,
+    pub next_action: NextActionV2,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureProposalDataV2 {
+    pub proposed_scope: CaptureScopeV2,
+    pub confidence: u8,
+    pub mixed_subjects: bool,
+    pub conflicting: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureValidateDataV2 {
+    pub capture_id: String,
+    pub channel: CaptureChannelV2,
+    pub input_type: CaptureInputTypeV2,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub selected_scope: Option<CaptureScopeV2>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureRouteDataV2 {
+    pub capture_id: String,
+    pub outcome: CaptureRouteOutcomeV2,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub confirmed_scope: Option<CaptureScopeV2>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub routing_authority: Option<CaptureRoutingAuthorityV2>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub proposal: Option<CaptureProposalDataV2>,
+    pub next_action: NextActionV2,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub rejection_reason: Option<CaptureRoutingRejectionV2>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -360,6 +469,27 @@ pub struct JsonV2Error {
 #[serde(tag = "command")]
 #[serde(deny_unknown_fields)]
 pub enum JsonV2Success {
+    #[serde(rename = "capture.validate")]
+    CaptureValidate {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: CaptureValidateDataV2,
+    },
+    #[serde(rename = "capture.route")]
+    CaptureRoute {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: CaptureRouteDataV2,
+    },
+    #[serde(rename = "telegram.status")]
+    TelegramStatus {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: TelegramStatusDataV2,
+    },
     #[serde(rename = "setup.plan")]
     SetupPlan {
         #[serde(deserialize_with = "deserialize_schema_version")]
@@ -440,6 +570,30 @@ pub enum JsonV2Success {
 }
 
 impl JsonV2Success {
+    pub fn capture_validate(data: CaptureValidateDataV2) -> Self {
+        Self::CaptureValidate {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
+    pub fn capture_route(data: CaptureRouteDataV2) -> Self {
+        Self::CaptureRoute {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
+    pub fn telegram_status(data: TelegramStatusDataV2) -> Self {
+        Self::TelegramStatus {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
     pub fn setup_plan(data: SetupPlanDataV2) -> Self {
         Self::SetupPlan {
             schema_version: 2,

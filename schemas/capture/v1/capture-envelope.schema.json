@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-knowledge-os.local/schemas/capture/v1/capture-envelope.schema.json",
+  "title": "My Knowledge OS CaptureEnvelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "capture_id", "channel", "channel_identity", "input", "received_at"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "capture_id": { "type": "string", "pattern": "^cap_[a-z0-9][a-z0-9_-]{0,126}$" },
+    "channel": { "const": "telegram" },
+    "channel_identity": { "$ref": "#/$defs/channel_identity" },
+    "input": { "$ref": "#/$defs/input" },
+    "selected_scope": { "$ref": "#/$defs/subject_scope" },
+    "received_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "subject_scope": { "enum": ["general", "finance"] },
+    "telegram_chat_id": { "type": "string", "pattern": "^-?[1-9][0-9]{0,19}$" },
+    "telegram_positive_id": { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" },
+    "opaque_reference": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9_-]+$" },
+    "channel_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_id", "chat_id", "sender_id", "update_id", "message_id"],
+      "properties": {
+        "profile_id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+        "chat_id": { "$ref": "#/$defs/telegram_chat_id" },
+        "sender_id": { "$ref": "#/$defs/telegram_positive_id" },
+        "update_id": { "$ref": "#/$defs/telegram_positive_id" },
+        "message_id": { "$ref": "#/$defs/telegram_positive_id" }
+      }
+    },
+    "input": {
+      "oneOf": [
+        { "$ref": "#/$defs/telegram_pdf" },
+        { "$ref": "#/$defs/youtube" },
+        { "$ref": "#/$defs/text" }
+      ]
+    },
+    "telegram_pdf": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input_type", "file_id", "file_unique_id", "declared_size_bytes", "mime_type"],
+      "properties": {
+        "input_type": { "const": "telegram_pdf" },
+        "file_id": { "$ref": "#/$defs/opaque_reference" },
+        "file_unique_id": { "$ref": "#/$defs/opaque_reference" },
+        "declared_size_bytes": { "type": "integer", "minimum": 1, "maximum": 52428800 },
+        "mime_type": { "const": "application/pdf" }
+      }
+    },
+    "youtube": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input_type", "video_id", "canonical_url"],
+      "properties": {
+        "input_type": { "const": "youtube" },
+        "video_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{11}$" },
+        "canonical_url": { "type": "string", "pattern": "^https://www\\.youtube\\.com/watch\\?v=[A-Za-z0-9_-]{11}$" }
+      }
+    },
+    "text": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input_type", "text"],
+      "properties": {
+        "input_type": { "const": "text" },
+        "text": { "type": "string", "minLength": 1, "maxLength": 16384 }
+      }
+    }
+  }
+}
