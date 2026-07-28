@@ -12,9 +12,17 @@ MKO register it into the Personal Inbox automatically, with the domain
 perspective — investment, study, work — proposed at capture time.
 
 **Recorded 2026-07-27.** The owner believed this was already part of the
-design; a search of this repository found no messenger ingest anywhere. The
-concept existed only in conversation. The actual v0.2 ingest path is the
-Google Drive `personal/inbox` folder plus `mko inbox` / `mko add`.
+design. `main` itself has no messenger ingest, but a prototype exists on the
+unmerged branch `feature/delivery-engine-design` (`50cb7a6`, "feat: add
+capture delivery and Telegram onboarding"): a `mko-telegram` crate with `mko
+telegram connect/status/disconnect`, credentials held only in the OS
+keychain, plus capture-envelope and delivery-package schemas. That prototype
+stops at safe channel connection and status — the polling worker that would
+pull Telegram messages into General/Finance Capture is explicitly deferred
+there as a later milestone, so it does not perform automatic ingest yet. The
+branch remains unscheduled and unmerged. The actual v0.2 ingest path on
+`main` is still the Google Drive `personal/inbox` folder plus `mko inbox` /
+`mko add`.
 
 **Why it is not scheduled.**
 

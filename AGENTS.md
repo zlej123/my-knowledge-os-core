@@ -29,3 +29,11 @@ From `rust/`, run:
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+## Branch baseline
+
+`main` is the product baseline: the primary checkout sits on it, and all
+verification above runs against it. Feature work happens on branches (as
+worktrees under `.worktrees/`) and lands through pull requests. The only
+current worktree is `feature/delivery-engine-design`, the unscheduled
+capture-delivery/Telegram prototype (see docs/BACKLOG.md).
