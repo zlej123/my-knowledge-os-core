@@ -48,3 +48,23 @@ as one placed in the Inbox directly — not the transport.
 MKO reference contract in the Thesis repository). Investment material
 reaching Thesis is a human promotion of an approved MKO source into evidence;
 it is never automatic, so messenger capture would not change that path.
+
+## Usability review findings — 2026-07-29
+
+An external usability review (verified against the cited files) queued three
+items. They are scheduled AFTER the Thesis usability phase completes.
+
+1. **Setup contract conflict (P1, verified).** The v0.3 UX design offers
+   "clone an existing private GitHub KB or scaffold a new local Personal KB",
+   but `skills/codex/my-knowledge-os/SKILL.md` hard-requires an absolute
+   Google Drive sync root ("Stop until that path exists") and a private
+   GitHub URL before the first PDF. Git should be the recommended sync
+   option, not a precondition for the first summary. Fix direction: align
+   the Skill with the design's scaffold-local path.
+2. **Revision-request loop is not closed for the user (P1).** The Skill
+   stores feedback and stops; replacement needs the current revision, and
+   the queue only says "수정본 생성" without naming the regeneration flow.
+   Fix direction: one guided path from feedback to replacement revision.
+3. **Flaky test.** `registry_scan_limit` failed once in a full-workspace run
+   and passed in isolation — likely load/timing sensitivity. Track before
+   trusting full-suite green on slow machines.
