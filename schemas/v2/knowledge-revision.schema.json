@@ -13,6 +13,13 @@
     "asset_fingerprint": { "$ref": "#/$defs/digest" },
     "evidence_basis": { "$ref": "#/$defs/evidence_basis" },
     "domain_policy": { "enum": ["standard", "high_risk"] },
+    "perspectives": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": { "enum": ["life", "learning", "technical", "project", "investment"] }
+    },
     "response": { "$ref": "#/$defs/response" }
   },
   "$defs": {

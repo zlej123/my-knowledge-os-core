@@ -106,6 +106,15 @@ fn setup_creates_exact_provider_profile_and_dashboard_and_is_idempotent() {
     assert!(repository.join("HOME.md").is_file());
     assert!(repository.join("views/review-queue.base").is_file());
     assert!(repository.join("views/knowledge-library.base").is_file());
+    let knowledge_base =
+        fs::read_to_string(repository.join("views/knowledge-library.base")).unwrap();
+    assert!(knowledge_base.contains("displayName: 관점"));
+    for perspective in ["life", "learning", "technical", "project", "investment"] {
+        assert!(
+            knowledge_base.contains(&format!("list(perspectives).contains(\"{perspective}\")")),
+            "missing Obsidian perspective filter for {perspective}"
+        );
+    }
     let profiles = fixture.profile_store().read().unwrap().unwrap();
     assert_eq!(profiles.schema_version, PROFILE_SCHEMA_VERSION);
     assert_eq!(profiles.default_profile, "personal");

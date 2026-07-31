@@ -28,17 +28,73 @@ fn version_reports_the_product_release() {
 
 #[test]
 #[allow(deprecated)] // Required by the v0.1 assert_cmd CLI contract.
-fn help_exposes_v01_command_groups() {
+fn help_exposes_the_human_command_surface_only() {
     Command::cargo_bin("mko")
         .unwrap()
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("asset"))
-        .stdout(predicate::str::contains("source"))
-        .stdout(predicate::str::contains("check"))
-        .stdout(predicate::str::contains("human"))
-        .stdout(predicate::str::contains("hooks"));
+        .stdout(predicate::str::contains("setup"))
+        .stdout(predicate::str::contains("add"))
+        .stdout(predicate::str::contains("find"))
+        .stdout(predicate::str::contains("remember"))
+        .stdout(predicate::str::contains("review"))
+        .stdout(predicate::str::contains("doctor"))
+        .stdout(predicate::str::contains("  asset").not())
+        .stdout(predicate::str::contains("  source").not())
+        .stdout(predicate::str::contains("  hooks").not());
+}
+
+#[test]
+#[allow(deprecated)]
+fn bare_mko_refuses_to_prompt_when_input_is_not_a_terminal() {
+    Command::cargo_bin("mko")
+        .unwrap()
+        .assert()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("home_tty_required"));
+}
+
+#[test]
+#[allow(deprecated)]
+fn find_is_a_first_class_command() {
+    Command::cargo_bin("mko")
+        .unwrap()
+        .args(["find", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<TERM>"))
+        .stdout(predicate::str::contains("--perspective"));
+}
+
+#[test]
+#[allow(deprecated)]
+fn remember_refuses_non_terminal_confirmation() {
+    Command::cargo_bin("mko")
+        .unwrap()
+        .args(["remember", "keep this exact text"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("remember_tty_required"));
+}
+
+#[test]
+#[allow(deprecated)]
+fn perspective_confirmation_refuses_non_terminal_input() {
+    Command::cargo_bin("mko")
+        .unwrap()
+        .args([
+            "perspective",
+            "personal-knowledge-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--set",
+            "investment",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("perspective_tty_required"));
 }
 
 #[test]

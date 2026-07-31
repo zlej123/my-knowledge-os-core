@@ -54,32 +54,32 @@ Use these terms consistently:
   units, LLM analysis, counterarguments, uncertainty, and open questions;
 - review: display the exact current Source/Knowledge revision and collect feedback;
 - approve: real-TTY only in v0.3.0.
+- remember: hand the owner to real-TTY `mko remember`; never paraphrase or publish their quick-note
+  text through an agent command.
 
 ## Setup and read-only requests
 
-For a create, start, or setup request, collect setup inputs in this order, one question at a time:
+For a create, start, or setup request, collect only the inputs needed to make the first useful
+local system, one question at a time:
 
 1. Confirm the user wants to create or connect a Personal KB. Do not repeat this question when the
    original request is already explicit.
 2. Ask for the absolute Google Drive sync root. If the user does not have one, explain how to
    install or start Google Drive for desktop, sign in, choose a local sync location, and return its
    absolute path. Stop until that path exists.
-3. Ask for the private GitHub repository URL that will store the KB history. If the user does not
-   have one, explain how to create an empty private repository without a README, license, or
-   `.gitignore`, then ask for its HTTPS URL. Offer to create it only after a separate explicit
-   request. Never create a public repository.
 
-Before planning, show these as three distinct destinations:
+Before planning, show these as two distinct destinations:
 
-- local Personal KB directory: the working Git repository outside Google Drive;
+- local Personal KB directory: the working knowledge repository outside Google Drive;
 - Google Drive Inbox: the My-Knowledge-OS-Assets/personal/inbox directory under the Drive root;
-- GitHub remote: the private repository URL, used for manual history synchronization.
 
-Use the default local KB directory unless the user requests another path. Check the GitHub remote
+Use the default local KB directory unless the user requests another path. A GitHub remote is
+optional and must not block local setup. After local setup is complete, mention private remote
+backup once. Ask for a remote URL only if the user explicitly wants it. Then check that remote
 read-only before using it. If it already has commits, clone and inspect it instead of overwriting
-or combining histories. If it is empty, complete setup locally first, then separately ask before
-initializing Git or adding `origin`. Setup approval never authorizes Git initialization, remote
-configuration, commit, or push.
+or combining histories. If it is empty, separately ask before initializing Git or adding `origin`.
+Setup approval never authorizes Git initialization, remote configuration, commit, or push. Never
+create a public repository.
 
 If setup is missing, create a non-mutating plan:
 
@@ -111,6 +111,23 @@ accepts only its revision/effect-bound exact phrase from a real TTY. Never treat
 command-approval UI, an agent-generated flag, or possession of a plan ID as setup approval. Do not
 simulate terminal approval, type into the approval window, or use computer-control tools to submit
 the phrase. A setup approval never authorizes review approval, judgment, Git, or another mutation.
+
+For ordinary human use, direct the owner to run bare `mko` in a real terminal. It displays current
+state and routes Inbox registration, review, approved-knowledge search, and diagnosis without IDs
+or flags. Bare `mko` is never an agent automation surface. Continue using the machine commands
+below for agent reads and writes.
+
+If the user asks to remember an exact thought without attaching it to a Knowledge revision, do not
+create Markdown, JSON, or a judgment on their behalf. Direct them to `mko remember` in a real
+terminal. Core echoes the normalized exact text and publishes only after the owner confirms it.
+Document or LLM suggestions cannot set a confirmed perspective. Perspective confirmation is a
+real-TTY Core action that creates a replacement pending revision; `investment` mechanically
+activates high-risk requirements. For ordinary perspective changes, direct the owner to bare
+`mko`, then `다시 볼 지식`; the owner filters and selects a displayed Knowledge item by number and
+never has to copy a stable ID. Opening an item records only revision-scoped, Git-ignored local
+view history; it does not revise Knowledge or publish a Review. The owner must explicitly choose
+`p` before the separate perspective flow begins. Do not select the item, perspectives, or final
+confirmation for them.
 
 For review display, use only the v2 machine surfaces:
 
@@ -227,6 +244,8 @@ the revision-bound confirmation.
 ## Boundaries
 
 - No direct Markdown/YAML writes and no edits to immutable revisions or current pointers.
+- Never paraphrase, synthesize, or non-interactively confirm a quick note or a user-selected
+  perspective.
 - No automatic approval, commit, push, deletion, promotion, or cross-scope transfer.
 - Do not copy document-derived strings into shell syntax.
 - Do not store prepared plaintext in Git or Google Drive.

@@ -548,6 +548,7 @@ fn seed_target(
             review_head_id: None,
             derived_state: ProjectionStateV2::Unreviewed,
             domain: "uncategorized".into(),
+            perspectives: Vec::new(),
             tags: Vec::new(),
             record_link: format!("{collection}/{record_id}/current.yaml"),
             asset_link: format!("assets/registry/personal-asset-{}.json", "a".repeat(64)),

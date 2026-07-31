@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-knowledge-os.local/schemas/v2/quick-note.schema.json",
+  "title": "My Knowledge OS quick note v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "record_type",
+    "id",
+    "text",
+    "text_digest",
+    "authorship",
+    "created_at"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "record_type": { "const": "quick_note" },
+    "id": { "type": "string", "pattern": "^personal-note-[a-f0-9]{64}$" },
+    "text": { "type": "string", "minLength": 1, "maxLength": 32768 },
+    "text_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "authorship": { "const": "user_confirmed_via_tty" },
+    "created_at": { "type": "string", "format": "date-time" }
+  }
+}

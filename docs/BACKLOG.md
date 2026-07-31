@@ -52,15 +52,20 @@ it is never automatic, so messenger capture would not change that path.
 ## Usability review findings — 2026-07-29
 
 An external usability review (verified against the cited files) queued three
-items. They are scheduled AFTER the Thesis usability phase completes.
+items. The owner resumed this work on 2026-07-31. The product decisions and
+delivery phases are now specified in
+`docs/superpowers/specs/2026-07-31-mko-daily-home-ux-design.md`; implementation
+of Phase A and the authorized Phase B slice was completed locally on 2026-07-31. Phase C still
+requires the owner-review gate in that addendum.
 
-1. **Setup contract conflict (P1, verified).** The v0.3 UX design offers
+1. **Setup contract conflict (P1, resolved in Phase A).** The v0.3 UX design offers
    "clone an existing private GitHub KB or scaffold a new local Personal KB",
    but `skills/codex/my-knowledge-os/SKILL.md` hard-requires an absolute
    Google Drive sync root ("Stop until that path exists") and a private
    GitHub URL before the first PDF. Git should be the recommended sync
-   option, not a precondition for the first summary. Fix direction: align
-   the Skill with the design's scaffold-local path.
+   option, not a precondition for the first summary. The Skill now completes
+   local KB and Drive setup first and asks about a private Git remote only
+   after an explicit user choice.
 2. **Revision-request loop is not closed for the user (P1).** The Skill
    stores feedback and stops; replacement needs the current revision, and
    the queue only says "수정본 생성" without naming the regeneration flow.

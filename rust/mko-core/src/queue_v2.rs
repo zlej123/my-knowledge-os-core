@@ -11,11 +11,12 @@ use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::{
     asset_v2::read_asset_v2,
-    config_v2::{DomainPolicyV2, KnowledgeConfigV2},
+    config_v2::{DomainPolicyV2, KnowledgeConfigV2, PerspectiveV2},
     error::MkoError,
     front_matter::parse_markdown,
     json_v2::{QueueDataV2, QueueItemStateV2, QueueItemTypeV2, QueueItemV2, QueueNextActionV2},
@@ -29,6 +30,7 @@ use crate::{
         AssetRecordV2, CurrentPointerV2, KnowledgeRevisionV2, SemanticRecordTypeV2,
         SourceRevisionV2,
     },
+    resurface_history_v2::read_resurface_opened_at_v2,
     review_v2::{
         ReviewDerivedStateV2, ReviewTargetHistoryV2, ReviewTargetSnapshotV2,
         derive_review_histories_v2,
@@ -91,6 +93,52 @@ pub struct RenderedReviewCardV2 {
     pub card_digest: String,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HomeQueueSummaryV2 {
+    pub review_pending: u64,
+    pub changes_requested: u64,
+    pub blocked: u64,
+    pub approved_knowledge: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KnowledgeSearchMatchV2 {
+    pub knowledge_id: String,
+    pub asset_id: String,
+    pub title: String,
+    pub body: String,
+    pub tags: Vec<String>,
+    pub perspectives: Vec<PerspectiveV2>,
+    pub locators: Vec<String>,
+    pub layer: KnowledgeSearchLayerV2,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KnowledgeSearchLayerV2 {
+    GroundedEvidence,
+    LlmAnalysis,
+    CounterargumentOrUncertainty,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResurfacedKnowledgeV2 {
+    pub knowledge_id: String,
+    pub current_revision: String,
+    pub title: String,
+    pub synthesis: String,
+    pub perspectives: Vec<PerspectiveV2>,
+    pub has_open_questions: bool,
+    pub review_state: ResurfacedKnowledgeStateV2,
+    pub reviewed_at: DateTime<Utc>,
+    pub last_opened_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResurfacedKnowledgeStateV2 {
+    Deferred,
+    Approved,
+}
+
 #[derive(Clone)]
 enum RevisionV2 {
     Source(SourceRevisionV2),
@@ -144,6 +192,236 @@ pub(crate) struct CanonicalProjectionHealthV2 {
 pub fn derive_queue_v2(repository_root: &Path) -> Result<QueueDataV2, MkoError> {
     let groups = derive_groups(repository_root)?;
     queue_from_groups(&groups)
+}
+
+pub fn summarize_home_queue_v2(repository_root: &Path) -> Result<HomeQueueSummaryV2, MkoError> {
+    let groups = derive_groups(repository_root)?;
+    let queue = queue_from_groups(&groups)?;
+    let mut summary = HomeQueueSummaryV2::default();
+    for item in queue.items {
+        match item.state {
+            crate::json_v2::QueueItemStateV2::Unreviewed
+            | crate::json_v2::QueueItemStateV2::Deferred
+            | crate::json_v2::QueueItemStateV2::RevisedUnreviewed => {
+                summary.review_pending += 1;
+            }
+            crate::json_v2::QueueItemStateV2::ChangesRequested => {
+                summary.changes_requested += 1;
+            }
+            crate::json_v2::QueueItemStateV2::Blocked => {
+                summary.blocked += 1;
+            }
+        }
+    }
+    summary.approved_knowledge = groups
+        .values()
+        .flatten()
+        .filter(|target| {
+            target.record_type == ReviewTargetTypeV2::Knowledge
+                && target.state == Some(ReviewCardTargetStateV2::Approved)
+        })
+        .count()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    Ok(summary)
+}
+
+pub fn search_approved_knowledge_v2(
+    repository_root: &Path,
+    term: &str,
+) -> Result<Vec<KnowledgeSearchMatchV2>, MkoError> {
+    search_approved_knowledge_by_perspective_v2(repository_root, term, None)
+}
+
+pub fn search_approved_knowledge_by_perspective_v2(
+    repository_root: &Path,
+    term: &str,
+    perspective: Option<PerspectiveV2>,
+) -> Result<Vec<KnowledgeSearchMatchV2>, MkoError> {
+    let needle = term.trim().to_lowercase();
+    if needle.is_empty() {
+        return Err(MkoError::new(
+            "knowledge_search_invalid",
+            "search term must not be empty",
+        ));
+    }
+    let groups = derive_groups(repository_root)?;
+    let mut matches = groups
+        .values()
+        .flatten()
+        .filter(|target| {
+            target.record_type == ReviewTargetTypeV2::Knowledge
+                && target.state == Some(ReviewCardTargetStateV2::Approved)
+        })
+        .flat_map(|target| {
+            let RevisionV2::Knowledge(revision) = &target.revision else {
+                return Vec::new();
+            };
+            if perspective
+                .as_ref()
+                .is_some_and(|selected| !revision.perspectives.contains(selected))
+            {
+                return Vec::new();
+            }
+            revision
+                .response
+                .units
+                .iter()
+                .filter(|unit| {
+                    unit.title.to_lowercase().contains(&needle)
+                        || unit.body.to_lowercase().contains(&needle)
+                        || unit
+                            .tags
+                            .iter()
+                            .any(|tag| tag.to_lowercase().contains(&needle))
+                        || revision
+                            .perspectives
+                            .iter()
+                            .any(|perspective| perspective.as_str().contains(&needle))
+                })
+                .map(|unit| KnowledgeSearchMatchV2 {
+                    knowledge_id: target.record_id.clone(),
+                    asset_id: target.asset.id.clone(),
+                    title: unit.title.clone(),
+                    body: unit.body.clone(),
+                    tags: unit.tags.clone(),
+                    perspectives: revision.perspectives.clone(),
+                    locators: unit
+                        .evidence_refs
+                        .iter()
+                        .map(|evidence| evidence.locator.clone())
+                        .collect(),
+                    layer: search_layer(&unit.kind),
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| {
+        left.title
+            .cmp(&right.title)
+            .then(left.knowledge_id.cmp(&right.knowledge_id))
+            .then(left.body.cmp(&right.body))
+    });
+    Ok(matches)
+}
+
+fn search_layer(kind: &KnowledgeUnitKindV2) -> KnowledgeSearchLayerV2 {
+    match kind {
+        KnowledgeUnitKindV2::Fact
+        | KnowledgeUnitKindV2::Definition
+        | KnowledgeUnitKindV2::Formula
+        | KnowledgeUnitKindV2::Result => KnowledgeSearchLayerV2::GroundedEvidence,
+        KnowledgeUnitKindV2::Interpretation | KnowledgeUnitKindV2::Hypothesis => {
+            KnowledgeSearchLayerV2::LlmAnalysis
+        }
+        KnowledgeUnitKindV2::Counterargument
+        | KnowledgeUnitKindV2::Uncertainty
+        | KnowledgeUnitKindV2::OpenQuestion => KnowledgeSearchLayerV2::CounterargumentOrUncertainty,
+    }
+}
+
+pub fn resurface_approved_knowledge_v2(
+    repository_root: &Path,
+    limit: usize,
+) -> Result<Vec<ResurfacedKnowledgeV2>, MkoError> {
+    resurface_approved_knowledge_by_perspective_v2(repository_root, None, limit)
+}
+
+pub fn resurface_approved_knowledge_by_perspective_v2(
+    repository_root: &Path,
+    perspective: Option<PerspectiveV2>,
+    limit: usize,
+) -> Result<Vec<ResurfacedKnowledgeV2>, MkoError> {
+    resurface_knowledge_internal(repository_root, perspective, limit, false)
+}
+
+pub fn resurface_knowledge_by_perspective_v2(
+    repository_root: &Path,
+    perspective: Option<PerspectiveV2>,
+    limit: usize,
+) -> Result<Vec<ResurfacedKnowledgeV2>, MkoError> {
+    resurface_knowledge_internal(repository_root, perspective, limit, true)
+}
+
+fn resurface_knowledge_internal(
+    repository_root: &Path,
+    perspective: Option<PerspectiveV2>,
+    limit: usize,
+    include_deferred: bool,
+) -> Result<Vec<ResurfacedKnowledgeV2>, MkoError> {
+    let groups = derive_groups(repository_root)?;
+    let opened_at = read_resurface_opened_at_v2(repository_root)?;
+    let mut items = groups
+        .values()
+        .flatten()
+        .filter(|target| {
+            target.record_type == ReviewTargetTypeV2::Knowledge
+                && (target.state == Some(ReviewCardTargetStateV2::Approved)
+                    || (include_deferred
+                        && target.state == Some(ReviewCardTargetStateV2::Deferred)))
+        })
+        .filter_map(|target| {
+            let RevisionV2::Knowledge(revision) = &target.revision else {
+                return None;
+            };
+            let history = target.history.as_ref()?;
+            let reviewed_at = history.current_reviewed_at?;
+            if perspective
+                .as_ref()
+                .is_some_and(|selected| !revision.perspectives.contains(selected))
+            {
+                return None;
+            }
+            Some(ResurfacedKnowledgeV2 {
+                knowledge_id: target.record_id.clone(),
+                current_revision: target.pointer.revision.clone(),
+                title: target.revision.title(&target.asset).to_owned(),
+                synthesis: revision.response.synthesis.clone(),
+                perspectives: revision.perspectives.clone(),
+                has_open_questions: revision
+                    .response
+                    .units
+                    .iter()
+                    .any(|unit| unit.kind == KnowledgeUnitKindV2::OpenQuestion),
+                review_state: if target.state == Some(ReviewCardTargetStateV2::Deferred) {
+                    ResurfacedKnowledgeStateV2::Deferred
+                } else {
+                    ResurfacedKnowledgeStateV2::Approved
+                },
+                reviewed_at,
+                last_opened_at: opened_at
+                    .get(&(target.record_id.clone(), target.pointer.revision.clone()))
+                    .copied(),
+            })
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(compare_resurfaced_knowledge);
+    items.truncate(limit);
+    Ok(items)
+}
+
+impl ResurfacedKnowledgeV2 {
+    fn is_deferred(&self) -> bool {
+        self.review_state == ResurfacedKnowledgeStateV2::Deferred
+    }
+}
+
+fn compare_resurfaced_knowledge(
+    left: &ResurfacedKnowledgeV2,
+    right: &ResurfacedKnowledgeV2,
+) -> std::cmp::Ordering {
+    right
+        .is_deferred()
+        .cmp(&left.is_deferred())
+        .then(
+            left.last_opened_at
+                .is_some()
+                .cmp(&right.last_opened_at.is_some()),
+        )
+        .then(left.last_opened_at.cmp(&right.last_opened_at))
+        .then(right.has_open_questions.cmp(&left.has_open_questions))
+        .then(right.reviewed_at.cmp(&left.reviewed_at))
+        .then(left.knowledge_id.cmp(&right.knowledge_id))
 }
 
 pub(crate) fn derive_queue_with_projection_health_v2(
@@ -305,6 +583,15 @@ fn canonical_projection_input(target: &ScannedTarget) -> Result<ProjectionInputV
             .flat_map(|unit| unit.tags.iter().cloned())
             .collect(),
     };
+    let perspectives = match &target.revision {
+        RevisionV2::Source(_) => Vec::new(),
+        RevisionV2::Knowledge(revision) => revision.perspectives.clone(),
+    };
+    tags.extend(
+        perspectives
+            .iter()
+            .map(|perspective| format!("perspective:{}", perspective.as_str())),
+    );
     tags.sort();
     tags.dedup();
     Ok(ProjectionInputV2 {
@@ -314,11 +601,24 @@ fn canonical_projection_input(target: &ScannedTarget) -> Result<ProjectionInputV
         current_revision: target.pointer.revision.clone(),
         review_head_id: history.derived.review_head_id.clone(),
         derived_state: projection_state(state),
-        domain: "uncategorized".into(),
+        domain: primary_perspective(&perspectives),
+        perspectives,
         tags,
         record_link: format!("{collection}/{}/current.yaml", target.record_id),
         asset_link: format!("assets/registry/{}.json", target.asset.id),
     })
+}
+
+fn primary_perspective(perspectives: &[PerspectiveV2]) -> String {
+    if perspectives.contains(&PerspectiveV2::Investment) {
+        PerspectiveV2::Investment.as_str().into()
+    } else {
+        perspectives
+            .first()
+            .map(PerspectiveV2::as_str)
+            .unwrap_or("uncategorized")
+            .into()
+    }
 }
 
 fn scan_collection(
@@ -1089,6 +1389,7 @@ mod tests {
                 extractor_version: "1".into(),
             },
             domain_policy: DomainPolicyV2::HighRisk,
+            perspectives: Vec::new(),
             response,
         };
 
@@ -1125,5 +1426,70 @@ mod tests {
         assert!(knowledge_policy_gate_satisfied(&RevisionV2::Knowledge(
             revision
         )));
+    }
+
+    #[test]
+    fn resurfacing_order_is_deferred_then_least_opened_then_questions_then_recency() {
+        let timestamp = |value: &str| value.parse::<DateTime<Utc>>().unwrap();
+        let item = |id: &str,
+                    state: ResurfacedKnowledgeStateV2,
+                    reviewed_at: &str,
+                    last_opened_at: Option<&str>,
+                    has_open_questions: bool| ResurfacedKnowledgeV2 {
+            knowledge_id: id.into(),
+            current_revision: format!("sha256:{}", "1".repeat(64)),
+            title: id.into(),
+            synthesis: "synthesis".into(),
+            perspectives: Vec::new(),
+            has_open_questions,
+            review_state: state,
+            reviewed_at: timestamp(reviewed_at),
+            last_opened_at: last_opened_at.map(timestamp),
+        };
+        let mut items = [
+            item(
+                "approved-recently-opened",
+                ResurfacedKnowledgeStateV2::Approved,
+                "2026-07-23T05:00:00Z",
+                Some("2026-07-23T04:00:00Z"),
+                true,
+            ),
+            item(
+                "approved-never-opened-newer",
+                ResurfacedKnowledgeStateV2::Approved,
+                "2026-07-23T03:00:00Z",
+                None,
+                true,
+            ),
+            item(
+                "approved-never-opened-older",
+                ResurfacedKnowledgeStateV2::Approved,
+                "2026-07-23T02:00:00Z",
+                None,
+                true,
+            ),
+            item(
+                "deferred",
+                ResurfacedKnowledgeStateV2::Deferred,
+                "2026-07-23T01:00:00Z",
+                Some("2026-07-23T06:00:00Z"),
+                false,
+            ),
+        ];
+
+        items.sort_by(compare_resurfaced_knowledge);
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.knowledge_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "deferred",
+                "approved-never-opened-newer",
+                "approved-never-opened-older",
+                "approved-recently-opened",
+            ]
+        );
     }
 }

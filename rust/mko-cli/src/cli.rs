@@ -12,7 +12,8 @@ use mko_core::{
         RegisterInboxAssetsRequestV2, register_inbox_pdf_assets_v2, register_pdf_asset_v2,
     },
     check::{CheckReport, CheckRequest, check_repository},
-    clock::SystemClock,
+    clock::{Clock, SystemClock},
+    config_v2::PerspectiveV2,
     context::{
         ResolveContextRequest, ResolvedPersonalContext, SystemPlatformEnvironment,
         resolve_personal_context,
@@ -23,6 +24,10 @@ use mko_core::{
     },
     doctor::{DoctorRequest, SystemDoctorEnvironment, diagnose},
     error::MkoError,
+    home::{
+        HomeNextAction, HomeReport, RepositoryGeneration, detect_repository_generation,
+        inspect_home,
+    },
     hooks::install_hooks,
     inbox::{InboxScanRequest, InboxScanResult, scan_inbox},
     json_v1::{
@@ -46,12 +51,23 @@ use mko_core::{
     },
     model::AssetStatus,
     pdf::{ExtractionWorkerResponse, extract_pdf_pages_from_reader, worker_executable},
+    perspective_v2::{prepare_perspective_confirmation_v2, publish_perspective_confirmation_v2},
     prepare::{PrepareRequest, prepare_source},
     provider_scan::MonotonicElapsedClock,
+    queue_v2::{
+        KnowledgeSearchLayerV2, ResurfacedKnowledgeStateV2, resurface_knowledge_by_perspective_v2,
+        search_approved_knowledge_by_perspective_v2,
+    },
+    quick_note_v2::{
+        QuickNotePublicationOutcomeV2, prepare_quick_note_v2, publish_quick_note_v2,
+        search_quick_notes_v2,
+    },
+    records_v2::RecordWriteOutcomeV2,
     registry::{
         AssetOperationRequest, CaptureRequest, accept_changed_asset, capture_asset, inspect_asset,
         repair_lineage,
     },
+    resurface_history_v2::record_resurfaced_knowledge_open_v2,
     review::{ReviewOutcome, review as review_pending},
     setup::{
         SetupRequest, SystemSetupWriter, apply_setup, detect_google_drive_roots, preflight_setup,
@@ -80,10 +96,14 @@ pub enum OutputFormat {
 }
 
 #[derive(Parser)]
-#[command(name = "mko", version = mko_core::version::PRODUCT_VERSION, about = "My Knowledge OS deterministic core")]
+#[command(
+    name = "mko",
+    version = mko_core::version::PRODUCT_VERSION,
+    about = "자료를 지식으로 정리하고 다시 찾는 개인 지식 홈"
+)]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 // This parser is deliberately frozen at the v0.1 argument contract. It is used
@@ -249,42 +269,109 @@ struct LegacyRepairStateArgs {
 
 #[derive(Subcommand)]
 enum Command {
+    /// 처음 사용할 저장소와 자료 폴더를 연결합니다
     Setup(SetupArgs),
+    /// Inbox의 새 자료를 등록합니다
     Add(AddArgs),
+    /// 승인된 지식에서 내용을 찾습니다
+    Find(FindArgs),
+    /// 내 문장을 그대로 빠르게 저장합니다
+    Remember(RememberArgs),
+    #[command(hide = true)]
+    Perspective(PerspectiveArgs),
+    #[command(hide = true)]
     Asset {
         #[command(subcommand)]
         command: AssetCommand,
     },
+    #[command(hide = true)]
     Source {
         #[command(subcommand)]
         command: SourceCommand,
     },
+    #[command(hide = true)]
     Check(CheckArgs),
+    /// 연결과 저장소 상태를 점검합니다
     Doctor(DoctorArgs),
+    #[command(hide = true)]
     Inbox(InboxArgs),
+    #[command(hide = true)]
     Status(StatusArgs),
+    #[command(hide = true)]
     Queue(QueueArgs),
+    #[command(hide = true)]
     Show(ShowArgs),
     #[command(name = "review-open", hide = true)]
     ReviewOpen(ReviewOpenArgs),
     #[command(name = "review-feedback", hide = true)]
     ReviewFeedback(ReviewFeedbackArgs),
+    /// 대기 중인 초안을 읽고 승인하거나 돌려보냅니다
     Review(ReviewArgs),
+    #[command(hide = true)]
     Dashboard(DashboardArgs),
+    #[command(hide = true)]
     Knowledge {
         #[command(subcommand)]
         command: KnowledgeCommand,
     },
+    #[command(hide = true)]
     Human {
         #[command(subcommand)]
         command: HumanCommand,
     },
+    #[command(hide = true)]
     Hooks {
         #[command(subcommand)]
         command: HooksCommand,
     },
     #[command(name = "__extract-pdf", hide = true)]
     ExtractPdf,
+}
+
+#[derive(Args)]
+struct FindArgs {
+    term: String,
+    #[arg(long, value_enum)]
+    perspective: Option<PerspectiveArg>,
+    #[arg(long)]
+    repo: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct RememberArgs {
+    text: Option<String>,
+    #[arg(long)]
+    repo: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum PerspectiveArg {
+    Life,
+    Learning,
+    Technical,
+    Project,
+    Investment,
+}
+
+impl From<PerspectiveArg> for PerspectiveV2 {
+    fn from(value: PerspectiveArg) -> Self {
+        match value {
+            PerspectiveArg::Life => Self::Life,
+            PerspectiveArg::Learning => Self::Learning,
+            PerspectiveArg::Technical => Self::Technical,
+            PerspectiveArg::Project => Self::Project,
+            PerspectiveArg::Investment => Self::Investment,
+        }
+    }
+}
+
+#[derive(Args)]
+struct PerspectiveArgs {
+    knowledge_id: String,
+    #[arg(long = "set", required = true, value_enum)]
+    perspectives: Vec<PerspectiveArg>,
+    #[arg(long)]
+    repo: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -661,10 +748,10 @@ pub fn entry() {
             let json_v2_command = json_v2_command(&cli);
             let legacy_check_requested = matches!(
                 &cli.command,
-                Command::Check(CheckArgs {
+                Some(Command::Check(CheckArgs {
                     format: None | Some(OutputFormat::Human),
                     ..
-                })
+                }))
             );
             match run(cli) {
                 Ok(Exit::Success) => {}
@@ -717,63 +804,675 @@ enum Exit {
     ValidationFailed,
 }
 
+fn home() -> Result<(), MkoError> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(MkoError::new(
+            "home_tty_required",
+            "인자를 생략한 mko 홈은 대화형 터미널에서만 열립니다; 자동화에서는 명령을 명시하세요",
+        ));
+    }
+    let context = match resolve_context(None) {
+        Ok(context) => context,
+        Err(error) if error.code() == "context_not_found" => {
+            println!("아직 연결된 My Knowledge OS가 없습니다.");
+            println!("Codex에서 “MKO 시작해줘”라고 말하거나 `mko setup`을 실행하세요.");
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    let report = inspect_home(
+        &context.repository_root,
+        &context.provider_root,
+        &MonotonicElapsedClock::start(),
+    )?;
+    render_home(&report);
+    print!("선택 › ");
+    std::io::stdout()
+        .flush()
+        .map_err(|error| MkoError::new("output_failed", error.to_string()))?;
+    let mut selection = String::new();
+    std::io::stdin()
+        .read_line(&mut selection)
+        .map_err(|error| MkoError::new("home_input_failed", error.to_string()))?;
+    match (&report, selection.trim()) {
+        (_, "" | "q" | "Q") => Ok(()),
+        (HomeReport::Legacy(report), "1") => legacy_home_action(report, &context.repository_root),
+        (HomeReport::Legacy(_), "2") => {
+            println!("새 v3 저장소는 `mko setup plan`으로 계획을 먼저 확인할 수 있습니다.");
+            println!("기존 자료는 자동으로 옮기거나 바꾸지 않습니다.");
+            Ok(())
+        }
+        (HomeReport::V3(_), "1") => add(AddArgs {
+            file: None,
+            inbox: true,
+            verified_backup: false,
+            temporary_source: false,
+            confirm_download: false,
+            format: OutputFormat::Human,
+        }),
+        (HomeReport::V3(_), "2") => review(ReviewArgs {
+            stable_id: None,
+            repo: Some(context.repository_root.clone()),
+        }),
+        (HomeReport::V3(_), "3") => {
+            print!("찾을 내용 › ");
+            std::io::stdout()
+                .flush()
+                .map_err(|error| MkoError::new("output_failed", error.to_string()))?;
+            let mut term = String::new();
+            std::io::stdin()
+                .read_line(&mut term)
+                .map_err(|error| MkoError::new("home_input_failed", error.to_string()))?;
+            find(FindArgs {
+                term: term.trim().to_owned(),
+                perspective: None,
+                repo: Some(context.repository_root),
+            })
+        }
+        (HomeReport::V3(_), "4") => remember(RememberArgs {
+            text: None,
+            repo: Some(context.repository_root),
+        }),
+        (HomeReport::V3(report), "5") if report.blocked > 0 => doctor(DoctorArgs {
+            repo: Some(context.repository_root),
+            format: OutputFormat::Human,
+        }),
+        (HomeReport::V3(_), "5") => resurface(&context.repository_root),
+        _ => Err(MkoError::new(
+            "home_selection_invalid",
+            "표시된 번호나 q를 입력하세요",
+        )),
+    }
+}
+
+fn render_home(report: &HomeReport) {
+    println!("My Knowledge OS");
+    match report {
+        HomeReport::Legacy(report) => {
+            println!("기존 지식베이스를 읽기 전용으로 열었습니다.");
+            println!(
+                "새 자료 {} · 등록 {} · 검토 {} · 완료 {} · 문제 {}",
+                report.new_material,
+                report.registered,
+                report.review_pending,
+                report.complete,
+                report.blocked.saturating_add(report.incomplete)
+            );
+            println!("추천: {}", legacy_action_label(report));
+            println!();
+            println!("[1] {}", legacy_action_label(report));
+            println!("[2] 새 v3 설정 계획 안내");
+            println!("[q] 닫기");
+        }
+        HomeReport::V3(report) => {
+            let next_action = HomeReport::V3(report.clone()).next_action();
+            println!(
+                "새 자료 {} · 검토 {} · 수정 필요 {} · 승인된 지식 {} · 문제 {}",
+                report.new_material,
+                report.review_pending,
+                report.changes_requested,
+                report.approved_knowledge,
+                report.blocked
+            );
+            println!(
+                "추천: {}",
+                match next_action {
+                    HomeNextAction::Add => "새 자료 정리",
+                    HomeNextAction::Review => "검토 계속",
+                    HomeNextAction::Repair => "문제 확인",
+                    HomeNextAction::None => "필요한 지식 찾기",
+                }
+            );
+            println!();
+            println!("[1] 새 자료 정리");
+            println!("[2] 검토 계속");
+            println!("[3] 지식 찾기");
+            println!("[4] 빠른 메모");
+            if report.blocked > 0 {
+                println!("[5] 문제 확인");
+            } else {
+                println!("[5] 다시 볼 지식");
+            }
+            println!("[q] 닫기");
+        }
+    }
+}
+
+fn legacy_action_label(report: &mko_core::home::LegacyHomeReport) -> &'static str {
+    if report.blocked > 0 {
+        "문제 확인"
+    } else if report.review_pending > 0 {
+        "검토 계속"
+    } else if report.incomplete > 0 || report.registered > 0 {
+        "등록된 자료 계속 정리"
+    } else if report.new_material > 0 {
+        "새 자료 정리"
+    } else {
+        "현재 형식 안내"
+    }
+}
+
+fn legacy_home_action(
+    report: &mko_core::home::LegacyHomeReport,
+    repository: &Path,
+) -> Result<(), MkoError> {
+    if report.blocked > 0 {
+        return doctor(DoctorArgs {
+            repo: Some(repository.to_path_buf()),
+            format: OutputFormat::Human,
+        });
+    }
+    if report.review_pending > 0 {
+        return review(ReviewArgs {
+            stable_id: None,
+            repo: Some(repository.to_path_buf()),
+        });
+    }
+    if report.incomplete > 0 || report.registered > 0 {
+        println!("Codex에서 “등록된 자료 계속 정리해줘”라고 요청하세요.");
+        println!("기존 저장소는 자동 변환하지 않고 현재 자료의 다음 초안만 만듭니다.");
+        return Ok(());
+    }
+    if report.new_material > 0 {
+        return add(AddArgs {
+            file: None,
+            inbox: true,
+            verified_backup: false,
+            temporary_source: false,
+            confirm_download: false,
+            format: OutputFormat::Human,
+        });
+    }
+    println!("현재 처리할 항목이 없습니다. `mko find \"찾을 내용\"`으로 지식을 찾을 수 있습니다.");
+    Ok(())
+}
+
+fn find(arguments: FindArgs) -> Result<(), MkoError> {
+    let repository = setup_repository(arguments.repo)?;
+    let perspective = arguments.perspective.map(Into::into);
+    match detect_repository_generation(&repository)? {
+        RepositoryGeneration::LegacyV1 => {
+            if perspective.is_some() {
+                return Err(MkoError::new(
+                    "perspective_v3_required",
+                    "관점 필터는 v3 Personal KB에서 사용할 수 있습니다",
+                ));
+            }
+            let matches = search_knowledge(
+                &repository,
+                &KnowledgeSearchQuery {
+                    term: arguments.term,
+                    kind: None,
+                    tag: None,
+                },
+            )?;
+            if matches.is_empty() {
+                println!("승인된 지식에서 찾지 못했습니다.");
+            } else {
+                for concept in matches {
+                    println!("{} · {}", concept.title, concept.name);
+                }
+            }
+        }
+        RepositoryGeneration::V3 => {
+            let matches = search_approved_knowledge_by_perspective_v2(
+                &repository,
+                &arguments.term,
+                perspective,
+            )?;
+            let notes = if perspective.is_none() {
+                search_quick_notes_v2(&repository, &arguments.term)?
+            } else {
+                Vec::new()
+            };
+            if matches.is_empty() && notes.is_empty() {
+                println!("승인된 지식에서 찾지 못했습니다.");
+            } else {
+                for item in matches {
+                    println!(
+                        "[{}] {}",
+                        match item.layer {
+                            KnowledgeSearchLayerV2::GroundedEvidence => "문서 근거",
+                            KnowledgeSearchLayerV2::LlmAnalysis => "LLM 분석",
+                            KnowledgeSearchLayerV2::CounterargumentOrUncertainty => {
+                                "반론·불확실성"
+                            }
+                        },
+                        item.title
+                    );
+                    println!("  {}", compact_excerpt(&item.body, 140));
+                    if !item.perspectives.is_empty() {
+                        println!(
+                            "  관점: {}",
+                            item.perspectives
+                                .iter()
+                                .map(PerspectiveV2::as_str)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
+                    if !item.locators.is_empty() {
+                        println!("  근거: {}", item.locators.join(", "));
+                    }
+                }
+                for note in notes {
+                    println!("[내 생각] {}", compact_excerpt(&note.text, 140));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remember(arguments: RememberArgs) -> Result<(), MkoError> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(MkoError::new(
+            "remember_tty_required",
+            "빠른 메모는 정확한 원문 확인을 위해 실제 터미널에서만 저장할 수 있습니다",
+        ));
+    }
+    let repository = setup_repository(arguments.repo)?;
+    if detect_repository_generation(&repository)? != RepositoryGeneration::V3 {
+        return Err(MkoError::new(
+            "remember_v3_required",
+            "빠른 메모는 v3 Personal KB에서 사용할 수 있습니다",
+        ));
+    }
+    let text = match arguments.text {
+        Some(text) => text,
+        None => {
+            print!("무엇을 기억할까요?\n› ");
+            std::io::stdout()
+                .flush()
+                .map_err(|error| MkoError::new("output_failed", error.to_string()))?;
+            let mut text = String::new();
+            std::io::stdin()
+                .read_line(&mut text)
+                .map_err(|error| MkoError::new("remember_input_failed", error.to_string()))?;
+            text.trim_end_matches(['\r', '\n']).to_owned()
+        }
+    };
+    let prepared = prepare_quick_note_v2(&text, SystemClock.now_utc())?;
+    if prepared.input_changed {
+        println!("줄바꿈 또는 유니코드를 다음 저장 형태로 정규화했습니다.");
+    }
+    println!();
+    println!("{}", prepared.note.text);
+    println!();
+    print!("입력한 문장 그대로 저장할까요? [y/N] › ");
+    std::io::stdout()
+        .flush()
+        .map_err(|error| MkoError::new("output_failed", error.to_string()))?;
+    let mut confirmation = String::new();
+    std::io::stdin()
+        .read_line(&mut confirmation)
+        .map_err(|error| MkoError::new("remember_input_failed", error.to_string()))?;
+    if confirmation.trim() != "y" {
+        println!("저장하지 않았습니다.");
+        return Ok(());
+    }
+    let result = publish_quick_note_v2(
+        &repository,
+        &prepared,
+        &prepared.confirmation_phrase,
+        &SystemClock,
+    )?;
+    println!(
+        "{}",
+        match result.outcome {
+            QuickNotePublicationOutcomeV2::Created => "메모를 저장했습니다.",
+            QuickNotePublicationOutcomeV2::Existing => "같은 메모가 이미 저장되어 있습니다.",
+        }
+    );
+    Ok(())
+}
+
+fn confirm_perspectives(arguments: PerspectiveArgs) -> Result<(), MkoError> {
+    require_perspective_tty()?;
+    let repository = setup_repository(arguments.repo)?;
+    if detect_repository_generation(&repository)? != RepositoryGeneration::V3 {
+        return Err(MkoError::new(
+            "perspective_v3_required",
+            "관점 확인은 v3 Personal KB에서 사용할 수 있습니다",
+        ));
+    }
+    confirm_perspectives_for_id(
+        &repository,
+        &arguments.knowledge_id,
+        arguments.perspectives.into_iter().map(Into::into).collect(),
+    )
+}
+
+fn require_perspective_tty() -> Result<(), MkoError> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(MkoError::new(
+            "perspective_tty_required",
+            "관점 확인은 정확한 revision과 효과를 표시하는 실제 터미널에서만 가능합니다",
+        ));
+    }
+    Ok(())
+}
+
+fn confirm_perspectives_for_id(
+    repository: &Path,
+    knowledge_id: &str,
+    perspectives: Vec<PerspectiveV2>,
+) -> Result<(), MkoError> {
+    require_perspective_tty()?;
+    let prepared = prepare_perspective_confirmation_v2(repository, knowledge_id, perspectives)
+        .map_err(|error| {
+            if error.code() == "high_risk_knowledge_incomplete" {
+                MkoError::new(
+                    error.code(),
+                    "투자 관점에는 반론과 열린 질문이 모두 필요합니다. 먼저 수정본을 만든 뒤 다시 선택하세요",
+                )
+            } else {
+                error
+            }
+        })?;
+    std::io::stdout()
+        .write_all(&prepared.confirmation_card)
+        .map_err(|error| MkoError::new("output_failed", error.to_string()))?;
+    print!("\n표시한 관점으로 새 검토 revision을 만들까요? [y/N] › ");
+    std::io::stdout()
+        .flush()
+        .map_err(|error| MkoError::new("output_failed", error.to_string()))?;
+    let mut confirmation = String::new();
+    std::io::stdin()
+        .read_line(&mut confirmation)
+        .map_err(|error| MkoError::new("perspective_input_failed", error.to_string()))?;
+    if confirmation.trim() != "y" {
+        println!("변경하지 않았습니다.");
+        return Ok(());
+    }
+    let result = publish_perspective_confirmation_v2(
+        repository,
+        &prepared,
+        &prepared.confirmation_phrase,
+        &SystemClock,
+    )?;
+    println!(
+        "{}",
+        match result.outcome {
+            RecordWriteOutcomeV2::Created | RecordWriteOutcomeV2::Existing => {
+                "관점이 이미 현재 revision에 반영되어 있습니다."
+            }
+            RecordWriteOutcomeV2::Replaced => {
+                "관점을 반영한 새 revision을 만들었습니다. 다시 검토가 필요합니다."
+            }
+        }
+    );
+    Ok(())
+}
+
+fn resurface(repository: &Path) -> Result<(), MkoError> {
+    require_perspective_tty()?;
+    println!("관점으로 좁혀볼 수 있습니다.");
+    println!("[Enter] 전체 · [1] 생활 · [2] 학습 · [3] 기술 · [4] 프로젝트 · [5] 투자");
+    print!("관점 필터 › ");
+    std::io::stdout()
+        .flush()
+        .map_err(|error| MkoError::new("output_failed", error.to_string()))?;
+    let mut filter = String::new();
+    std::io::stdin()
+        .read_line(&mut filter)
+        .map_err(|error| MkoError::new("perspective_input_failed", error.to_string()))?;
+    let perspective = match filter.trim() {
+        "" | "0" => None,
+        "1" => Some(PerspectiveV2::Life),
+        "2" => Some(PerspectiveV2::Learning),
+        "3" => Some(PerspectiveV2::Technical),
+        "4" => Some(PerspectiveV2::Project),
+        "5" => Some(PerspectiveV2::Investment),
+        _ => {
+            return Err(MkoError::new(
+                "perspective_selection_invalid",
+                "전체는 Enter, 관점은 1부터 5 사이의 번호를 입력하세요",
+            ));
+        }
+    };
+    let items = resurface_knowledge_by_perspective_v2(repository, perspective, 5)?;
+    if items.is_empty() {
+        println!("이 관점으로 다시 볼 지식이 아직 없습니다.");
+        return Ok(());
+    }
+    println!();
+    println!("다시 볼 지식");
+    for (index, item) in items.iter().enumerate() {
+        println!(
+            "{}. {}{}{}",
+            index + 1,
+            item.title,
+            if item.review_state == ResurfacedKnowledgeStateV2::Deferred {
+                " · 나중에 보기"
+            } else {
+                ""
+            },
+            if item.has_open_questions {
+                " · 열린 질문 있음"
+            } else {
+                ""
+            }
+        );
+        println!("   {}", compact_excerpt(&item.synthesis, 140));
+        if !item.perspectives.is_empty() {
+            println!(
+                "   관점: {}",
+                item.perspectives
+                    .iter()
+                    .map(perspective_label)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+    println!();
+    print!("자세히 볼 지식 번호 [Enter: 닫기] › ");
+    std::io::stdout()
+        .flush()
+        .map_err(|error| MkoError::new("output_failed", error.to_string()))?;
+    let mut selected_item = String::new();
+    std::io::stdin()
+        .read_line(&mut selected_item)
+        .map_err(|error| MkoError::new("perspective_input_failed", error.to_string()))?;
+    if matches!(selected_item.trim(), "" | "q" | "Q") {
+        return Ok(());
+    }
+    let selected_index = selected_item
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|index| (1..=items.len()).contains(index))
+        .ok_or_else(|| {
+            MkoError::new(
+                "perspective_selection_invalid",
+                "표시된 지식 번호를 입력하세요",
+            )
+        })?;
+    let selected = &items[selected_index - 1];
+    println!();
+    println!("{}", selected.title);
+    println!(
+        "{} · 검토 {} · 마지막 열람 {}",
+        match selected.review_state {
+            ResurfacedKnowledgeStateV2::Deferred => "나중에 보기",
+            ResurfacedKnowledgeStateV2::Approved => "승인됨",
+        },
+        selected.reviewed_at.format("%Y-%m-%d"),
+        selected
+            .last_opened_at
+            .map(|opened_at| opened_at.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "처음".to_owned())
+    );
+    println!();
+    println!("{}", selected.synthesis);
+    record_resurfaced_knowledge_open_v2(
+        repository,
+        &selected.knowledge_id,
+        &selected.current_revision,
+        &SystemClock,
+    )?;
+    println!();
+    print!("[p] 관점 정하기 · [Enter] 닫기 › ");
+    std::io::stdout()
+        .flush()
+        .map_err(|error| MkoError::new("output_failed", error.to_string()))?;
+    let mut detail_action = String::new();
+    std::io::stdin()
+        .read_line(&mut detail_action)
+        .map_err(|error| MkoError::new("perspective_input_failed", error.to_string()))?;
+    if matches!(detail_action.trim(), "" | "q" | "Q") {
+        return Ok(());
+    }
+    if !detail_action.trim().eq_ignore_ascii_case("p") {
+        return Err(MkoError::new(
+            "resurface_action_invalid",
+            "관점을 정하려면 p를 입력하고, 닫으려면 Enter를 누르세요",
+        ));
+    }
+    println!();
+    println!("{}의 관점을 선택하세요.", selected.title);
+    for (index, perspective) in PerspectiveV2::all().iter().enumerate() {
+        println!(
+            "[{}] {}{}",
+            index + 1,
+            perspective_label(perspective),
+            if selected.perspectives.contains(perspective) {
+                " · 현재"
+            } else {
+                ""
+            }
+        );
+    }
+    print!("여러 개는 쉼표로 구분 [Enter: 취소] › ");
+    std::io::stdout()
+        .flush()
+        .map_err(|error| MkoError::new("output_failed", error.to_string()))?;
+    let mut selected_perspectives = String::new();
+    std::io::stdin()
+        .read_line(&mut selected_perspectives)
+        .map_err(|error| MkoError::new("perspective_input_failed", error.to_string()))?;
+    if selected_perspectives.trim().is_empty() {
+        println!("변경하지 않았습니다.");
+        return Ok(());
+    }
+    let perspectives = parse_perspective_numbers(&selected_perspectives)?;
+    confirm_perspectives_for_id(repository, &selected.knowledge_id, perspectives)
+}
+
+fn parse_perspective_numbers(input: &str) -> Result<Vec<PerspectiveV2>, MkoError> {
+    let mut perspectives = input
+        .split(|character: char| character == ',' || character.is_ascii_whitespace())
+        .filter(|value| !value.is_empty())
+        .map(|value| match value {
+            "1" => Ok(PerspectiveV2::Life),
+            "2" => Ok(PerspectiveV2::Learning),
+            "3" => Ok(PerspectiveV2::Technical),
+            "4" => Ok(PerspectiveV2::Project),
+            "5" => Ok(PerspectiveV2::Investment),
+            _ => Err(MkoError::new(
+                "perspective_selection_invalid",
+                "관점은 1부터 5 사이의 번호를 쉼표로 구분해 입력하세요",
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    perspectives.sort();
+    perspectives.dedup();
+    if perspectives.is_empty() {
+        return Err(MkoError::new(
+            "perspective_selection_invalid",
+            "관점을 하나 이상 선택하세요",
+        ));
+    }
+    Ok(perspectives)
+}
+
+fn perspective_label(perspective: &PerspectiveV2) -> &'static str {
+    match perspective {
+        PerspectiveV2::Life => "생활",
+        PerspectiveV2::Learning => "학습",
+        PerspectiveV2::Technical => "기술",
+        PerspectiveV2::Project => "프로젝트",
+        PerspectiveV2::Investment => "투자",
+    }
+}
+
+fn compact_excerpt(value: &str, max_chars: usize) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = compact.chars();
+    let excerpt = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{excerpt}…")
+    } else {
+        excerpt
+    }
+}
+
 fn run(cli: Cli) -> Result<Exit, MkoError> {
     match cli.command {
-        Command::Setup(arguments) => setup(arguments).map(|_| Exit::Success),
-        Command::Add(arguments) => add(arguments).map(|_| Exit::Success),
-        Command::Asset {
+        None => home().map(|_| Exit::Success),
+        Some(Command::Setup(arguments)) => setup(arguments).map(|_| Exit::Success),
+        Some(Command::Add(arguments)) => add(arguments).map(|_| Exit::Success),
+        Some(Command::Find(arguments)) => find(arguments).map(|_| Exit::Success),
+        Some(Command::Remember(arguments)) => remember(arguments).map(|_| Exit::Success),
+        Some(Command::Perspective(arguments)) => {
+            confirm_perspectives(arguments).map(|_| Exit::Success)
+        }
+        Some(Command::Asset {
             command: AssetCommand::Capture(arguments),
-        } => capture(arguments).map(|_| Exit::Success),
-        Command::Asset {
+        }) => capture(arguments).map(|_| Exit::Success),
+        Some(Command::Asset {
             command: AssetCommand::Inspect(arguments),
-        } => inspect(arguments).map(|_| Exit::Success),
-        Command::Asset {
+        }) => inspect(arguments).map(|_| Exit::Success),
+        Some(Command::Asset {
             command: AssetCommand::AcceptChange(arguments),
-        } => accept_change(arguments).map(|_| Exit::Success),
-        Command::Asset {
+        }) => accept_change(arguments).map(|_| Exit::Success),
+        Some(Command::Asset {
             command: AssetCommand::RepairLineage(arguments),
-        } => repair_asset_lineage(arguments).map(|_| Exit::Success),
-        Command::Check(arguments) => check(arguments),
-        Command::Doctor(arguments) => doctor(arguments).map(|_| Exit::Success),
-        Command::Inbox(arguments) => inbox(arguments).map(|_| Exit::Success),
-        Command::Status(arguments) => status(arguments).map(|_| Exit::Success),
-        Command::Queue(arguments) => queue_v2(arguments).map(|_| Exit::Success),
-        Command::Show(arguments) => show_v2(arguments).map(|_| Exit::Success),
-        Command::ReviewOpen(arguments) => review_open_v2(arguments).map(|_| Exit::Success),
-        Command::ReviewFeedback(arguments) => review_feedback_v2(arguments).map(|_| Exit::Success),
-        Command::Review(arguments) => review(arguments).map(|_| Exit::Success),
-        Command::Dashboard(arguments) => dashboard(arguments).map(|_| Exit::Success),
-        Command::Knowledge {
+        }) => repair_asset_lineage(arguments).map(|_| Exit::Success),
+        Some(Command::Check(arguments)) => check(arguments),
+        Some(Command::Doctor(arguments)) => doctor(arguments).map(|_| Exit::Success),
+        Some(Command::Inbox(arguments)) => inbox(arguments).map(|_| Exit::Success),
+        Some(Command::Status(arguments)) => status(arguments).map(|_| Exit::Success),
+        Some(Command::Queue(arguments)) => queue_v2(arguments).map(|_| Exit::Success),
+        Some(Command::Show(arguments)) => show_v2(arguments).map(|_| Exit::Success),
+        Some(Command::ReviewOpen(arguments)) => review_open_v2(arguments).map(|_| Exit::Success),
+        Some(Command::ReviewFeedback(arguments)) => {
+            review_feedback_v2(arguments).map(|_| Exit::Success)
+        }
+        Some(Command::Review(arguments)) => review(arguments).map(|_| Exit::Success),
+        Some(Command::Dashboard(arguments)) => dashboard(arguments).map(|_| Exit::Success),
+        Some(Command::Knowledge {
             command: KnowledgeCommand::Write(arguments),
-        } => knowledge_write(arguments).map(|_| Exit::Success),
-        Command::Knowledge {
+        }) => knowledge_write(arguments).map(|_| Exit::Success),
+        Some(Command::Knowledge {
             command: KnowledgeCommand::Review(arguments),
-        } => knowledge_review(arguments).map(|_| Exit::Success),
-        Command::Knowledge {
+        }) => knowledge_review(arguments).map(|_| Exit::Success),
+        Some(Command::Knowledge {
             command: KnowledgeCommand::Search(arguments),
-        } => knowledge_search(arguments).map(|_| Exit::Success),
-        Command::Knowledge {
+        }) => knowledge_search(arguments).map(|_| Exit::Success),
+        Some(Command::Knowledge {
             command: KnowledgeCommand::Show(arguments),
-        } => knowledge_show(arguments).map(|_| Exit::Success),
-        Command::Knowledge {
+        }) => knowledge_show(arguments).map(|_| Exit::Success),
+        Some(Command::Knowledge {
             command: KnowledgeCommand::List(arguments),
-        } => knowledge_list(arguments).map(|_| Exit::Success),
-        Command::Source {
+        }) => knowledge_list(arguments).map(|_| Exit::Success),
+        Some(Command::Source {
             command: SourceCommand::Prepare(arguments),
-        } => prepare(arguments).map(|_| Exit::Success),
-        Command::Source {
+        }) => prepare(arguments).map(|_| Exit::Success),
+        Some(Command::Source {
             command: SourceCommand::WriteDraft(arguments),
-        } => write_draft(arguments).map(|_| Exit::Success),
-        Command::Source {
+        }) => write_draft(arguments).map(|_| Exit::Success),
+        Some(Command::Source {
             command: SourceCommand::RepairState(arguments),
-        } => repair_source(arguments).map(|_| Exit::Success),
-        Command::ExtractPdf => extract_pdf().map(|_| Exit::Success),
-        Command::Human {
+        }) => repair_source(arguments).map(|_| Exit::Success),
+        Some(Command::ExtractPdf) => extract_pdf().map(|_| Exit::Success),
+        Some(Command::Human {
             command: HumanCommand::ApproveSource(arguments),
-        } => approve(arguments).map(|_| Exit::Success),
-        Command::Hooks {
+        }) => approve(arguments).map(|_| Exit::Success),
+        Some(Command::Hooks {
             command: HooksCommand::Install(arguments),
-        } => install_hook(arguments).map(|_| Exit::Success),
+        }) => install_hook(arguments).map(|_| Exit::Success),
     }
 }
 
@@ -2350,7 +3049,7 @@ fn emit_json_v2_failure_or_stderr(command: JsonV2Command, error: &MkoError) {
 }
 
 fn json_v2_command(cli: &Cli) -> Option<JsonV2Command> {
-    match &cli.command {
+    match cli.command.as_ref()? {
         Command::Setup(SetupArgs {
             command:
                 Some(SetupCommand::Plan(SetupPlanArgs {
@@ -2417,7 +3116,7 @@ fn json_v2_command(cli: &Cli) -> Option<JsonV2Command> {
 }
 
 fn json_v1_command(cli: &Cli) -> Option<JsonV1Command> {
-    match &cli.command {
+    match cli.command.as_ref()? {
         Command::Add(AddArgs {
             format: OutputFormat::JsonV1,
             ..
@@ -2558,7 +3257,17 @@ fn legacy_json_requested_from_invalid_arguments(args: &[std::ffi::OsString]) -> 
     // `--json`, so a parse failure there is an ordinary usage error, not legacy JSON output.
     !matches!(
         args.get(1).and_then(|argument| argument.to_str()),
-        Some("setup" | "add" | "doctor" | "inbox" | "status" | "review" | "knowledge")
+        Some(
+            "setup"
+                | "add"
+                | "find"
+                | "remember"
+                | "doctor"
+                | "inbox"
+                | "status"
+                | "review"
+                | "knowledge"
+        )
     )
 }
 
@@ -2592,5 +3301,26 @@ impl AddOutcomeName for mko_core::add::AddResult {
             mko_core::json_v1::AddOutcome::Created => "created",
             mko_core::json_v1::AddOutcome::Existing => "existing",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn home_perspective_numbers_are_many_to_many_and_strict() {
+        assert_eq!(
+            parse_perspective_numbers("5, 3,3").unwrap(),
+            vec![PerspectiveV2::Technical, PerspectiveV2::Investment]
+        );
+        assert_eq!(
+            parse_perspective_numbers("0").unwrap_err().code(),
+            "perspective_selection_invalid"
+        );
+        assert_eq!(
+            parse_perspective_numbers("later").unwrap_err().code(),
+            "perspective_selection_invalid"
+        );
     }
 }

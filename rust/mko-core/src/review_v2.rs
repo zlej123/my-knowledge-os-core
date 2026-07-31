@@ -186,6 +186,7 @@ pub struct DerivedReviewStateV2 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ReviewTargetHistoryV2 {
     pub derived: DerivedReviewStateV2,
+    pub current_reviewed_at: Option<DateTime<Utc>>,
     pub previous_reviewed_revision: Option<String>,
     pub previous_approved_revision: Option<String>,
     pub current_feedback: Option<String>,
@@ -1055,6 +1056,11 @@ fn review_history_from_graph(
         .as_deref()
         .and_then(|review_id| review_target(graph, review_id, &record_type, record_id, revision))
         .and_then(|target| target.feedback.clone());
+    let current_reviewed_at = derived
+        .review_head_id
+        .as_deref()
+        .and_then(|review_id| graph.events.get(review_id))
+        .map(|event| event.created_at);
 
     let mut reviewed = Vec::new();
     let mut approved = Vec::new();
@@ -1086,6 +1092,7 @@ fn review_history_from_graph(
 
     Ok(ReviewTargetHistoryV2 {
         derived,
+        current_reviewed_at,
         previous_reviewed_revision: reviewed.pop().map(|(_, _, revision)| revision),
         previous_approved_revision: approved.pop().map(|(_, _, revision)| revision),
         current_feedback,

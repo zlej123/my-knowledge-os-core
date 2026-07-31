@@ -523,6 +523,7 @@ fn knowledge_os_skill_exposes_only_the_v2_core_workflow() {
         "./scripts/install.sh",
         "mko --version",
         "mko setup",
+        "mko remember",
         "mko queue",
         "mko show",
         "mko add",
@@ -543,6 +544,7 @@ fn knowledge_os_skill_exposes_only_the_v2_core_workflow() {
         if command.starts_with("mko ")
             && !command.starts_with("mko --version")
             && !command.starts_with("mko setup")
+            && !command.starts_with("mko remember")
             && !command.starts_with("mko review ")
         {
             assert!(
@@ -594,6 +596,7 @@ fn knowledge_os_skill_defines_the_knowledge_extraction_flow() {
             "./scripts/install.sh",
             "mko --version",
             "mko setup",
+            "mko remember",
             "mko queue",
             "mko show",
             "mko add",

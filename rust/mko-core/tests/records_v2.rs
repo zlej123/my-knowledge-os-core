@@ -3,15 +3,16 @@ use std::fs;
 use chrono::{DateTime, Utc};
 use mko_core::{
     clock::Clock,
-    config_v2::{DomainPolicyV2, KnowledgeConfigV2},
+    config_v2::{DomainPolicyV2, KnowledgeConfigV2, PerspectiveV2},
     model_v2::{ContentBlockV2, KnowledgeResponseV2, PreparedContentV2, SourceResponseV2},
+    perspective_v2::{prepare_perspective_confirmation_v2, publish_perspective_confirmation_v2},
     records_v2::{
         AssetRecordV2, CurrentPointerV2, KnowledgeRevisionV2, RecordProjectionStatusV2,
         RecordWriteOutcomeV2, SourceRevisionV2, WriteKnowledgeRecordRequestV2,
-        WriteSourceRecordRequestV2, knowledge_record_id_v2, source_record_id_v2,
-        write_knowledge_record_v2, write_source_record_v2,
+        WriteSourceRecordRequestV2, knowledge_record_id_v2, read_current_knowledge_revision_v2,
+        source_record_id_v2, write_knowledge_record_v2, write_source_record_v2,
     },
-    revision_v2::canonical_json_sha256,
+    revision_v2::{canonical_json_bytes, canonical_json_sha256},
     scaffold_v2::scaffold_personal_kb_v2,
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -93,6 +94,112 @@ fn deterministic_ids_and_identical_source_writes_converge() {
             .unwrap_err()
             .code(),
         "revision_conflict"
+    );
+}
+
+#[test]
+fn confirmed_investment_perspective_creates_a_pending_high_risk_revision() {
+    let mut environment = new_environment();
+    fs::write(
+        environment
+            .root
+            .path()
+            .join("assets/registry")
+            .join(format!("{}.json", environment.asset.id)),
+        canonical_json_bytes(&environment.asset).unwrap(),
+    )
+    .unwrap();
+    let mut response = serde_json::to_value(&environment.knowledge).unwrap();
+    response["units"].as_array_mut().unwrap().push(json!({
+        "kind": "counterargument",
+        "title": "Alternative",
+        "body": "An alternative explanation remains possible.",
+        "confidence": "low",
+        "basis": "conflicting_evidence",
+        "evidence_refs": [],
+        "tags": []
+    }));
+    environment.knowledge = serde_json::from_value(response).unwrap();
+    let first = write_knowledge_record_v2(
+        WriteKnowledgeRecordRequestV2 {
+            repository_root: environment.root.path(),
+            asset: &environment.asset,
+            bundle: &environment.bundle,
+            response: &environment.knowledge,
+            expected_revision: None,
+        },
+        &environment.clock,
+    )
+    .unwrap();
+    let prepared = prepare_perspective_confirmation_v2(
+        environment.root.path(),
+        &first.record_id,
+        vec![PerspectiveV2::Investment, PerspectiveV2::Technical],
+    )
+    .unwrap();
+
+    let mismatch = publish_perspective_confirmation_v2(
+        environment.root.path(),
+        &prepared,
+        "y",
+        &environment.clock,
+    )
+    .unwrap_err();
+    assert_eq!(mismatch.code(), "perspective_confirmation_mismatch");
+    assert_eq!(
+        read_current_knowledge_revision_v2(environment.root.path(), &first.record_id)
+            .unwrap()
+            .pointer
+            .revision,
+        first.revision
+    );
+
+    let replaced = publish_perspective_confirmation_v2(
+        environment.root.path(),
+        &prepared,
+        &prepared.confirmation_phrase,
+        &environment.clock,
+    )
+    .unwrap();
+    assert_eq!(replaced.outcome, RecordWriteOutcomeV2::Replaced);
+    let current =
+        read_current_knowledge_revision_v2(environment.root.path(), &first.record_id).unwrap();
+    assert_eq!(
+        current.revision.perspectives,
+        vec![PerspectiveV2::Technical, PerspectiveV2::Investment]
+    );
+    assert_eq!(current.revision.domain_policy, DomainPolicyV2::HighRisk);
+    assert_ne!(current.pointer.revision, first.revision);
+    assert!(first.revision_path.is_file());
+}
+
+#[test]
+fn investment_confirmation_fails_without_counterargument_and_changes_nothing() {
+    let environment = new_environment();
+    let first = write_knowledge_record_v2(
+        WriteKnowledgeRecordRequestV2 {
+            repository_root: environment.root.path(),
+            asset: &environment.asset,
+            bundle: &environment.bundle,
+            response: &environment.knowledge,
+            expected_revision: None,
+        },
+        &environment.clock,
+    )
+    .unwrap();
+    let error = prepare_perspective_confirmation_v2(
+        environment.root.path(),
+        &first.record_id,
+        vec![PerspectiveV2::Investment],
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "high_risk_knowledge_incomplete");
+    assert_eq!(
+        read_current_knowledge_revision_v2(environment.root.path(), &first.record_id)
+            .unwrap()
+            .pointer
+            .revision,
+        first.revision
     );
 }
 

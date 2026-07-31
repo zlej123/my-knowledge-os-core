@@ -84,6 +84,14 @@ pub struct InboxAssetRegistrationResultV2 {
     pub remaining: u64,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct InboxAssetInspectionV2 {
+    pub new_count: u64,
+    pub registered_count: u64,
+    pub blocked_count: u64,
+    pub scan_complete: bool,
+}
+
 #[derive(Clone, Debug)]
 enum InboxCandidateV2 {
     Readable,
@@ -110,6 +118,56 @@ pub fn register_inbox_pdf_assets_v2(
         &provider_root,
         scan,
     ))
+}
+
+/// Inspects the provider Inbox without registering or changing any Asset.
+pub fn inspect_inbox_pdf_assets_v2(
+    repository_root: &Path,
+    provider_root: &Path,
+    elapsed_clock: &dyn ElapsedClock,
+) -> Result<InboxAssetInspectionV2, MkoError> {
+    KnowledgeConfigV2::read(repository_root)?;
+    let (repository_root, provider_root) =
+        validated_disjoint_roots(repository_root, provider_root)?;
+    let scan = scan_provider_catalog(
+        ProviderScanRequest::new(&provider_root).with_limits(DEFAULT_SCAN_LIMITS),
+        elapsed_clock,
+    )?;
+    let mut result = InboxAssetInspectionV2 {
+        scan_complete: scan.scan_complete,
+        ..InboxAssetInspectionV2::default()
+    };
+    for entry in scan.entries {
+        match entry {
+            ProviderCatalogEntry::Placeholder { .. } => {
+                result.blocked_count += 1;
+            }
+            ProviderCatalogEntry::Readable(pdf) => {
+                let id = asset_id(&pdf.fingerprint)?;
+                let registry_path = repository_root
+                    .join("assets/registry")
+                    .join(format!("{id}.json"));
+                match fs::symlink_metadata(&registry_path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        result.new_count += 1;
+                    }
+                    Err(_) => {
+                        result.blocked_count += 1;
+                    }
+                    Ok(_) if read_asset_v2(&repository_root, &id).is_ok() => {
+                        result.registered_count += 1;
+                    }
+                    Ok(_) => {
+                        result.blocked_count += 1;
+                    }
+                }
+            }
+        }
+    }
+    result.blocked_count = result
+        .blocked_count
+        .saturating_add(scan.warnings.len().try_into().unwrap_or(u64::MAX));
+    Ok(result)
 }
 
 fn apply_inbox_catalog_v2(

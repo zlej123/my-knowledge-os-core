@@ -2,6 +2,7 @@ use std::fs;
 
 use mko_core::{
     clock::SystemClock,
+    config_v2::PerspectiveV2,
     lock::{RepositoryMutationLock, StaleRepositoryLockPolicy},
     projection_v2::{
         ProjectionInputV2, ProjectionRecordTypeV2, ProjectionStateV2, ProjectionWriteOutcomeV2,
@@ -64,6 +65,27 @@ fn rendering_is_deterministic_and_digest_is_over_canonical_input() {
     assert!(text.contains("record_type: source"));
     assert!(text.contains("derived_state: unreviewed"));
     assert!(text.contains("[[sources/"));
+}
+
+#[test]
+fn knowledge_projection_exposes_sorted_perspectives_for_obsidian() {
+    let mut input = projection("Perspective-aware knowledge");
+    input.record_type = ProjectionRecordTypeV2::Knowledge;
+    input.id = format!("personal-knowledge-{}", "a".repeat(64));
+    input.record_link = format!(
+        "knowledge/personal-knowledge-{}/current.yaml",
+        "a".repeat(64)
+    );
+    input.domain = "investment".into();
+    input.perspectives = vec![PerspectiveV2::Technical, PerspectiveV2::Investment];
+
+    let rendered = render_projection_v2(&input).unwrap();
+    let text = String::from_utf8(rendered.bytes).unwrap();
+
+    assert!(text.contains("perspectives: [\"technical\",\"investment\"]"));
+    let mut source_with_perspective = projection("Invalid Source");
+    source_with_perspective.perspectives = vec![PerspectiveV2::Technical];
+    assert!(render_projection_v2(&source_with_perspective).is_err());
 }
 
 #[test]
@@ -291,6 +313,7 @@ fn projection(title: &str) -> ProjectionInputV2 {
         review_head_id: None,
         derived_state: ProjectionStateV2::Unreviewed,
         domain: "research".into(),
+        perspectives: Vec::new(),
         tags: vec!["example".into(), "paper".into()],
         record_link: format!("sources/personal-source-{}/current.yaml", "a".repeat(64)),
         asset_link: format!("assets/registry/personal-asset-{}.yaml", "c".repeat(64)),

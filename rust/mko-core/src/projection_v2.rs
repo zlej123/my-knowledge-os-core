@@ -14,6 +14,7 @@ use crate::{
         AtomicWriteResult, write_new, write_replace_capability_compare_exchange_validated_at_commit,
     },
     clock::SystemClock,
+    config_v2::PerspectiveV2,
     error::MkoError,
     front_matter::parse_markdown,
     lock::{RepositoryMutationLock, StaleRepositoryLockPolicy},
@@ -83,6 +84,8 @@ pub struct ProjectionInputV2 {
     pub review_head_id: Option<String>,
     pub derived_state: ProjectionStateV2,
     pub domain: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub perspectives: Vec<PerspectiveV2>,
     pub tags: Vec<String>,
     pub record_link: String,
     pub asset_link: String,
@@ -99,6 +102,8 @@ struct ProjectionInputWireV2 {
     review_head_id: Option<String>,
     derived_state: ProjectionStateV2,
     domain: String,
+    #[serde(default)]
+    perspectives: Vec<PerspectiveV2>,
     tags: Vec<String>,
     record_link: String,
     asset_link: String,
@@ -118,6 +123,7 @@ impl<'de> Deserialize<'de> for ProjectionInputV2 {
             review_head_id: wire.review_head_id,
             derived_state: wire.derived_state,
             domain: wire.domain,
+            perspectives: wire.perspectives,
             tags: wire.tags,
             record_link: wire.record_link,
             asset_link: wire.asset_link,
@@ -178,6 +184,8 @@ struct StoredProjectionMetadataV2 {
     review_head_id: Option<String>,
     derived_state: ProjectionStateV2,
     domain: String,
+    #[serde(default)]
+    perspectives: Vec<PerspectiveV2>,
     tags: Vec<String>,
     record_link: String,
     asset_link: String,
@@ -230,6 +238,7 @@ pub(crate) fn read_current_projection_input_v2(
         review_head_id: None,
         derived_state: ProjectionStateV2::Unreviewed,
         domain: "projection probe".into(),
+        perspectives: Vec::new(),
         tags: Vec::new(),
         record_link: "projection-probe".into(),
         asset_link: "projection-probe".into(),
@@ -266,6 +275,7 @@ pub(crate) fn read_current_projection_input_v2(
         review_head_id: metadata.review_head_id,
         derived_state: metadata.derived_state,
         domain: metadata.domain,
+        perspectives: metadata.perspectives,
         tags: metadata.tags,
         record_link: metadata.record_link,
         asset_link: metadata.asset_link,
@@ -441,6 +451,13 @@ fn render_projection_unchecked(
         .iter()
         .map(|tag| normalize(tag))
         .collect::<Vec<_>>();
+    let perspectives = serde_json::to_string(&input.perspectives)
+        .map_err(|error| MkoError::new("projection_invalid", error.to_string()))?;
+    let perspectives_line = if input.perspectives.is_empty() {
+        String::new()
+    } else {
+        format!("perspectives: {perspectives}\n")
+    };
     let review_head = input
         .review_head_id
         .as_deref()
@@ -452,7 +469,7 @@ fn render_projection_unchecked(
         .map_err(|error| MkoError::new("projection_invalid", error.to_string()))?;
     let heading = title.replace('\n', " ");
     let text = format!(
-        "---\nprojection_schema_version: 2\nrecord_type: {}\nrecord_id: {}\ntitle: {}\ncurrent_revision: {}\nreview_head_id: {}\nderived_state: {}\ndomain: {}\ntags: {}\nrecord_link: {}\nasset_link: {}\nprojection_digest: {}\n---\n\n# {}\n\n- Record: [[{}]]\n- Asset: [[{}]]\n- Current revision: `{}`\n",
+        "---\nprojection_schema_version: 2\nrecord_type: {}\nrecord_id: {}\ntitle: {}\ncurrent_revision: {}\nreview_head_id: {}\nderived_state: {}\ndomain: {}\n{}tags: {}\nrecord_link: {}\nasset_link: {}\nprojection_digest: {}\n---\n\n# {}\n\n- Record: [[{}]]\n- Asset: [[{}]]\n- Current revision: `{}`\n",
         input.record_type.as_str(),
         json_string(&input.id)?,
         json_string(&title)?,
@@ -460,6 +477,7 @@ fn render_projection_unchecked(
         review_head,
         input.derived_state.as_str(),
         json_string(&domain)?,
+        perspectives_line,
         tags,
         json_string(&record_link)?,
         json_string(&asset_link)?,
@@ -629,8 +647,22 @@ fn validate_input(input: &ProjectionInputV2) -> Result<(), MkoError> {
     if input.title.is_empty() || input.title.chars().count() > 4096 {
         return Err(projection_invalid("title must be non-empty and bounded"));
     }
-    if input.domain.is_empty() || input.domain.chars().count() > 256 || input.tags.len() > 256 {
-        return Err(projection_invalid("domain or tags are invalid"));
+    if input.domain.is_empty()
+        || input.domain.chars().count() > 256
+        || input.perspectives.len() > PerspectiveV2::all().len()
+        || input.tags.len() > 256
+    {
+        return Err(projection_invalid(
+            "domain, perspectives, or tags are invalid",
+        ));
+    }
+    if !input.perspectives.windows(2).all(|pair| pair[0] < pair[1]) {
+        return Err(projection_invalid("perspectives must be sorted and unique"));
+    }
+    if input.record_type == ProjectionRecordTypeV2::Source && !input.perspectives.is_empty() {
+        return Err(projection_invalid(
+            "Source projections cannot carry Knowledge perspectives",
+        ));
     }
     if input
         .tags

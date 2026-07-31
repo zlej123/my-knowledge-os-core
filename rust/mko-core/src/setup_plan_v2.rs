@@ -79,6 +79,7 @@ views:
       - record_type
       - derived_state
       - domain
+      - perspectives
       - current_revision
 "#,
     ),
@@ -89,12 +90,65 @@ views:
     - file.inFolder("views/records")
     - 'record_type == "knowledge"'
     - 'derived_state == "approved"'
+properties:
+  perspectives:
+    displayName: 관점
 views:
   - type: table
-    name: Knowledge Library
+    name: 전체 지식
     order:
       - title
-      - domain
+      - perspectives
+      - tags
+      - current_revision
+  - type: table
+    name: 생활
+    filters:
+      and:
+        - 'list(perspectives).contains("life")'
+    order:
+      - title
+      - perspectives
+      - tags
+      - current_revision
+  - type: table
+    name: 학습
+    filters:
+      and:
+        - 'list(perspectives).contains("learning")'
+    order:
+      - title
+      - perspectives
+      - tags
+      - current_revision
+  - type: table
+    name: 기술
+    filters:
+      and:
+        - 'list(perspectives).contains("technical")'
+    order:
+      - title
+      - perspectives
+      - tags
+      - current_revision
+  - type: table
+    name: 프로젝트
+    filters:
+      and:
+        - 'list(perspectives).contains("project")'
+    order:
+      - title
+      - perspectives
+      - tags
+      - current_revision
+  - type: table
+    name: 투자
+    filters:
+      and:
+        - 'list(perspectives).contains("investment")'
+    order:
+      - title
+      - perspectives
       - tags
       - current_revision
 "#,

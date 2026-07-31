@@ -44,6 +44,14 @@
       ]
     },
     "domain": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "perspectives": {
+      "type": "array",
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["life", "learning", "technical", "project", "investment"]
+      }
+    },
     "tags": {
       "type": "array",
       "maxItems": 256,
@@ -67,7 +75,12 @@
   "allOf": [
     {
       "if": { "properties": { "record_type": { "const": "source" } } },
-      "then": { "properties": { "id": { "pattern": "^personal-source-[a-f0-9]{64}$" } } }
+      "then": {
+        "properties": {
+          "id": { "pattern": "^personal-source-[a-f0-9]{64}$" },
+          "perspectives": { "maxItems": 0 }
+        }
+      }
     },
     {
       "if": { "properties": { "record_type": { "const": "knowledge" } } },

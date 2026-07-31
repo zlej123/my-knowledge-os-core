@@ -9,8 +9,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
+    asset_v2::read_asset_v2,
     clock::Clock,
-    config_v2::{DomainPolicyV2, KnowledgeConfigV2},
+    config_v2::{DomainPolicyV2, KnowledgeConfigV2, PerspectiveV2},
     error::MkoError,
     lock::{RepositoryMutationLock, StaleRepositoryLockPolicy},
     model_v2::{
@@ -145,6 +146,8 @@ pub struct KnowledgeRevisionV2 {
     pub asset_fingerprint: String,
     pub evidence_basis: EvidenceBasisV2,
     pub domain_policy: DomainPolicyV2,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub perspectives: Vec<PerspectiveV2>,
     pub response: KnowledgeResponseV2,
 }
 
@@ -179,6 +182,12 @@ pub struct RecordWriteResultV2 {
     pub current_path: PathBuf,
     pub outcome: RecordWriteOutcomeV2,
     pub projection: RecordProjectionStatusV2,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CurrentKnowledgeRevisionV2 {
+    pub pointer: CurrentPointerV2,
+    pub revision: KnowledgeRevisionV2,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -227,6 +236,8 @@ pub fn write_source_record_v2(
         "v2 source write",
         request.response.title.clone(),
         request.response.tags.clone(),
+        "uncategorized".into(),
+        Vec::new(),
         request.asset.id.clone(),
         clock,
     )
@@ -251,6 +262,7 @@ pub fn write_knowledge_record_v2(
         asset_fingerprint: request.asset.fingerprint.clone(),
         evidence_basis: evidence_basis.clone(),
         domain_policy,
+        perspectives: Vec::new(),
         response: request.response.clone(),
     };
     let bytes = render_revision_markdown("Knowledge", &revision)?;
@@ -273,9 +285,131 @@ pub fn write_knowledge_record_v2(
         "v2 knowledge write",
         request.asset.title_fallback.clone(),
         tags,
+        "uncategorized".into(),
+        Vec::new(),
         request.asset.id.clone(),
         clock,
     )
+}
+
+pub fn read_current_knowledge_revision_v2(
+    repository_root: &Path,
+    knowledge_id: &str,
+) -> Result<CurrentKnowledgeRevisionV2, MkoError> {
+    KnowledgeConfigV2::read(repository_root)?;
+    if !valid_prefixed_hash(knowledge_id, "personal-knowledge-") {
+        return Err(MkoError::new(
+            "knowledge_id_invalid",
+            "Knowledge ID is not canonical",
+        ));
+    }
+    let record_directory = repository_root.join("knowledge").join(knowledge_id);
+    validate_real_directory(&record_directory)?;
+    let pointer = read_current_pointer_if_present(&record_directory.join("current.yaml"))?
+        .ok_or_else(|| {
+            MkoError::new(
+                "knowledge_not_found",
+                "Knowledge record has no current revision",
+            )
+        })?;
+    if pointer.record_type != SemanticRecordTypeV2::Knowledge || pointer.record_id != knowledge_id {
+        return Err(MkoError::new(
+            "current_pointer_invalid",
+            "current pointer does not identify the containing Knowledge record",
+        ));
+    }
+    let revision_path = record_directory
+        .join("revisions")
+        .join(format!("{}.md", pointer.revision.replace(':', "-")));
+    let bytes = read_bounded_revision(&revision_path)?;
+    if sha256_digest(&bytes) != pointer.revision {
+        return Err(MkoError::new(
+            "revision_invalid",
+            "Knowledge revision bytes do not match the current digest",
+        ));
+    }
+    let prefix = b"# Knowledge revision\n\n    ";
+    let json = bytes
+        .strip_prefix(prefix)
+        .and_then(|remaining| remaining.strip_suffix(b"\n"))
+        .ok_or_else(|| {
+            MkoError::new("revision_invalid", "Knowledge revision wrapper is invalid")
+        })?;
+    let revision: KnowledgeRevisionV2 = serde_json::from_slice(json)
+        .map_err(|_| MkoError::new("revision_invalid", "Knowledge revision JSON is invalid"))?;
+    if revision.record_id != knowledge_id
+        || revision.evidence_basis != pointer.evidence_basis
+        || canonical_json_bytes(&revision)? != json
+    {
+        return Err(MkoError::new(
+            "revision_invalid",
+            "Knowledge revision identity is inconsistent",
+        ));
+    }
+    Ok(CurrentKnowledgeRevisionV2 { pointer, revision })
+}
+
+pub(crate) fn replace_knowledge_perspectives_v2(
+    repository_root: &Path,
+    current: &CurrentKnowledgeRevisionV2,
+    mut perspectives: Vec<PerspectiveV2>,
+    clock: &dyn Clock,
+) -> Result<RecordWriteResultV2, MkoError> {
+    let config = KnowledgeConfigV2::read(repository_root)?;
+    perspectives.sort();
+    perspectives.dedup();
+    if perspectives.is_empty() {
+        return Err(MkoError::new(
+            "perspective_selection_invalid",
+            "select at least one perspective",
+        ));
+    }
+    let domain_policy = config.policy_for_perspectives(&perspectives);
+    validate_knowledge_policy(&current.revision.response, &domain_policy)?;
+    let mut revision = current.revision.clone();
+    revision.perspectives = perspectives.clone();
+    revision.domain_policy = domain_policy;
+    let bytes = render_revision_markdown("Knowledge", &revision)?;
+    let asset = read_asset_v2(repository_root, &revision.asset_id)?;
+    let mut tags = revision
+        .response
+        .units
+        .iter()
+        .flat_map(|unit| unit.tags.iter().cloned())
+        .collect::<Vec<_>>();
+    tags.extend(
+        perspectives
+            .iter()
+            .map(|perspective| format!("perspective:{}", perspective.as_str())),
+    );
+    publish_record_and_projection(
+        repository_root,
+        "knowledge",
+        SemanticRecordTypeV2::Knowledge,
+        revision.record_id,
+        revision.evidence_basis,
+        &bytes,
+        Some(&current.pointer.revision),
+        "v2 perspective confirmation",
+        asset.title_fallback,
+        tags,
+        primary_perspective(&perspectives),
+        perspectives.clone(),
+        asset.id,
+        clock,
+    )
+}
+
+fn primary_perspective(perspectives: &[PerspectiveV2]) -> String {
+    if perspectives.contains(&PerspectiveV2::Investment) {
+        PerspectiveV2::Investment.as_str().into()
+    } else {
+        perspectives
+            .first()
+            .map(PerspectiveV2::as_str)
+            .unwrap_or("uncategorized")
+            .into()
+    }
 }
 
 fn deterministic_record_id(record_type: &str, asset_id: &str) -> Result<String, MkoError> {
@@ -467,6 +601,28 @@ fn validate_knowledge_response(
     Ok(())
 }
 
+fn validate_knowledge_policy(
+    response: &KnowledgeResponseV2,
+    domain_policy: &DomainPolicyV2,
+) -> Result<(), MkoError> {
+    let has_counterargument = response
+        .units
+        .iter()
+        .any(|unit| unit.kind == KnowledgeUnitKindV2::Counterargument);
+    let has_open_question = response
+        .units
+        .iter()
+        .any(|unit| unit.kind == KnowledgeUnitKindV2::OpenQuestion);
+    if *domain_policy == DomainPolicyV2::HighRisk && (!has_counterargument || !has_open_question) {
+        Err(MkoError::new(
+            "high_risk_knowledge_incomplete",
+            "investment perspective requires a counterargument and an open question",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_evidence_refs(
     bundle: &PreparedContentV2,
     evidence_refs: &[EvidenceRefV2],
@@ -563,6 +719,8 @@ fn publish_record_and_projection(
     command: &str,
     title: String,
     mut tags: Vec<String>,
+    domain: String,
+    perspectives: Vec<PerspectiveV2>,
     asset_id: String,
     clock: &dyn Clock,
 ) -> Result<RecordWriteResultV2, MkoError> {
@@ -580,9 +738,13 @@ fn publish_record_and_projection(
         &record_type,
         &record_id,
         &candidate_revision,
-        title,
-        tags,
-        &asset_id,
+        ProjectionMetadataV2 {
+            title,
+            tags,
+            domain,
+            perspectives,
+            asset_id,
+        },
     )?;
     // Rendering is deliberately completed before canonical publication. This
     // guarantees that deterministic projection-shape errors cannot leave a
@@ -712,14 +874,20 @@ fn projection_placeholder() -> RecordProjectionStatusV2 {
     }
 }
 
+struct ProjectionMetadataV2 {
+    title: String,
+    tags: Vec<String>,
+    domain: String,
+    perspectives: Vec<PerspectiveV2>,
+    asset_id: String,
+}
+
 fn expected_projection_input(
     repository_root: &Path,
     record_type: &SemanticRecordTypeV2,
     record_id: &str,
     candidate_revision: &str,
-    title: String,
-    tags: Vec<String>,
-    asset_id: &str,
+    metadata: ProjectionMetadataV2,
 ) -> Result<ProjectionInputV2, MkoError> {
     let (review_type, projection_type, collection) = match record_type {
         SemanticRecordTypeV2::Source => (
@@ -757,14 +925,15 @@ fn expected_projection_input(
     Ok(ProjectionInputV2 {
         record_type: projection_type,
         id: record_id.to_owned(),
-        title,
+        title: metadata.title,
         current_revision: candidate_revision.to_owned(),
         review_head_id: history.derived.review_head_id,
         derived_state,
-        domain: "uncategorized".into(),
-        tags,
+        domain: metadata.domain,
+        perspectives: metadata.perspectives,
+        tags: metadata.tags,
         record_link: format!("{collection}/{record_id}/current.yaml"),
-        asset_link: format!("assets/registry/{asset_id}.json"),
+        asset_link: format!("assets/registry/{}.json", metadata.asset_id),
     })
 }
 
@@ -824,6 +993,36 @@ fn read_current_pointer_if_present(path: &Path) -> Result<Option<CurrentPointerV
         ));
     }
     Ok(Some(pointer))
+}
+
+fn read_bounded_revision(path: &Path) -> Result<Vec<u8>, MkoError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_record_nofollow(&mut options);
+    let file = options
+        .open(path)
+        .map_err(|_| MkoError::new("revision_unreadable", "revision cannot be opened"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| MkoError::new("revision_unreadable", error.to_string()))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 16 * 1024 * 1024
+    {
+        return Err(MkoError::new(
+            "revision_invalid",
+            "revision must be a bounded regular non-link file",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(16 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| MkoError::new("revision_unreadable", error.to_string()))?;
+    if bytes.len() > 16 * 1024 * 1024 {
+        return Err(MkoError::new(
+            "revision_invalid",
+            "revision exceeds its byte limit",
+        ));
+    }
+    Ok(bytes)
 }
 
 fn require_existing_revision(path: &Path, expected: &[u8]) -> Result<(), MkoError> {

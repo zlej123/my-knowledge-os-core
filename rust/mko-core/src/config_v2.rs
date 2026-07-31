@@ -28,6 +28,38 @@ pub enum DomainPolicyV2 {
     HighRisk,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PerspectiveV2 {
+    Life,
+    Learning,
+    Technical,
+    Project,
+    Investment,
+}
+
+impl PerspectiveV2 {
+    pub fn all() -> &'static [Self] {
+        &[
+            Self::Life,
+            Self::Learning,
+            Self::Technical,
+            Self::Project,
+            Self::Investment,
+        ]
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Life => "life",
+            Self::Learning => "learning",
+            Self::Technical => "technical",
+            Self::Project => "project",
+            Self::Investment => "investment",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfigV2 {
@@ -162,6 +194,16 @@ impl KnowledgeConfigV2 {
         let text = serde_saphyr::to_string(self)
             .map_err(|error| MkoError::new("kb_config_invalid", error.to_string()))?;
         Ok(text.replace("\r\n", "\n").replace('\r', "\n").into_bytes())
+    }
+
+    pub fn policy_for_perspectives(&self, perspectives: &[PerspectiveV2]) -> DomainPolicyV2 {
+        if self.domain_policies.default == DomainPolicyV2::HighRisk
+            || perspectives.contains(&PerspectiveV2::Investment)
+        {
+            DomainPolicyV2::HighRisk
+        } else {
+            DomainPolicyV2::Standard
+        }
     }
 }
 

@@ -3,21 +3,28 @@ use std::{fs, path::Path};
 use chrono::{DateTime, Utc};
 use mko_core::{
     clock::Clock,
-    config_v2::DomainPolicyV2,
+    config_v2::{DomainPolicyV2, PerspectiveV2},
     front_matter::render_markdown,
     json_v2::{QueueItemStateV2, QueueItemTypeV2, QueueNextActionV2},
     model_v2::{
         KnowledgeResponseV2, PreparedContentV2, ReviewDecisionV2, ReviewRecordTypeV2,
         ReviewRecordV2, ReviewTargetTypeV2, ReviewTargetV2, SourceResponseV2,
     },
+    perspective_v2::{prepare_perspective_confirmation_v2, publish_perspective_confirmation_v2},
     projection_v2::{
         ProjectionInputV2, ProjectionRecordTypeV2, ProjectionStateV2, write_projection_v2,
     },
-    queue_v2::{ReviewCardTargetStateV2, derive_queue_v2, show_review_card_v2},
+    queue_v2::{
+        ResurfacedKnowledgeStateV2, ReviewCardTargetStateV2, derive_queue_v2,
+        resurface_approved_knowledge_by_perspective_v2, resurface_approved_knowledge_v2,
+        resurface_knowledge_by_perspective_v2, search_approved_knowledge_by_perspective_v2,
+        search_approved_knowledge_v2, show_review_card_v2, summarize_home_queue_v2,
+    },
     records_v2::{
         AssetRecordV2, WriteKnowledgeRecordRequestV2, WriteSourceRecordRequestV2,
-        write_knowledge_record_v2, write_source_record_v2,
+        read_current_knowledge_revision_v2, write_knowledge_record_v2, write_source_record_v2,
     },
+    resurface_history_v2::record_resurfaced_knowledge_open_v2,
     revision_v2::{canonical_json_bytes, canonical_json_sha256},
     scaffold_v2::scaffold_personal_kb_v2,
 };
@@ -74,6 +81,189 @@ fn approved_records_are_excluded_from_the_default_queue_but_remain_showable() {
         String::from_utf8(card.card_bytes)
             .unwrap()
             .contains("State: `approved`")
+    );
+}
+
+#[test]
+fn search_returns_only_approved_knowledge_and_home_counts_it() {
+    let environment = environment();
+    let knowledge = write_knowledge(&environment);
+
+    assert!(
+        search_approved_knowledge_v2(environment.root.path(), "reported")
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        summarize_home_queue_v2(environment.root.path())
+            .unwrap()
+            .review_pending,
+        1
+    );
+
+    let review_id = seed_review(
+        environment.root.path(),
+        ReviewTargetTypeV2::Knowledge,
+        &knowledge.record_id,
+        &knowledge.revision,
+        ReviewDecisionV2::Approve,
+        None,
+        None,
+        "2026-07-23T01:00:00Z",
+    );
+    sync_projection(
+        &environment,
+        &knowledge,
+        Some(review_id),
+        ProjectionStateV2::Approved,
+    );
+
+    let matches = search_approved_knowledge_v2(environment.root.path(), "reported").unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].title, "Reported result");
+    let summary = summarize_home_queue_v2(environment.root.path()).unwrap();
+    assert_eq!(summary.review_pending, 0);
+    assert_eq!(summary.approved_knowledge, 1);
+}
+
+#[test]
+fn confirmed_perspective_is_searchable_and_resurfacing_prioritizes_open_questions() {
+    let environment = environment();
+    let knowledge = write_knowledge(&environment);
+    let prepared = prepare_perspective_confirmation_v2(
+        environment.root.path(),
+        &knowledge.record_id,
+        vec![PerspectiveV2::Technical],
+    )
+    .unwrap();
+    let replacement = publish_perspective_confirmation_v2(
+        environment.root.path(),
+        &prepared,
+        &prepared.confirmation_phrase,
+        &clock("2026-07-23T00:30:00Z"),
+    )
+    .unwrap();
+    let review_id = seed_review(
+        environment.root.path(),
+        ReviewTargetTypeV2::Knowledge,
+        &replacement.record_id,
+        &replacement.revision,
+        ReviewDecisionV2::Approve,
+        None,
+        None,
+        "2026-07-23T01:00:00Z",
+    );
+    sync_projection(
+        &environment,
+        &replacement,
+        Some(review_id),
+        ProjectionStateV2::Approved,
+    );
+
+    let matches = search_approved_knowledge_v2(environment.root.path(), "technical").unwrap();
+    assert_eq!(matches.len(), environment.knowledge.units.len());
+    assert!(
+        matches
+            .iter()
+            .all(|item| item.perspectives == vec![PerspectiveV2::Technical])
+    );
+    assert_eq!(
+        search_approved_knowledge_by_perspective_v2(
+            environment.root.path(),
+            "reported",
+            Some(PerspectiveV2::Technical),
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+    assert!(
+        search_approved_knowledge_by_perspective_v2(
+            environment.root.path(),
+            "reported",
+            Some(PerspectiveV2::Investment),
+        )
+        .unwrap()
+        .is_empty()
+    );
+    let resurfaced = resurface_approved_knowledge_v2(environment.root.path(), 5).unwrap();
+    assert_eq!(resurfaced.len(), 1);
+    assert_eq!(resurfaced[0].perspectives, vec![PerspectiveV2::Technical]);
+    assert!(resurfaced[0].has_open_questions);
+    assert!(
+        resurface_approved_knowledge_by_perspective_v2(
+            environment.root.path(),
+            Some(PerspectiveV2::Investment),
+            5,
+        )
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[test]
+fn deferred_knowledge_resurfaces_and_opening_updates_only_local_history() {
+    let environment = environment();
+    let knowledge = write_knowledge(&environment);
+    let review_id = seed_review(
+        environment.root.path(),
+        ReviewTargetTypeV2::Knowledge,
+        &knowledge.record_id,
+        &knowledge.revision,
+        ReviewDecisionV2::Defer,
+        None,
+        None,
+        "2026-07-23T03:00:00Z",
+    );
+    sync_projection(
+        &environment,
+        &knowledge,
+        Some(review_id),
+        ProjectionStateV2::Deferred,
+    );
+    let canonical_before = fs::read(&knowledge.current_path).unwrap();
+
+    assert!(
+        resurface_approved_knowledge_v2(environment.root.path(), 5)
+            .unwrap()
+            .is_empty()
+    );
+    let initial = resurface_knowledge_by_perspective_v2(environment.root.path(), None, 5).unwrap();
+    assert_eq!(initial.len(), 1);
+    assert_eq!(
+        initial[0].review_state,
+        ResurfacedKnowledgeStateV2::Deferred
+    );
+    assert_eq!(
+        initial[0].reviewed_at,
+        "2026-07-23T03:00:00Z".parse::<DateTime<Utc>>().unwrap()
+    );
+    assert_eq!(initial[0].last_opened_at, None);
+
+    record_resurfaced_knowledge_open_v2(
+        environment.root.path(),
+        &initial[0].knowledge_id,
+        &initial[0].current_revision,
+        &clock("2026-07-23T04:00:00Z"),
+    )
+    .unwrap();
+
+    let reopened = resurface_knowledge_by_perspective_v2(environment.root.path(), None, 5).unwrap();
+    assert_eq!(
+        reopened[0].last_opened_at,
+        Some("2026-07-23T04:00:00Z".parse::<DateTime<Utc>>().unwrap())
+    );
+    assert_eq!(fs::read(&knowledge.current_path).unwrap(), canonical_before);
+    assert_eq!(
+        fs::read(environment.root.path().join(".mko/.gitignore")).unwrap(),
+        b"runtime/\n"
+    );
+    assert!(
+        environment
+            .root
+            .path()
+            .join(".mko/runtime/resurface-history.json")
+            .is_file()
     );
 }
 
@@ -271,6 +461,7 @@ fn self_consistent_projection_with_noncanonical_semantics_blocks_the_queue() {
             review_head_id: None,
             derived_state: ProjectionStateV2::Unreviewed,
             domain: "uncategorized".into(),
+            perspectives: Vec::new(),
             tags: environment.source.tags.clone(),
             record_link: format!("sources/{}/current.yaml", source.record_id),
             asset_link: format!("assets/registry/{}.json", environment.asset.id),
@@ -292,6 +483,30 @@ fn sync_projection(
     derived_state: ProjectionStateV2,
 ) {
     let is_source = record.record_id.starts_with("personal-source-");
+    let knowledge = (!is_source).then(|| {
+        read_current_knowledge_revision_v2(environment.root.path(), &record.record_id).unwrap()
+    });
+    let mut tags = if is_source {
+        environment.source.tags.clone()
+    } else {
+        environment
+            .knowledge
+            .units
+            .iter()
+            .flat_map(|unit| unit.tags.iter().cloned())
+            .collect()
+    };
+    if let Some(knowledge) = &knowledge {
+        tags.extend(
+            knowledge
+                .revision
+                .perspectives
+                .iter()
+                .map(|perspective| format!("perspective:{}", perspective.as_str())),
+        );
+    }
+    tags.sort();
+    tags.dedup();
     write_projection_v2(
         environment.root.path(),
         &ProjectionInputV2 {
@@ -309,17 +524,30 @@ fn sync_projection(
             current_revision: record.revision.clone(),
             review_head_id,
             derived_state,
-            domain: "uncategorized".into(),
-            tags: if is_source {
-                environment.source.tags.clone()
+            domain: if let Some(knowledge) = &knowledge {
+                if knowledge
+                    .revision
+                    .perspectives
+                    .contains(&PerspectiveV2::Investment)
+                {
+                    "investment".into()
+                } else {
+                    knowledge
+                        .revision
+                        .perspectives
+                        .first()
+                        .map(PerspectiveV2::as_str)
+                        .unwrap_or("uncategorized")
+                        .into()
+                }
             } else {
-                environment
-                    .knowledge
-                    .units
-                    .iter()
-                    .flat_map(|unit| unit.tags.iter().cloned())
-                    .collect()
+                "uncategorized".into()
             },
+            perspectives: knowledge
+                .as_ref()
+                .map(|knowledge| knowledge.revision.perspectives.clone())
+                .unwrap_or_default(),
+            tags,
             record_link: format!(
                 "{}/{}/current.yaml",
                 if is_source { "sources" } else { "knowledge" },
