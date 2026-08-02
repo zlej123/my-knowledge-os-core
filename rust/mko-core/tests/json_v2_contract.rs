@@ -140,6 +140,7 @@ fn machine_envelope_goldens_validate_and_round_trip() {
     assert_eq!(serde_json::to_value(show_typed).unwrap(), show_value);
 
     for bytes in [
+        include_bytes!("../../../tests/fixtures/json-v2/handshake-success.json").as_slice(),
         include_bytes!("../../../tests/fixtures/json-v2/setup-plan-success.json").as_slice(),
         include_bytes!("../../../tests/fixtures/json-v2/setup-apply-success.json").as_slice(),
         include_bytes!("../../../tests/fixtures/json-v2/review-open-success.json").as_slice(),

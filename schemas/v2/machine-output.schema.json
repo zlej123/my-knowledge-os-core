@@ -3,6 +3,7 @@
   "$id": "https://my-knowledge-os.local/schemas/v2/machine-output.schema.json",
   "title": "My Knowledge OS machine envelope v2",
   "oneOf": [
+    { "$ref": "#/$defs/handshake_success" },
     { "$ref": "#/$defs/setup_plan_success" },
     { "$ref": "#/$defs/setup_apply_success" },
     { "$ref": "#/$defs/add_success" },
@@ -19,6 +20,7 @@
   "$defs": {
     "command": {
       "enum": [
+        "handshake",
         "setup.plan",
         "setup.apply",
         "add",
@@ -49,8 +51,29 @@
         "repair",
         "preserve_user_edit",
         "retry",
-        "sync"
+        "sync",
+        "reinstall"
       ]
+    },
+    "handshake_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cli_version", "skill_version"],
+      "properties": {
+        "cli_version": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "skill_version": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "handshake_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "handshake" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/handshake_data" }
+      }
     },
     "empty_object": {
       "type": "object",

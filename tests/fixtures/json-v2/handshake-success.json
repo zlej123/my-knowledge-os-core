@@ -1,0 +1,9 @@
+{
+  "schema_version": 2,
+  "command": "handshake",
+  "result": "ok",
+  "data": {
+    "cli_version": "0.3.1",
+    "skill_version": "0.3.1"
+  }
+}

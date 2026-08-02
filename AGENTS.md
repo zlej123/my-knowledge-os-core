@@ -15,6 +15,17 @@ Resolve conflicts in this order:
 - LLMs and adapters may provide typed semantic JSON only. They must not automatically approve, commit, or push.
 - Human approval remains revision-bound and requires the human-only Core command.
 
+## Version discipline
+
+The installed CLI and the installed Skill are one contract, enforced at runtime by
+`mko handshake` (exact match against the version the Skill pins). Therefore any change to an
+agent-facing machine surface — CLI commands or flags, json-v2 envelopes, `schemas/`, or the
+SKILL.md workflow contract — must bump `workspace.package.version` in `rust/Cargo.toml`
+(patch level at minimum) in the same change. Tests pin the version in three places
+(`contract_version.rs`, the CLI `--version` test, and the Skill handshake pin) so a bump is
+always an explicit, reviewed act. `CONTRACT_VERSION_V2` in `config_v2.rs` is the on-disk KB
+contract, not the product version; it must not change for a surface bump.
+
 ## Verification
 
 From the repository root, run:

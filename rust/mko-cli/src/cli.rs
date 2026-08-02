@@ -42,8 +42,8 @@ use mko_core::{
         AddBatchDataV2, AddBatchItemErrorV2, AddBatchItemV2, AddBatchWarningV2, AddDataV2,
         AddOutcomeV2, AddSingleDataV2, DashboardCanonicalStateDataV2, DashboardDataV2,
         DashboardFileDataV2, DashboardFileKindDataV2, DashboardFileStateDataV2,
-        DashboardProjectionStateDataV2, JsonV2Command, JsonV2Success, NextActionV2,
-        SetupApplyDataV2,
+        DashboardProjectionStateDataV2, HandshakeDataV2, JsonV2Command, JsonV2Success,
+        NextActionV2, SetupApplyDataV2,
     },
     knowledge::{
         ConceptKind, ConceptMatch, KnowledgeSearchQuery, WriteKnowledgeRequest, approve_knowledge,
@@ -83,7 +83,7 @@ use mko_core::{
 use crate::{
     batch_add_data,
     output::{
-        emit_encoded_json, emit_json_v1, emit_json_v1_failure, emit_json_v2_failure,
+        emit_encoded_json, emit_json_v1, emit_json_v1_failure, emit_json_v2, emit_json_v2_failure,
         emit_json_value, emit_legacy_json_error, json_v2_next_action,
     },
 };
@@ -269,6 +269,8 @@ struct LegacyRepairStateArgs {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(hide = true)]
+    Handshake(HandshakeArgs),
     /// 처음 사용할 저장소와 자료 폴더를 연결합니다
     Setup(SetupArgs),
     /// Inbox의 새 자료를 등록합니다
@@ -326,6 +328,14 @@ enum Command {
     },
     #[command(name = "__extract-pdf", hide = true)]
     ExtractPdf,
+}
+
+#[derive(Args)]
+struct HandshakeArgs {
+    #[arg(long = "skill-version")]
+    skill_version: String,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
 }
 
 #[derive(Args)]
@@ -1411,6 +1421,7 @@ fn compact_excerpt(value: &str, max_chars: usize) -> String {
 fn run(cli: Cli) -> Result<Exit, MkoError> {
     match cli.command {
         None => home().map(|_| Exit::Success),
+        Some(Command::Handshake(arguments)) => handshake(arguments).map(|_| Exit::Success),
         Some(Command::Setup(arguments)) => setup(arguments).map(|_| Exit::Success),
         Some(Command::Add(arguments)) => add(arguments).map(|_| Exit::Success),
         Some(Command::Find(arguments)) => find(arguments).map(|_| Exit::Success),
@@ -1473,6 +1484,32 @@ fn run(cli: Cli) -> Result<Exit, MkoError> {
         Some(Command::Hooks {
             command: HooksCommand::Install(arguments),
         }) => install_hook(arguments).map(|_| Exit::Success),
+    }
+}
+
+// The handshake is deliberately context-free: it must verify a fresh install
+// before `mko setup` has ever run, so it never resolves a repository.
+fn handshake(arguments: HandshakeArgs) -> Result<(), MkoError> {
+    if arguments.format == OutputFormat::JsonV1 {
+        return Err(MkoError::new(
+            "format_unsupported",
+            "mko handshake supports human or json-v2 output",
+        ));
+    }
+    mko_core::version::verify_skill_version(&arguments.skill_version)?;
+    match arguments.format {
+        OutputFormat::JsonV2 => emit_json_v2(JsonV2Success::handshake(HandshakeDataV2 {
+            cli_version: mko_core::version::PRODUCT_VERSION.into(),
+            skill_version: arguments.skill_version,
+        })),
+        _ => {
+            println!(
+                "CLI {}와 Skill {}이 같은 계약입니다.",
+                mko_core::version::PRODUCT_VERSION,
+                arguments.skill_version
+            );
+            Ok(())
+        }
     }
 }
 
@@ -3050,6 +3087,10 @@ fn emit_json_v2_failure_or_stderr(command: JsonV2Command, error: &MkoError) {
 
 fn json_v2_command(cli: &Cli) -> Option<JsonV2Command> {
     match cli.command.as_ref()? {
+        Command::Handshake(HandshakeArgs {
+            format: OutputFormat::JsonV2,
+            ..
+        }) => Some(JsonV2Command::Handshake),
         Command::Setup(SetupArgs {
             command:
                 Some(SetupCommand::Plan(SetupPlanArgs {
@@ -3232,6 +3273,7 @@ fn json_v2_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option
         args.get(1)?.to_str()?,
         args.get(2).and_then(|argument| argument.to_str()),
     ) {
+        ("handshake", _) => Some(JsonV2Command::Handshake),
         ("setup", Some("plan")) => Some(JsonV2Command::SetupPlan),
         ("setup", Some("apply")) => Some(JsonV2Command::SetupApply),
         ("add", _) => Some(JsonV2Command::Add),

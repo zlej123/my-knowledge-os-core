@@ -512,6 +512,39 @@ fn knowledge_os_skill_is_discoverable_in_korean_and_english() {
 }
 
 #[test]
+fn knowledge_os_skill_pins_the_exact_cli_version_handshake() {
+    let path = knowledge_os_skill_path();
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} must exist and be readable: {error}", path.display()));
+
+    let pinned = format!(
+        "mko handshake --skill-version \"{}\" --format json-v2",
+        mko_core::version::PRODUCT_VERSION
+    );
+    assert!(
+        text.contains(&pinned),
+        "the Skill must pin the handshake to the workspace version; \
+         expected the exact command: {pinned}"
+    );
+    assert_eq!(
+        text.matches("--skill-version").count(),
+        1,
+        "the Skill must declare exactly one handshake version"
+    );
+    for required in [
+        "Before the first `mko` command of a session",
+        "skill_version_mismatch",
+        "stop every",
+        "reinstall the CLI",
+    ] {
+        assert!(
+            text.contains(required),
+            "missing handshake rule: {required}"
+        );
+    }
+}
+
+#[test]
 fn knowledge_os_skill_exposes_only_the_v2_core_workflow() {
     let path = knowledge_os_skill_path();
     let text = std::fs::read_to_string(&path)
@@ -522,6 +555,7 @@ fn knowledge_os_skill_exposes_only_the_v2_core_workflow() {
         "powershell.exe",
         "./scripts/install.sh",
         "mko --version",
+        "mko handshake",
         "mko setup",
         "mko remember",
         "mko queue",
@@ -595,6 +629,7 @@ fn knowledge_os_skill_defines_the_knowledge_extraction_flow() {
             "powershell.exe",
             "./scripts/install.sh",
             "mko --version",
+            "mko handshake",
             "mko setup",
             "mko remember",
             "mko queue",

@@ -44,6 +44,22 @@ user to restart Codex before continuing.
 Do not claim that the Rust-free v0.3 binary bootstrap exists until the Skill contains a pinned
 release manifest with exact URL, size, and SHA-256 and the matching release artifacts are published.
 
+## Version handshake
+
+This Skill is written for exactly one Core version. Before the first `mko` command of a session
+(after installation checks), verify the contract:
+
+```bash
+mko handshake --skill-version "0.3.1" --format json-v2
+```
+
+Pass the pinned version string above exactly; never substitute the CLI's own reported version.
+Continue only on a success envelope. If Core answers `skill_version_mismatch`, or the installed CLI
+does not recognize the `handshake` subcommand at all, the CLI and Skill halves are out of sync: stop every
+`mko` action in this session, show the user Core's message, and direct them to reinstall the CLI
+and Skill together with the source installer above, then restart Codex. Do not work around a
+mismatch by guessing commands from either half.
+
 ## User language
 
 Use these terms consistently:
@@ -53,7 +69,7 @@ Use these terms consistently:
 - register as knowledge: create a separate Knowledge draft containing clearly labelled grounded
   units, LLM analysis, counterarguments, uncertainty, and open questions;
 - review: display the exact current Source/Knowledge revision and collect feedback;
-- approve: real-TTY only in v0.3.0.
+- approve: real-TTY only in v0.3.
 - remember: hand the owner to real-TTY `mko remember`; never paraphrase or publish their quick-note
   text through an agent command.
 

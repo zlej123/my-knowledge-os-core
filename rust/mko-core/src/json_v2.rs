@@ -25,6 +25,8 @@ where
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum JsonV2Command {
+    #[serde(rename = "handshake")]
+    Handshake,
     #[serde(rename = "setup.plan")]
     SetupPlan,
     #[serde(rename = "setup.apply")]
@@ -275,6 +277,14 @@ pub enum NextActionV2 {
     PreserveUserEdit,
     Retry,
     Sync,
+    Reinstall,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandshakeDataV2 {
+    pub cli_version: String,
+    pub skill_version: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -360,6 +370,13 @@ pub struct JsonV2Error {
 #[serde(tag = "command")]
 #[serde(deny_unknown_fields)]
 pub enum JsonV2Success {
+    #[serde(rename = "handshake")]
+    Handshake {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: HandshakeDataV2,
+    },
     #[serde(rename = "setup.plan")]
     SetupPlan {
         #[serde(deserialize_with = "deserialize_schema_version")]
@@ -440,6 +457,14 @@ pub enum JsonV2Success {
 }
 
 impl JsonV2Success {
+    pub fn handshake(data: HandshakeDataV2) -> Self {
+        Self::Handshake {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
     pub fn setup_plan(data: SetupPlanDataV2) -> Self {
         Self::SetupPlan {
             schema_version: 2,
