@@ -67,8 +67,7 @@ self-containment followed (8a3a6b3): `mko schema list/show` serves the
 source-response, knowledge-response, and new review-feedback-input contracts plus
 minimal valid examples from the installed binary, so the Skill no longer references
 repository schema paths that do not exist on user machines. Item 2 below (the
-revision-request loop) remains open and still gates the rendered-document review
-idea in the next section.
+revision-request loop) was closed later the same day; see its entry.
 
 1. **Setup contract conflict (P1, resolved in Phase A).** The v0.3 UX design offers
    "clone an existing private GitHub KB or scaffold a new local Personal KB",
@@ -78,10 +77,15 @@ idea in the next section.
    option, not a precondition for the first summary. The Skill now completes
    local KB and Drive setup first and asks about a private Git remote only
    after an explicit user choice.
-2. **Revision-request loop is not closed for the user (P1).** The Skill
-   stores feedback and stops; replacement needs the current revision, and
-   the queue only says "수정본 생성" without naming the regeneration flow.
-   Fix direction: one guided path from feedback to replacement revision.
+2. **Revision-request loop is not closed for the user (P1, resolved
+   2026-08-02).** The Skill stored feedback and stopped; replacement needed
+   the current revision, and the queue only said "수정본 생성" without naming
+   the regeneration flow. Closed by the revision-loop design
+   (`docs/superpowers/specs/2026-08-02-mko-revision-loop-design.md`): the
+   show envelope carries the typed regeneration context, replacements bind
+   with `--expected-revision`, the re-review card renders the addressed
+   feedback plus a deterministic diff, and the Skill defines the guided
+   flow ending at pending human review.
 3. **Flaky test (resolved 2026-08-03).** `registry_scan_limit` failed once in a
    full-workspace run and passed in isolation. Confirmed on 2026-08-03: the same
    commit failed a Windows CI job and passed on re-run, twice, in two different
@@ -218,7 +222,6 @@ binary installation and promoting `feat/revision-loop` to `main`.
 
 The product's strongest property today is that it prevents a wrong approval.
 The next thing to earn is that an owner who stopped safely can start again.
-
 ## Rendered-document review (owner-proposed, 2026-08-01)
 
 **Idea.** When material arrives, the LLM's draft is delivered to the owner
@@ -239,6 +242,7 @@ daily workflow already moved toward it. Three lines to hold when building:
    and must be an explicit owner opt-in per channel — see the Thesis
    notification-boundary precedent and the mko:// export fence.
 
-Depends on the request_changes→new-draft→diff→re-review loop (already
-queued): a delivered document invites "fix this here", which dead-ends
-without it.
+Depends on the request_changes→new-draft→diff→re-review loop: a delivered
+document invites "fix this here", which dead-ends without it. That loop was
+closed on 2026-08-02 (`docs/superpowers/specs/2026-08-02-mko-revision-loop-design.md`),
+so this item is now unblocked and waits only on its own scheduling.
