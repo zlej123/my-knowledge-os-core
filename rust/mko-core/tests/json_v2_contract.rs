@@ -4,6 +4,7 @@ use mko_core::{
         EvidenceRefV2, KnowledgeResponseV2, PreparedContentV2, ReviewRecordV2, ReviewResolutionV2,
         SourceResponseV2,
     },
+    review_session_v2::ReviewSessionDecisionInputV2,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -92,6 +93,28 @@ fn all_v2_artifact_goldens_validate_and_round_trip() {
         include_str!("../../../schemas/v2/review-resolution.schema.json"),
     )
     .assert_valid_round_trip();
+    fixture::<ReviewSessionDecisionInputV2>(
+        "review-feedback-input",
+        include_bytes!("../../../tests/fixtures/json-v2/review-feedback-input.json"),
+        include_str!("../../../schemas/v2/review-feedback-input.schema.json"),
+    )
+    .assert_valid_round_trip();
+}
+
+#[test]
+fn review_feedback_input_cannot_encode_an_approval() {
+    let decision = fixture::<ReviewSessionDecisionInputV2>(
+        "review-feedback-input",
+        include_bytes!("../../../tests/fixtures/json-v2/review-feedback-input.json"),
+        include_str!("../../../schemas/v2/review-feedback-input.schema.json"),
+    );
+    let mut value: Value = serde_json::from_slice(decision.bytes).unwrap();
+    value["target_decisions"][0]["decision"] = json!("approve");
+    decision.assert_rejects(&value);
+
+    let mut value: Value = serde_json::from_slice(decision.bytes).unwrap();
+    value["unexpected"] = json!(true);
+    decision.assert_rejects(&value);
 }
 
 #[test]
@@ -141,6 +164,8 @@ fn machine_envelope_goldens_validate_and_round_trip() {
 
     for bytes in [
         include_bytes!("../../../tests/fixtures/json-v2/handshake-success.json").as_slice(),
+        include_bytes!("../../../tests/fixtures/json-v2/schema-list-success.json").as_slice(),
+        include_bytes!("../../../tests/fixtures/json-v2/schema-show-success.json").as_slice(),
         include_bytes!("../../../tests/fixtures/json-v2/setup-plan-success.json").as_slice(),
         include_bytes!("../../../tests/fixtures/json-v2/setup-apply-success.json").as_slice(),
         include_bytes!("../../../tests/fixtures/json-v2/review-open-success.json").as_slice(),

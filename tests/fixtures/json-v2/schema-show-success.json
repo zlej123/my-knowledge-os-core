@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "command": "schema.show",
+  "result": "ok",
+  "data": {
+    "name": "review-feedback-input-v2",
+    "purpose": "bounded decision input an agent passes to `mko review-feedback --input`",
+    "schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "card_digest", "target_decisions"]
+    },
+    "example": {
+      "session_id": "mko-review-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "card_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "target_decisions": []
+    }
+  }
+}

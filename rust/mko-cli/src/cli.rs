@@ -271,6 +271,11 @@ struct LegacyRepairStateArgs {
 enum Command {
     #[command(hide = true)]
     Handshake(HandshakeArgs),
+    #[command(hide = true)]
+    Schema {
+        #[command(subcommand)]
+        command: SchemaCommand,
+    },
     /// 처음 사용할 저장소와 자료 폴더를 연결합니다
     Setup(SetupArgs),
     /// Inbox의 새 자료를 등록합니다
@@ -334,6 +339,25 @@ enum Command {
 struct HandshakeArgs {
     #[arg(long = "skill-version")]
     skill_version: String,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
+}
+
+#[derive(Subcommand)]
+enum SchemaCommand {
+    List(SchemaListArgs),
+    Show(SchemaShowArgs),
+}
+
+#[derive(Args)]
+struct SchemaListArgs {
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
+}
+
+#[derive(Args)]
+struct SchemaShowArgs {
+    name: String,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
 }
@@ -1422,6 +1446,12 @@ fn run(cli: Cli) -> Result<Exit, MkoError> {
     match cli.command {
         None => home().map(|_| Exit::Success),
         Some(Command::Handshake(arguments)) => handshake(arguments).map(|_| Exit::Success),
+        Some(Command::Schema {
+            command: SchemaCommand::List(arguments),
+        }) => schema_list(arguments).map(|_| Exit::Success),
+        Some(Command::Schema {
+            command: SchemaCommand::Show(arguments),
+        }) => schema_show(arguments).map(|_| Exit::Success),
         Some(Command::Setup(arguments)) => setup(arguments).map(|_| Exit::Success),
         Some(Command::Add(arguments)) => add(arguments).map(|_| Exit::Success),
         Some(Command::Find(arguments)) => find(arguments).map(|_| Exit::Success),
@@ -1511,6 +1541,54 @@ fn handshake(arguments: HandshakeArgs) -> Result<(), MkoError> {
             Ok(())
         }
     }
+}
+
+// Like the handshake, the schema surface is context-free: an installed CLI
+// serves its own embedded contracts so the Skill never needs the repository
+// checkout the schemas were authored in.
+fn schema_list(arguments: SchemaListArgs) -> Result<(), MkoError> {
+    if arguments.format == OutputFormat::JsonV1 {
+        return Err(MkoError::new(
+            "format_unsupported",
+            "mko schema list supports human or json-v2 output",
+        ));
+    }
+    let data = mko_core::schema_v2::list_schemas_v2();
+    match arguments.format {
+        OutputFormat::JsonV2 => emit_json_v2(JsonV2Success::schema_list(data)),
+        _ => {
+            for schema in data.schemas {
+                println!("{} — {}", schema.name, schema.purpose);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn schema_show(arguments: SchemaShowArgs) -> Result<(), MkoError> {
+    if arguments.format == OutputFormat::JsonV1 {
+        return Err(MkoError::new(
+            "format_unsupported",
+            "mko schema show supports human or json-v2 output",
+        ));
+    }
+    let data = mko_core::schema_v2::show_schema_v2(&arguments.name)?;
+    match arguments.format {
+        OutputFormat::JsonV2 => emit_json_v2(JsonV2Success::schema_show(data)),
+        _ => {
+            println!("{} — {}", data.name, data.purpose);
+            println!("schema:");
+            println!("{}", pretty_json(&data.schema)?);
+            println!("example:");
+            println!("{}", pretty_json(&data.example)?);
+            Ok(())
+        }
+    }
+}
+
+fn pretty_json(value: &serde_json::Value) -> Result<String, MkoError> {
+    serde_json::to_string_pretty(value)
+        .map_err(|error| MkoError::new("json_output_failed", error.to_string()))
 }
 
 fn add(arguments: AddArgs) -> Result<(), MkoError> {
@@ -3091,6 +3169,19 @@ fn json_v2_command(cli: &Cli) -> Option<JsonV2Command> {
             format: OutputFormat::JsonV2,
             ..
         }) => Some(JsonV2Command::Handshake),
+        Command::Schema {
+            command:
+                SchemaCommand::List(SchemaListArgs {
+                    format: OutputFormat::JsonV2,
+                }),
+        } => Some(JsonV2Command::SchemaList),
+        Command::Schema {
+            command:
+                SchemaCommand::Show(SchemaShowArgs {
+                    format: OutputFormat::JsonV2,
+                    ..
+                }),
+        } => Some(JsonV2Command::SchemaShow),
         Command::Setup(SetupArgs {
             command:
                 Some(SetupCommand::Plan(SetupPlanArgs {
@@ -3274,6 +3365,8 @@ fn json_v2_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option
         args.get(2).and_then(|argument| argument.to_str()),
     ) {
         ("handshake", _) => Some(JsonV2Command::Handshake),
+        ("schema", Some("list")) => Some(JsonV2Command::SchemaList),
+        ("schema", Some("show")) => Some(JsonV2Command::SchemaShow),
         ("setup", Some("plan")) => Some(JsonV2Command::SetupPlan),
         ("setup", Some("apply")) => Some(JsonV2Command::SetupApply),
         ("add", _) => Some(JsonV2Command::Add),
