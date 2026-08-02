@@ -130,10 +130,14 @@ pub fn show_json_v2(repository: &Path, stable_id: &str) -> Result<(), MkoError> 
             displayed_revision: target.snapshot.displayed_revision,
             review_head_id: target.snapshot.expected_review_head_id,
             state: json_target_state(target.state),
+            current_feedback: target.current_feedback,
+            addressed_feedback: target.addressed_feedback,
+            previous_reviewed_revision: target.previous_reviewed_revision,
         })
         .collect();
     emit_json_v2(JsonV2Success::show(ShowDataV2 {
         item_id: card.item_id,
+        asset_id: card.asset_id,
         card_markdown,
         card_digest: card.card_digest,
         effect_digest: card.effect_digest,

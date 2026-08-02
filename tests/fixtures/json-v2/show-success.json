@@ -4,6 +4,7 @@
   "result": "ok",
   "data": {
     "item_id": "personal-queue-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "asset_id": "personal-asset-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     "card_markdown": "# Review card\n\nGrounded summary.\n",
     "card_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "effect_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -12,7 +13,10 @@
         "record_id": "personal-source-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
         "displayed_revision": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         "review_head_id": null,
-        "state": "unreviewed"
+        "state": "revised_unreviewed",
+        "current_feedback": null,
+        "addressed_feedback": "핵심 주장 1의 근거를 본문 수치가 있는 블록으로 교체",
+        "previous_reviewed_revision": "sha256:9999999999999999999999999999999999999999999999999999999999999999"
       }
     ]
   }

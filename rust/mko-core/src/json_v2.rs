@@ -142,12 +142,19 @@ pub struct ShowTargetV2 {
     #[serde(deserialize_with = "deserialize_required_option")]
     pub review_head_id: Option<String>,
     pub state: ReviewTargetStateV2,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub current_feedback: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub addressed_feedback: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub previous_reviewed_revision: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShowDataV2 {
     pub item_id: String,
+    pub asset_id: String,
     pub card_markdown: String,
     pub card_digest: String,
     pub effect_digest: String,
