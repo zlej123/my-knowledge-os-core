@@ -58,6 +58,18 @@ delivery phases are now specified in
 of Phase A and the authorized Phase B slice was completed locally on 2026-07-31. Phase C still
 requires the owner-review gate in that addendum.
 
+**2026-08-02.** The review's synchronization priority is closed in two halves: the
+installed CLI and Skill were re-synced to current `main` (done outside this repo),
+and `mko handshake` (9d41079) now makes a stale half impossible to miss — the Skill
+pins its exact Core version and any mismatch answers a typed
+`skill_version_mismatch` failure with `next_action: reinstall`. Skill
+self-containment followed (8a3a6b3): `mko schema list/show` serves the
+source-response, knowledge-response, and new review-feedback-input contracts plus
+minimal valid examples from the installed binary, so the Skill no longer references
+repository schema paths that do not exist on user machines. Item 2 below (the
+revision-request loop) remains open and still gates the rendered-document review
+idea in the next section.
+
 1. **Setup contract conflict (P1, resolved in Phase A).** The v0.3 UX design offers
    "clone an existing private GitHub KB or scaffold a new local Personal KB",
    but `skills/codex/my-knowledge-os/SKILL.md` hard-requires an absolute
