@@ -73,3 +73,27 @@ requires the owner-review gate in that addendum.
 3. **Flaky test.** `registry_scan_limit` failed once in a full-workspace run
    and passed in isolation — likely load/timing sensitivity. Track before
    trusting full-suite green on slow machines.
+
+## Rendered-document review (owner-proposed, 2026-08-01)
+
+**Idea.** When material arrives, the LLM's draft is delivered to the owner
+as a readable HTML/MD document; the owner reads and approves. Review should
+feel like receiving a document, not operating structures in a terminal.
+
+**Assessment: right direction — this is a review-surface change, not a
+loop change.** The ingest→draft→approve loop already exists; the guided
+daily workflow already moved toward it. Three lines to hold when building:
+
+1. The rendered document is a PROJECTION, not the record. The Core renders
+   it deterministically from the draft revision, so approving the document
+   is approving the record — an LLM-authored "pretty version" alongside the
+   structured record would create two versions of the truth.
+2. Delivery may push anywhere; approval stays a local real-TTY act.
+3. Default delivery target is local (browser/Obsidian projection). External
+   channels (e.g. Telegram) expose personal material to third-party servers
+   and must be an explicit owner opt-in per channel — see the Thesis
+   notification-boundary precedent and the mko:// export fence.
+
+Depends on the request_changes→new-draft→diff→re-review loop (already
+queued): a delivered document invites "fix this here", which dead-ends
+without it.
