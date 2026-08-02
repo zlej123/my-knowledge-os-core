@@ -1,0 +1,11 @@
+{
+  "session_id": "mko-review-session-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "card_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "target_decisions": [
+    {
+      "record_id": "personal-source-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "decision": "request_changes",
+      "feedback": "핵심 주장 2의 근거를 본문 수치가 있는 블록으로 교체해 주세요."
+    }
+  ]
+}

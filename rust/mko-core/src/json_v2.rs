@@ -25,6 +25,12 @@ where
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum JsonV2Command {
+    #[serde(rename = "handshake")]
+    Handshake,
+    #[serde(rename = "schema.list")]
+    SchemaList,
+    #[serde(rename = "schema.show")]
+    SchemaShow,
     #[serde(rename = "setup.plan")]
     SetupPlan,
     #[serde(rename = "setup.apply")]
@@ -275,6 +281,38 @@ pub enum NextActionV2 {
     PreserveUserEdit,
     Retry,
     Sync,
+    Reinstall,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandshakeDataV2 {
+    pub cli_version: String,
+    pub skill_version: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SchemaDescriptorV2 {
+    pub name: String,
+    pub purpose: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SchemaListDataV2 {
+    pub schemas: Vec<SchemaDescriptorV2>,
+}
+
+// `schema` and `example` hold arbitrary embedded JSON, so this data (and the
+// success enum carrying it) is PartialEq without Eq.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SchemaShowDataV2 {
+    pub name: String,
+    pub purpose: String,
+    pub schema: serde_json::Value,
+    pub example: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -356,10 +394,31 @@ pub struct JsonV2Error {
     pub details: ErrorDetailsV2,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "command")]
 #[serde(deny_unknown_fields)]
 pub enum JsonV2Success {
+    #[serde(rename = "handshake")]
+    Handshake {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: HandshakeDataV2,
+    },
+    #[serde(rename = "schema.list")]
+    SchemaList {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: SchemaListDataV2,
+    },
+    #[serde(rename = "schema.show")]
+    SchemaShow {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: SchemaShowDataV2,
+    },
     #[serde(rename = "setup.plan")]
     SetupPlan {
         #[serde(deserialize_with = "deserialize_schema_version")]
@@ -440,6 +499,30 @@ pub enum JsonV2Success {
 }
 
 impl JsonV2Success {
+    pub fn handshake(data: HandshakeDataV2) -> Self {
+        Self::Handshake {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
+    pub fn schema_list(data: SchemaListDataV2) -> Self {
+        Self::SchemaList {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
+    pub fn schema_show(data: SchemaShowDataV2) -> Self {
+        Self::SchemaShow {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
     pub fn setup_plan(data: SetupPlanDataV2) -> Self {
         Self::SetupPlan {
             schema_version: 2,

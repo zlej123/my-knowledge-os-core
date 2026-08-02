@@ -96,6 +96,7 @@ pub(crate) fn json_v2_next_action(code: &str) -> NextActionV2 {
         "review_session_expired" | "review_session_consumed" | "review_snapshot_stale" => {
             NextActionV2::Review
         }
+        "skill_version_mismatch" | "schema_not_found" => NextActionV2::Reinstall,
         _ => NextActionV2::None,
     }
 }

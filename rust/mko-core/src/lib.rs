@@ -47,6 +47,7 @@ pub mod revision;
 pub mod revision_v2;
 pub mod safe_yaml;
 pub mod scaffold_v2;
+pub mod schema_v2;
 pub mod secret;
 pub mod setup;
 pub mod setup_plan_v2;

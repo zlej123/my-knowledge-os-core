@@ -512,6 +512,39 @@ fn knowledge_os_skill_is_discoverable_in_korean_and_english() {
 }
 
 #[test]
+fn knowledge_os_skill_pins_the_exact_cli_version_handshake() {
+    let path = knowledge_os_skill_path();
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} must exist and be readable: {error}", path.display()));
+
+    let pinned = format!(
+        "mko handshake --skill-version \"{}\" --format json-v2",
+        mko_core::version::PRODUCT_VERSION
+    );
+    assert!(
+        text.contains(&pinned),
+        "the Skill must pin the handshake to the workspace version; \
+         expected the exact command: {pinned}"
+    );
+    assert_eq!(
+        text.matches("--skill-version").count(),
+        1,
+        "the Skill must declare exactly one handshake version"
+    );
+    for required in [
+        "Before the first `mko` command of a session",
+        "skill_version_mismatch",
+        "stop every",
+        "reinstall the CLI",
+    ] {
+        assert!(
+            text.contains(required),
+            "missing handshake rule: {required}"
+        );
+    }
+}
+
+#[test]
 fn knowledge_os_skill_exposes_only_the_v2_core_workflow() {
     let path = knowledge_os_skill_path();
     let text = std::fs::read_to_string(&path)
@@ -522,6 +555,8 @@ fn knowledge_os_skill_exposes_only_the_v2_core_workflow() {
         "powershell.exe",
         "./scripts/install.sh",
         "mko --version",
+        "mko handshake",
+        "mko schema",
         "mko setup",
         "mko remember",
         "mko queue",
@@ -558,8 +593,9 @@ fn knowledge_os_skill_exposes_only_the_v2_core_workflow() {
         "hydration_confirmation_required",
         "--confirm-download",
         "untrusted_document_content",
-        "schemas/v2/source-response.schema.json",
-        "schemas/v2/knowledge-response.schema.json",
+        "mko schema show source-response-v2 --format json-v2",
+        "mko schema show knowledge-response-v2 --format json-v2",
+        "mko schema show review-feedback-input-v2 --format json-v2",
         "real-TTY only",
     ] {
         assert!(
@@ -575,8 +611,14 @@ fn knowledge_os_skill_references_machine_validated_semantic_contracts() {
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("{} must exist and be readable: {error}", path.display()));
     assert!(json_code_blocks(&text).is_empty());
-    assert!(text.contains("schemas/v2/source-response.schema.json"));
-    assert!(text.contains("schemas/v2/knowledge-response.schema.json"));
+    assert!(
+        !text.contains("schemas/v2/"),
+        "the Skill must not depend on repository schema paths that do not exist on user machines"
+    );
+    assert!(text.contains("mko schema show source-response-v2 --format json-v2"));
+    assert!(text.contains("mko schema show knowledge-response-v2 --format json-v2"));
+    assert!(text.contains("mko schema show review-feedback-input-v2 --format json-v2"));
+    assert!(text.contains("matching the returned schema"));
     assert!(text.contains("Every key claim needs at least one exact"));
     assert!(text.contains("LLM opinion belongs only in `interpretation` or `hypothesis`"));
 }
@@ -595,6 +637,8 @@ fn knowledge_os_skill_defines_the_knowledge_extraction_flow() {
             "powershell.exe",
             "./scripts/install.sh",
             "mko --version",
+            "mko handshake",
+            "mko schema",
             "mko setup",
             "mko remember",
             "mko queue",
