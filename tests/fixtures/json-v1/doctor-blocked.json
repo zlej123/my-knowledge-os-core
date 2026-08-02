@@ -5,7 +5,7 @@
   "data": {
     "healthy": false,
     "checks": [
-      {"code":"product_version","status":"healthy","message":"0.3.3","path":null,"recovery":null},
+      {"code":"product_version","status":"healthy","message":"0.3.4","path":null,"recovery":null},
       {"code":"contract_version","status":"healthy","message":"0.1.0","path":null,"recovery":null},
       {"code":"profile_unreadable","status":"blocked","message":"machine profile could not be read or validated","path":"<PROFILE>","recovery":{"kind":"configure"}},
       {"code":"repository_access","status":"healthy","message":"repository is compatible","path":"<REPOSITORY>","recovery":null},
