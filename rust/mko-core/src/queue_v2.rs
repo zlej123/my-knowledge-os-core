@@ -79,6 +79,11 @@ pub struct ReviewCardTargetV2 {
     /// Knowledge target. Source targets have no domain policy.
     pub domain_policy: Option<DomainPolicyV2>,
     pub previous_approved_revision: Option<String>,
+    pub previous_reviewed_revision: Option<String>,
+    pub current_feedback: Option<String>,
+    /// Feedback the displayed replacement revision claims to address; present
+    /// only in the revised-unreviewed state.
+    pub addressed_feedback: Option<String>,
     pub conflicting_review_head_ids: Vec<String>,
     pub effects: Vec<String>,
 }
@@ -992,6 +997,26 @@ fn render_card(
                         append_json_section(&mut card, &heading, &revision.response)?;
                     }
                 }
+                if target.state == Some(ReviewCardTargetStateV2::RevisedUnreviewed) {
+                    if let Some(feedback) = &history.previous_feedback {
+                        append_json_section(
+                            &mut card,
+                            &format!(
+                                "Feedback addressed by this revision for {}",
+                                target.record_id
+                            ),
+                            feedback,
+                        )?;
+                    }
+                    append_diff_section(
+                        &mut card,
+                        &target.record_id,
+                        previous,
+                        &target.pointer.revision,
+                        &revision_pretty_json(&previous_revision)?,
+                        &revision_pretty_json(&target.revision)?,
+                    );
+                }
             }
         }
         if target.projection_stale {
@@ -1051,12 +1076,19 @@ fn card_target(target: &ScannedTarget) -> ReviewCardTargetV2 {
             displayed_revision: target.pointer.revision.clone(),
             expected_review_head_id: history.derived.review_head_id.clone(),
         },
-        state,
         domain_policy: match &target.revision {
             RevisionV2::Source(_) => None,
             RevisionV2::Knowledge(revision) => Some(revision.domain_policy.clone()),
         },
         previous_approved_revision: history.previous_approved_revision.clone(),
+        previous_reviewed_revision: history.previous_reviewed_revision.clone(),
+        current_feedback: history.current_feedback.clone(),
+        addressed_feedback: if state == ReviewCardTargetStateV2::RevisedUnreviewed {
+            history.previous_feedback.clone()
+        } else {
+            None
+        },
+        state,
         conflicting_review_head_ids: history.derived.conflicting_review_head_ids.clone(),
         effects,
     }
@@ -1125,6 +1157,196 @@ fn read_revision_by_digest(
         ));
     }
     Ok(parsed)
+}
+
+const MAX_DIFF_SECTION_BYTES: usize = 256 * 1024;
+const MAX_DIFF_LCS_LINES: usize = 512;
+const DIFF_CONTEXT_LINES: usize = 3;
+const DIFF_KEEP_COLLAPSE_THRESHOLD: usize = 2 * DIFF_CONTEXT_LINES + 1;
+
+enum DiffOpV2<'a> {
+    Keep(&'a str),
+    Remove(&'a str),
+    Add(&'a str),
+}
+
+/// Deterministic, dependency-free, line-based diff for the re-review card.
+///
+/// Common prefix and suffix lines are trimmed first; the remaining middle is
+/// diffed exactly (LCS) when both sides fit `MAX_DIFF_LCS_LINES`, and emitted
+/// as one remove-then-add block otherwise. Long unchanged runs collapse to a
+/// count marker and the whole section is byte-bounded, so the card limit can
+/// never be reached through a pathological revision pair.
+pub(crate) fn bounded_revision_diff(previous: &str, current: &str) -> String {
+    let previous_lines: Vec<&str> = previous.lines().collect();
+    let current_lines: Vec<&str> = current.lines().collect();
+    let mut prefix = 0;
+    while prefix < previous_lines.len()
+        && prefix < current_lines.len()
+        && previous_lines[prefix] == current_lines[prefix]
+    {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < previous_lines.len() - prefix
+        && suffix < current_lines.len() - prefix
+        && previous_lines[previous_lines.len() - 1 - suffix]
+            == current_lines[current_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let removed = &previous_lines[prefix..previous_lines.len() - suffix];
+    let added = &current_lines[prefix..current_lines.len() - suffix];
+    if removed.is_empty() && added.is_empty() {
+        return "No line-level changes.\n".into();
+    }
+
+    let middle = if removed.len() <= MAX_DIFF_LCS_LINES && added.len() <= MAX_DIFF_LCS_LINES {
+        lcs_diff_ops(removed, added)
+    } else {
+        removed
+            .iter()
+            .map(|line| DiffOpV2::Remove(line))
+            .chain(added.iter().map(|line| DiffOpV2::Add(line)))
+            .collect()
+    };
+
+    let mut lines = Vec::new();
+    for line in &previous_lines[prefix.saturating_sub(DIFF_CONTEXT_LINES)..prefix] {
+        lines.push(format!(" {line}"));
+    }
+    let mut index = 0;
+    while index < middle.len() {
+        match &middle[index] {
+            DiffOpV2::Keep(_) => {
+                let run_start = index;
+                while index < middle.len() && matches!(middle[index], DiffOpV2::Keep(_)) {
+                    index += 1;
+                }
+                let run = &middle[run_start..index];
+                if run.len() > DIFF_KEEP_COLLAPSE_THRESHOLD {
+                    for op in &run[..DIFF_CONTEXT_LINES] {
+                        if let DiffOpV2::Keep(line) = op {
+                            lines.push(format!(" {line}"));
+                        }
+                    }
+                    lines.push(format!(
+                        "… {} unchanged lines …",
+                        run.len() - 2 * DIFF_CONTEXT_LINES
+                    ));
+                    for op in &run[run.len() - DIFF_CONTEXT_LINES..] {
+                        if let DiffOpV2::Keep(line) = op {
+                            lines.push(format!(" {line}"));
+                        }
+                    }
+                } else {
+                    for op in run {
+                        if let DiffOpV2::Keep(line) = op {
+                            lines.push(format!(" {line}"));
+                        }
+                    }
+                }
+            }
+            DiffOpV2::Remove(line) => {
+                lines.push(format!("-{line}"));
+                index += 1;
+            }
+            DiffOpV2::Add(line) => {
+                lines.push(format!("+{line}"));
+                index += 1;
+            }
+        }
+    }
+    let after_start = previous_lines.len() - suffix;
+    for line in
+        &previous_lines[after_start..(after_start + DIFF_CONTEXT_LINES).min(previous_lines.len())]
+    {
+        lines.push(format!(" {line}"));
+    }
+
+    let total = lines.len();
+    let mut output = String::new();
+    for (shown, line) in lines.iter().enumerate() {
+        if output.len() + line.len() + 1 > MAX_DIFF_SECTION_BYTES {
+            output.push_str(&format!(
+                "… diff truncated: {shown} of {total} lines shown …\n"
+            ));
+            return output;
+        }
+        output.push_str(line);
+        output.push('\n');
+    }
+    output
+}
+
+fn lcs_diff_ops<'a>(removed: &[&'a str], added: &[&'a str]) -> Vec<DiffOpV2<'a>> {
+    let rows = removed.len();
+    let columns = added.len();
+    let width = columns + 1;
+    let mut table = vec![0u16; (rows + 1) * width];
+    for i in (0..rows).rev() {
+        for j in (0..columns).rev() {
+            table[i * width + j] = if removed[i] == added[j] {
+                table[(i + 1) * width + j + 1] + 1
+            } else {
+                table[(i + 1) * width + j].max(table[i * width + j + 1])
+            };
+        }
+    }
+    let mut ops = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < rows && j < columns {
+        if removed[i] == added[j] {
+            ops.push(DiffOpV2::Keep(removed[i]));
+            i += 1;
+            j += 1;
+        } else if table[(i + 1) * width + j] >= table[i * width + j + 1] {
+            ops.push(DiffOpV2::Remove(removed[i]));
+            i += 1;
+        } else {
+            ops.push(DiffOpV2::Add(added[j]));
+            j += 1;
+        }
+    }
+    while i < rows {
+        ops.push(DiffOpV2::Remove(removed[i]));
+        i += 1;
+    }
+    while j < columns {
+        ops.push(DiffOpV2::Add(added[j]));
+        j += 1;
+    }
+    ops
+}
+
+fn revision_pretty_json(revision: &RevisionV2) -> Result<String, MkoError> {
+    match revision {
+        RevisionV2::Source(revision) => serde_json::to_string_pretty(&revision.response),
+        RevisionV2::Knowledge(revision) => serde_json::to_string_pretty(&revision.response),
+    }
+    .map_err(|error| MkoError::new("review_card_invalid", error.to_string()))
+}
+
+fn append_diff_section(
+    card: &mut String,
+    record_id: &str,
+    previous_digest: &str,
+    current_digest: &str,
+    previous_json: &str,
+    current_json: &str,
+) {
+    card.push_str(&format!(
+        "\n## Changes since the reviewed revision for {record_id}\n\n"
+    ));
+    let body = format!(
+        "--- reviewed {previous_digest}\n+++ current {current_digest}\n{}",
+        bounded_revision_diff(previous_json, current_json)
+    );
+    for line in body.lines() {
+        card.push_str("    ");
+        card.push_str(line);
+        card.push('\n');
+    }
 }
 
 fn append_json_section<T: Serialize>(
@@ -1375,6 +1597,67 @@ mod tests {
         model_v2::{KnowledgeResponseV2, KnowledgeUnitV2},
         records_v2::{EvidenceBasisV2, KnowledgeRevisionRecordTypeV2},
     };
+
+    #[test]
+    fn revision_diff_marks_changed_lines_with_context() {
+        let previous = "a\nb\nc\nd\ne";
+        let current = "a\nb\nC\nd\ne";
+
+        let diff = bounded_revision_diff(previous, current);
+
+        assert_eq!(diff, " a\n b\n-c\n+C\n d\n e\n");
+    }
+
+    #[test]
+    fn revision_diff_keeps_interleaved_changes_exact() {
+        let previous = "one\ntwo\nthree\nfour";
+        let current = "one\ntwo changed\nthree\nfive";
+
+        let diff = bounded_revision_diff(previous, current);
+
+        assert_eq!(diff, " one\n-two\n+two changed\n three\n-four\n+five\n");
+    }
+
+    #[test]
+    fn revision_diff_collapses_long_unchanged_runs() {
+        let unchanged = (0..40).map(|i| format!("line {i}")).collect::<Vec<_>>();
+        let previous = format!("start old\n{}\nend old", unchanged.join("\n"));
+        let current = format!("start new\n{}\nend new", unchanged.join("\n"));
+
+        let diff = bounded_revision_diff(&previous, &current);
+
+        assert!(diff.contains("-start old\n+start new\n"));
+        assert!(diff.contains("… 34 unchanged lines …"));
+        assert!(diff.contains("-end old\n+end new\n"));
+        assert!(!diff.contains("line 20"));
+    }
+
+    #[test]
+    fn revision_diff_is_deterministic_and_byte_bounded() {
+        let previous = (0..2_000)
+            .map(|i| format!("previous unique line {i} {}", "x".repeat(200)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let current = (0..2_000)
+            .map(|i| format!("current unique line {i} {}", "y".repeat(200)))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let first = bounded_revision_diff(&previous, &current);
+        let second = bounded_revision_diff(&previous, &current);
+
+        assert_eq!(first, second);
+        assert!(first.len() <= MAX_DIFF_SECTION_BYTES + 128);
+        assert!(first.contains("… diff truncated:"));
+    }
+
+    #[test]
+    fn identical_middles_report_no_line_changes() {
+        assert_eq!(
+            bounded_revision_diff("same", "same"),
+            "No line-level changes.\n"
+        );
+    }
 
     #[test]
     fn high_risk_policy_gate_requires_counterargument_and_open_question() {
