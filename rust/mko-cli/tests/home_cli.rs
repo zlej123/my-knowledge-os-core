@@ -175,6 +175,76 @@ mod macos {
     }
 
     #[allow(deprecated)]
+    /// A record whose generated projection is gone: Core reports it blocked and
+    /// wanting diagnosis, which is the state this guidance has to notice.
+    fn seed_blocked_record(repository: &Path) {
+        let provider = repository.parent().unwrap().join("seed-inbox");
+        fs::create_dir_all(&provider).unwrap();
+        fs::write(provider.join("paper.pdf"), b"%PDF-1.7\nfixture").unwrap();
+        let asset =
+            mko_core::asset_v2::register_pdf_asset_v2(mko_core::asset_v2::RegisterAssetRequestV2 {
+                repository_root: repository,
+                provider_root: &provider,
+                logical_locator: "paper.pdf",
+                hydration_confirmation: mko_core::asset_v2::HydrationConfirmationV2::NotConfirmed,
+            })
+            .unwrap()
+            .asset;
+        let bundle = mko_core::prepared_v2::build_pdf_prepared_content_v2(
+            &asset,
+            &["Evidence text for the test.".into()],
+            mko_core::model_v2::PreparedMetadataV2 {
+                title: Some("Seeded paper".into()),
+                authors: Vec::new(),
+                created_at: None,
+            },
+        )
+        .unwrap();
+        let evidence = mko_core::model_v2::EvidenceRefV2 {
+            block_id: "block-000001".into(),
+            locator: "page:1;chunk:1;granularity:coarse".into(),
+            text_span_utf8: None,
+            table_range: None,
+        };
+        let response = mko_core::model_v2::SourceResponseV2 {
+            schema_version: 2,
+            title: "Seeded paper".into(),
+            authors: Vec::new(),
+            publication_date: None,
+            one_sentence_summary: "A bounded summary.".into(),
+            general_summary: "A grounded general summary.".into(),
+            key_claims: vec![mko_core::model_v2::SourceClaimV2 {
+                text: "The evidence text exists.".into(),
+                evidence_refs: vec![evidence],
+            }],
+            limitations: Vec::new(),
+            tags: Vec::new(),
+            knowledge_recommendation: mko_core::model_v2::KnowledgeRecommendationV2 {
+                outcome: mko_core::model_v2::KnowledgeRecommendationOutcomeV2::Recommend,
+                reasons: vec!["Reusable concept.".into()],
+            },
+        };
+        let written = mko_core::records_v2::write_source_record_v2(
+            mko_core::records_v2::WriteSourceRecordRequestV2 {
+                repository_root: repository,
+                asset: &asset,
+                bundle: &bundle,
+                response: &response,
+                expected_revision: None,
+            },
+            &mko_core::clock::SystemClock,
+        )
+        .unwrap();
+        fs::remove_file(repository.join(
+            mko_core::projection_v2::record_projection_relative_path_v2(
+                mko_core::projection_v2::ProjectionRecordTypeV2::Source,
+                &written.record_id,
+            ),
+        ))
+        .unwrap();
+    }
+
+    #[allow(deprecated)]
     fn run_home_and_quit(repository: &Path, provider: &Path, home: &Path) -> std::process::Output {
         let script = "set timeout 10\nset bin $env(MKO_TEST_BIN)\nspawn -noecho $bin\nexpect {\n  \"선택 ›\" { send -- \"q\\r\"; exp_continue }\n  eof {}\n}\nset status [wait]\nexit [lindex $status 3]\n";
         Command::new("/usr/bin/expect")
@@ -261,6 +331,39 @@ mod macos {
         assert!(
             screen.contains("`mko`"),
             "the owner needs somewhere to go: {screen}"
+        );
+    }
+
+    // A blocked item is waiting on the owner more urgently than an unreviewed
+    // one: it needs diagnosis. Telling them to go organize new material while
+    // something is stuck is the dead end this guidance exists to remove.
+    #[test]
+    #[allow(deprecated)]
+    fn an_empty_search_names_material_that_is_stuck() {
+        let root = tempdir().unwrap();
+        let repository = root.path().join("v3-kb");
+        let provider = root.path().join("provider");
+        scaffold_personal_kb_v2(&repository).unwrap();
+        fs::create_dir(&provider).unwrap();
+        seed_blocked_record(&repository);
+
+        let output = Command::new(assert_cmd::cargo::cargo_bin("mko"))
+            .args(["find", "sampling"])
+            .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+            .env("HOME", root.path())
+            .current_dir(&repository)
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        let screen = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            screen.contains("문제가 있어 멈춘 항목이 1개 있습니다."),
+            "stuck material must be named: {screen}"
+        );
+        assert!(
+            !screen.contains("새 자료를 정리하는 것부터"),
+            "do not send the owner elsewhere while something is stuck: {screen}"
         );
     }
 }

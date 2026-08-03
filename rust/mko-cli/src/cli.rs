@@ -1050,7 +1050,14 @@ fn report_search_dead_end(repository: &Path) {
     if waiting > 0 {
         println!("검토를 기다리는 항목이 {waiting}개 있습니다.");
         println!("`mko`를 열어 검토를 계속하면 검색에도 나타납니다.");
-    } else if summary.approved_knowledge == 0 {
+    }
+    // Blocked material is waiting on the owner too, and more urgently: it needs
+    // diagnosis, not review. Telling someone to start organizing new material
+    // while an item sits stuck is the dead end this message exists to remove.
+    if summary.blocked > 0 {
+        println!("문제가 있어 멈춘 항목이 {}개 있습니다.", summary.blocked);
+        println!("`mko`를 열어 문제를 확인하면 다시 진행할 수 있습니다.");
+    } else if waiting == 0 && summary.approved_knowledge == 0 {
         println!("`mko`를 열어 새 자료를 정리하는 것부터 시작할 수 있습니다.");
     }
 }
