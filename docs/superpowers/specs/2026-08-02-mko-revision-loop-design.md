@@ -1,7 +1,8 @@
 # My Knowledge OS — Revision Loop Completion Design
 
 Date: 2026-08-02
-Status: Proposed; implementation follows owner review of the decision points in §6
+Status: Accepted and implemented 2026-08-02 with the recommended options (D1 extend `show`,
+D2 semantic-JSON diff, D3 content-only guard); the recorded live E2E remains the merge gate
 Applies to: `mko` after 0.3.1 (PR #7: version handshake, embedded schema surface)
 Extends: `2026-07-22-v0.3-knowledge-ux-design.md`
 Responds to: usability finding 2 in `docs/BACKLOG.md` ("Revision-request loop is not closed

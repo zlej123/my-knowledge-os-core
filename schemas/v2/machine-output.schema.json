@@ -3,22 +3,54 @@
   "$id": "https://my-knowledge-os.local/schemas/v2/machine-output.schema.json",
   "title": "My Knowledge OS machine envelope v2",
   "oneOf": [
-    { "$ref": "#/$defs/handshake_success" },
-    { "$ref": "#/$defs/schema_list_success" },
-    { "$ref": "#/$defs/schema_show_success" },
-    { "$ref": "#/$defs/setup_plan_success" },
-    { "$ref": "#/$defs/setup_apply_success" },
-    { "$ref": "#/$defs/add_success" },
-    { "$ref": "#/$defs/source_prepare_success" },
-    { "$ref": "#/$defs/source_write_success" },
-    { "$ref": "#/$defs/knowledge_write_success" },
-    { "$ref": "#/$defs/queue_success" },
-    { "$ref": "#/$defs/show_success" },
-    { "$ref": "#/$defs/review_open_success" },
-    { "$ref": "#/$defs/review_feedback_success" },
-    { "$ref": "#/$defs/dashboard_success" },
-    { "$ref": "#/$defs/doctor_success" },
-    { "$ref": "#/$defs/failure" }
+    {
+      "$ref": "#/$defs/handshake_success"
+    },
+    {
+      "$ref": "#/$defs/schema_list_success"
+    },
+    {
+      "$ref": "#/$defs/schema_show_success"
+    },
+    {
+      "$ref": "#/$defs/setup_plan_success"
+    },
+    {
+      "$ref": "#/$defs/setup_apply_success"
+    },
+    {
+      "$ref": "#/$defs/add_success"
+    },
+    {
+      "$ref": "#/$defs/source_prepare_success"
+    },
+    {
+      "$ref": "#/$defs/source_write_success"
+    },
+    {
+      "$ref": "#/$defs/knowledge_write_success"
+    },
+    {
+      "$ref": "#/$defs/queue_success"
+    },
+    {
+      "$ref": "#/$defs/show_success"
+    },
+    {
+      "$ref": "#/$defs/review_open_success"
+    },
+    {
+      "$ref": "#/$defs/review_feedback_success"
+    },
+    {
+      "$ref": "#/$defs/dashboard_success"
+    },
+    {
+      "$ref": "#/$defs/doctor_success"
+    },
+    {
+      "$ref": "#/$defs/failure"
+    }
   ],
   "$defs": {
     "command": {
@@ -63,76 +95,158 @@
     "handshake_data": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cli_version", "skill_version"],
+      "required": [
+        "cli_version",
+        "skill_version"
+      ],
       "properties": {
-        "cli_version": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "skill_version": { "type": "string", "minLength": 1, "maxLength": 256 }
+        "cli_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "skill_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
       }
     },
     "handshake_success": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "command", "result", "data"],
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
       "properties": {
-        "schema_version": { "const": 2 },
-        "command": { "const": "handshake" },
-        "result": { "const": "ok" },
-        "data": { "$ref": "#/$defs/handshake_data" }
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "handshake"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/handshake_data"
+        }
       }
     },
     "schema_descriptor": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "purpose"],
+      "required": [
+        "name",
+        "purpose"
+      ],
       "properties": {
-        "name": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "purpose": { "type": "string", "minLength": 1, "maxLength": 1024 }
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "purpose": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
       }
     },
     "schema_list_data": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schemas"],
+      "required": [
+        "schemas"
+      ],
       "properties": {
         "schemas": {
           "type": "array",
           "minItems": 1,
           "maxItems": 64,
-          "items": { "$ref": "#/$defs/schema_descriptor" }
+          "items": {
+            "$ref": "#/$defs/schema_descriptor"
+          }
         }
       }
     },
     "schema_list_success": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "command", "result", "data"],
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
       "properties": {
-        "schema_version": { "const": 2 },
-        "command": { "const": "schema.list" },
-        "result": { "const": "ok" },
-        "data": { "$ref": "#/$defs/schema_list_data" }
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "schema.list"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/schema_list_data"
+        }
       }
     },
     "schema_show_data": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "purpose", "schema", "example"],
+      "required": [
+        "name",
+        "purpose",
+        "schema",
+        "example"
+      ],
       "properties": {
-        "name": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "purpose": { "type": "string", "minLength": 1, "maxLength": 1024 },
-        "schema": { "type": "object" },
-        "example": { "type": "object" }
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "purpose": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "schema": {
+          "type": "object"
+        },
+        "example": {
+          "type": "object"
+        }
       }
     },
     "schema_show_success": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "command", "result", "data"],
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
       "properties": {
-        "schema_version": { "const": 2 },
-        "command": { "const": "schema.show" },
-        "result": { "const": "ok" },
-        "data": { "$ref": "#/$defs/schema_show_data" }
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "schema.show"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/schema_show_data"
+        }
       }
     },
     "empty_object": {
@@ -153,15 +267,33 @@
         "next_action"
       ],
       "properties": {
-        "item_id": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "item_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
         "target_ids": {
           "type": "array",
           "minItems": 1,
           "maxItems": 2,
-          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
         },
-        "title": { "type": "string", "minLength": 1, "maxLength": 4096 },
-        "item_type": { "enum": ["source", "knowledge", "combined"] },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "item_type": {
+          "enum": [
+            "source",
+            "knowledge",
+            "combined"
+          ]
+        },
         "state": {
           "enum": [
             "unreviewed",
@@ -175,107 +307,152 @@
           "type": "array",
           "minItems": 1,
           "maxItems": 2,
-          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
         },
-        "next_action": { "enum": ["display", "regenerate", "diagnose"] }
+        "next_action": {
+          "enum": [
+            "display",
+            "regenerate",
+            "diagnose"
+          ]
+        }
       }
     },
     "add_single_data": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["asset_id", "outcome", "registry_path", "logical_locator"],
+      "required": [
+        "asset_id",
+        "outcome",
+        "registry_path",
+        "logical_locator"
+      ],
       "properties": {
         "asset_id": {
           "type": "string",
           "pattern": "^personal-asset-[0-9a-f]{64}$"
         },
-        "outcome": { "enum": ["created", "existing"] },
-        "registry_path": { "type": "string", "minLength": 1, "maxLength": 32768 },
-        "logical_locator": { "type": "string", "minLength": 1, "maxLength": 32768 }
+        "outcome": {
+          "enum": [
+            "created",
+            "existing"
+          ]
+        },
+        "registry_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32768
+        },
+        "logical_locator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32768
+        }
       }
     },
     "add_batch_item_error": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["code", "message", "next_action"],
+      "required": [
+        "code",
+        "message",
+        "next_action"
+      ],
       "properties": {
-        "code": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "message": { "type": "string", "minLength": 1, "maxLength": 65536 },
-        "next_action": { "$ref": "#/$defs/next_action" }
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "next_action": {
+          "$ref": "#/$defs/next_action"
+        }
       }
     },
     "add_batch_item": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["logical_locator", "asset_id", "outcome", "error"],
+      "required": [
+        "logical_locator",
+        "asset_id",
+        "outcome",
+        "error"
+      ],
       "properties": {
-        "logical_locator": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "logical_locator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32768
+        },
         "asset_id": {
           "anyOf": [
-            { "type": "string", "pattern": "^personal-asset-[0-9a-f]{64}$" },
-            { "type": "null" }
+            {
+              "type": "string",
+              "pattern": "^personal-asset-[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "outcome": {
-          "anyOf": [{ "enum": ["created", "existing"] }, { "type": "null" }]
+          "anyOf": [
+            {
+              "enum": [
+                "created",
+                "existing"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
-        "doctor_check": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["code", "status", "message", "path", "next_action"],
-      "properties": {
-        "code": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "status": { "enum": ["healthy", "warning", "blocked"] },
-        "message": { "type": "string", "maxLength": 4096 },
-        "path": { "type": ["string", "null"], "maxLength": 4096 },
-        "next_action": {
-          "anyOf": [{ "$ref": "#/$defs/next_action" }, { "type": "null" }]
-        }
-      }
-    },
-    "doctor_data": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["healthy", "checks", "next_action"],
-      "properties": {
-        "healthy": { "type": "boolean" },
-        "checks": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 256,
-          "items": { "$ref": "#/$defs/doctor_check" }
-        },
-        "next_action": { "$ref": "#/$defs/next_action" }
-      }
-    },
-    "doctor_success": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["schema_version", "command", "result", "data"],
-      "properties": {
-        "schema_version": { "const": 2 },
-        "command": { "const": "doctor" },
-        "result": { "const": "ok" },
-        "data": { "$ref": "#/$defs/doctor_data" }
-      }
-    },
-    "error": {
-          "anyOf": [{ "$ref": "#/$defs/add_batch_item_error" }, { "type": "null" }]
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/add_batch_item_error"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "oneOf": [
         {
           "properties": {
-            "asset_id": { "type": "string" },
-            "outcome": { "type": "string" },
-            "error": { "type": "null" }
+            "asset_id": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string"
+            },
+            "error": {
+              "type": "null"
+            }
           }
         },
         {
           "properties": {
-            "asset_id": { "type": "null" },
-            "outcome": { "type": "null" },
-            "error": { "type": "object" }
+            "asset_id": {
+              "type": "null"
+            },
+            "outcome": {
+              "type": "null"
+            },
+            "error": {
+              "type": "object"
+            }
           }
         }
       ]
@@ -283,36 +460,72 @@
     "add_batch_warning": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["code", "message", "logical_locator"],
+      "required": [
+        "code",
+        "message",
+        "logical_locator"
+      ],
       "properties": {
-        "code": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "message": { "type": "string", "minLength": 1, "maxLength": 65536 },
-        "logical_locator": { "type": ["string", "null"], "maxLength": 32768 }
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "logical_locator": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 32768
+        }
       }
     },
     "add_batch_data": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["items", "scan_complete", "remaining", "warnings"],
+      "required": [
+        "items",
+        "scan_complete",
+        "remaining",
+        "warnings"
+      ],
       "properties": {
         "items": {
           "type": "array",
           "maxItems": 20,
-          "items": { "$ref": "#/$defs/add_batch_item" }
+          "items": {
+            "$ref": "#/$defs/add_batch_item"
+          }
         },
-        "scan_complete": { "type": "boolean" },
-        "remaining": { "type": "integer", "minimum": 0 },
+        "scan_complete": {
+          "type": "boolean"
+        },
+        "remaining": {
+          "type": "integer",
+          "minimum": 0
+        },
         "warnings": {
           "type": "array",
           "maxItems": 4096,
-          "items": { "$ref": "#/$defs/add_batch_warning" }
+          "items": {
+            "$ref": "#/$defs/add_batch_warning"
+          }
         }
       }
     },
     "add_data": {
       "oneOf": [
-        { "$ref": "#/$defs/add_single_data" },
-        { "$ref": "#/$defs/add_batch_data" }
+        {
+          "$ref": "#/$defs/add_single_data"
+        },
+        {
+          "$ref": "#/$defs/add_batch_data"
+        }
       ]
     },
     "source_prepare_data": {
@@ -338,8 +551,17 @@
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{64}$"
         },
-        "bundle_path": { "type": "string", "minLength": 1, "maxLength": 32768 },
-        "outcome": { "enum": ["created", "existing"] }
+        "bundle_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32768
+        },
+        "outcome": {
+          "enum": [
+            "created",
+            "existing"
+          ]
+        }
       }
     },
     "record_write_data": {
@@ -362,36 +584,92 @@
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{64}$"
         },
-        "revision_path": { "type": "string", "minLength": 1, "maxLength": 32768 },
-        "current_path": { "type": "string", "minLength": 1, "maxLength": 32768 },
-        "outcome": { "enum": ["created", "existing", "replaced"] },
-        "projection_state": { "enum": ["current", "repair_required", "stale"] }
+        "revision_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32768
+        },
+        "current_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32768
+        },
+        "outcome": {
+          "enum": [
+            "created",
+            "existing",
+            "replaced"
+          ]
+        },
+        "projection_state": {
+          "enum": [
+            "current",
+            "repair_required",
+            "stale"
+          ]
+        }
       }
     },
     "queue_data": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["items", "scan_complete", "remaining", "next_cursor"],
+      "required": [
+        "items",
+        "scan_complete",
+        "remaining",
+        "next_cursor"
+      ],
       "properties": {
         "items": {
           "type": "array",
           "maxItems": 10000,
-          "items": { "$ref": "#/$defs/queue_item" }
+          "items": {
+            "$ref": "#/$defs/queue_item"
+          }
         },
-        "scan_complete": { "type": "boolean" },
-        "remaining": { "type": "integer", "minimum": 0 },
-        "next_cursor": { "type": ["string", "null"], "maxLength": 4096 }
+        "scan_complete": {
+          "type": "boolean"
+        },
+        "remaining": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 4096
+        }
       }
     },
     "show_target": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["record_id", "displayed_revision", "review_head_id", "state"],
+      "required": [
+        "record_id",
+        "displayed_revision",
+        "review_head_id",
+        "state",
+        "current_feedback",
+        "addressed_feedback",
+        "previous_reviewed_revision"
+      ],
       "properties": {
-        "record_id": { "type": "string", "minLength": 1, "maxLength": 4096 },
-        "displayed_revision": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "record_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "displayed_revision": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
         "review_head_id": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "maxLength": 4096
         },
         "state": {
@@ -403,6 +681,31 @@
             "approved",
             "blocked"
           ]
+        },
+        "current_feedback": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 262144
+        },
+        "addressed_feedback": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 262144
+        },
+        "previous_reviewed_revision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -411,33 +714,78 @@
       "additionalProperties": false,
       "required": [
         "item_id",
+        "asset_id",
         "card_markdown",
         "card_digest",
         "effect_digest",
         "targets"
       ],
       "properties": {
-        "item_id": { "type": "string", "minLength": 1, "maxLength": 4096 },
-        "card_markdown": { "type": "string", "minLength": 1, "maxLength": 67108864 },
-        "card_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-        "effect_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "item_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "asset_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "card_markdown": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 67108864
+        },
+        "card_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "effect_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
         "targets": {
           "type": "array",
           "minItems": 1,
           "maxItems": 2,
-          "items": { "$ref": "#/$defs/show_target" }
+          "items": {
+            "$ref": "#/$defs/show_target"
+          }
         }
       }
     },
     "review_session_target": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["record_type", "record_id", "displayed_revision", "review_head_id"],
+      "required": [
+        "record_type",
+        "record_id",
+        "displayed_revision",
+        "review_head_id"
+      ],
       "properties": {
-        "record_type": { "enum": ["source", "knowledge"] },
-        "record_id": { "type": "string", "minLength": 1, "maxLength": 4096 },
-        "displayed_revision": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-        "review_head_id": { "type": ["string", "null"], "maxLength": 4096 }
+        "record_type": {
+          "enum": [
+            "source",
+            "knowledge"
+          ]
+        },
+        "record_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "displayed_revision": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "review_head_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 4096
+        }
       }
     },
     "review_open_data": {
@@ -458,46 +806,102 @@
           "type": "string",
           "pattern": "^mko-review-session-[0-9a-f]{64}$"
         },
-        "expires_at": { "type": "string", "format": "date-time" },
-        "single_use": { "const": true },
-        "card_markdown": { "type": "string", "minLength": 1, "maxLength": 67108864 },
-        "card_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-        "effect_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "single_use": {
+          "const": true
+        },
+        "card_markdown": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 67108864
+        },
+        "card_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "effect_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
         "targets": {
           "type": "array",
           "minItems": 1,
           "maxItems": 2,
-          "items": { "$ref": "#/$defs/review_session_target" }
+          "items": {
+            "$ref": "#/$defs/review_session_target"
+          }
         },
-        "approval_mode": { "const": "tty" }
+        "approval_mode": {
+          "const": "tty"
+        }
       }
     },
     "review_feedback_data": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["review_id", "target_ids"],
+      "required": [
+        "review_id",
+        "target_ids"
+      ],
       "properties": {
-        "review_id": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "review_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
         "target_ids": {
           "type": "array",
           "minItems": 1,
           "maxItems": 2,
-          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
         }
       }
     },
     "dashboard_file": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "kind", "manifest_owned", "state", "next_action"],
+      "required": [
+        "path",
+        "kind",
+        "manifest_owned",
+        "state",
+        "next_action"
+      ],
       "properties": {
-        "path": { "type": "string", "minLength": 1, "maxLength": 32768 },
-        "kind": { "enum": ["view_definition", "record_projection"] },
-        "manifest_owned": { "type": "boolean" },
-        "state": {
-          "enum": ["current", "missing", "stale", "user_modified", "unowned", "orphaned"]
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32768
         },
-        "next_action": { "$ref": "#/$defs/next_action" }
+        "kind": {
+          "enum": [
+            "view_definition",
+            "record_projection"
+          ]
+        },
+        "manifest_owned": {
+          "type": "boolean"
+        },
+        "state": {
+          "enum": [
+            "current",
+            "missing",
+            "stale",
+            "user_modified",
+            "unowned",
+            "orphaned"
+          ]
+        },
+        "next_action": {
+          "$ref": "#/$defs/next_action"
+        }
       }
     },
     "dashboard_data": {
@@ -514,31 +918,80 @@
         "next_cursor"
       ],
       "properties": {
-        "canonical_state": { "enum": ["ready", "blocked"] },
-        "projection_state": { "enum": ["current", "repair_required"] },
-        "manifest_owned_drift": { "type": "boolean" },
-        "next_action": { "$ref": "#/$defs/next_action" },
+        "canonical_state": {
+          "enum": [
+            "ready",
+            "blocked"
+          ]
+        },
+        "projection_state": {
+          "enum": [
+            "current",
+            "repair_required"
+          ]
+        },
+        "manifest_owned_drift": {
+          "type": "boolean"
+        },
+        "next_action": {
+          "$ref": "#/$defs/next_action"
+        },
         "items": {
           "type": "array",
           "maxItems": 10000,
-          "items": { "$ref": "#/$defs/dashboard_file" }
+          "items": {
+            "$ref": "#/$defs/dashboard_file"
+          }
         },
-        "scan_complete": { "type": "boolean" },
-        "remaining": { "type": "integer", "minimum": 0 },
-        "next_cursor": { "type": ["string", "null"], "maxLength": 4096 }
+        "scan_complete": {
+          "type": "boolean"
+        },
+        "remaining": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 4096
+        }
       }
     },
     "setup_plan_step": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["step_id", "effect", "destination", "requires_human_approval"],
+      "required": [
+        "step_id",
+        "effect",
+        "destination",
+        "requires_human_approval"
+      ],
       "properties": {
         "step_id": {
-          "enum": ["scaffold_repository", "ensure_provider_inbox", "ensure_dashboard", "configure_profile"]
+          "enum": [
+            "scaffold_repository",
+            "ensure_provider_inbox",
+            "ensure_dashboard",
+            "configure_profile"
+          ]
         },
-        "effect": { "enum": ["read", "create", "modify"] },
-        "destination": { "type": "string", "minLength": 1, "maxLength": 4096 },
-        "requires_human_approval": { "type": "boolean" }
+        "effect": {
+          "enum": [
+            "read",
+            "create",
+            "modify"
+          ]
+        },
+        "destination": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "requires_human_approval": {
+          "type": "boolean"
+        }
       }
     },
     "setup_plan_data": {
@@ -555,214 +1008,486 @@
         "next_action"
       ],
       "properties": {
-        "plan_id": { "type": "string", "pattern": "^mko-setup-plan-[0-9a-f]{64}$" },
-        "expires_at": { "type": "string", "format": "date-time" },
-        "single_use": { "const": true },
-        "precondition_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-        "effect_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "plan_id": {
+          "type": "string",
+          "pattern": "^mko-setup-plan-[0-9a-f]{64}$"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "single_use": {
+          "const": true
+        },
+        "precondition_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "effect_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
         "steps": {
           "type": "array",
           "minItems": 4,
           "maxItems": 4,
-          "items": { "$ref": "#/$defs/setup_plan_step" }
+          "items": {
+            "$ref": "#/$defs/setup_plan_step"
+          }
         },
-        "approval_mode": { "const": "tty" },
-        "next_action": { "enum": ["approve_plan", "none"] }
+        "approval_mode": {
+          "const": "tty"
+        },
+        "next_action": {
+          "enum": [
+            "approve_plan",
+            "none"
+          ]
+        }
       }
     },
     "setup_apply_data": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["plan_id", "repository_root", "provider_root", "profile_changed"],
+      "required": [
+        "plan_id",
+        "repository_root",
+        "provider_root",
+        "profile_changed"
+      ],
       "properties": {
-        "plan_id": { "type": "string", "pattern": "^mko-setup-plan-[0-9a-f]{64}$" },
-        "repository_root": { "type": "string", "minLength": 1, "maxLength": 32768 },
-        "provider_root": { "type": "string", "minLength": 1, "maxLength": 32768 },
-        "profile_changed": { "type": "boolean" }
+        "plan_id": {
+          "type": "string",
+          "pattern": "^mko-setup-plan-[0-9a-f]{64}$"
+        },
+        "repository_root": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32768
+        },
+        "provider_root": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32768
+        },
+        "profile_changed": {
+          "type": "boolean"
+        }
       }
     },
     "error": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["code", "message", "retryable", "next_action", "details"],
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "next_action",
+        "details"
+      ],
       "properties": {
-        "code": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "message": { "type": "string", "minLength": 1, "maxLength": 65536 },
-        "retryable": { "type": "boolean" },
-        "next_action": { "$ref": "#/$defs/next_action" },
-        "details": { "$ref": "#/$defs/empty_object" }
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "next_action": {
+          "$ref": "#/$defs/next_action"
+        },
+        "details": {
+          "$ref": "#/$defs/empty_object"
+        }
       }
     },
     "add_success": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "command", "result", "data"],
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
       "properties": {
-        "schema_version": { "const": 2 },
-        "command": { "const": "add" },
-        "result": { "const": "ok" },
-        "data": { "$ref": "#/$defs/add_data" }
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "add"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/add_data"
+        }
       }
     },
     "setup_plan_success": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "command", "result", "data"],
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
       "properties": {
-        "schema_version": { "const": 2 },
-        "command": { "const": "setup.plan" },
-        "result": { "const": "ok" },
-        "data": { "$ref": "#/$defs/setup_plan_data" }
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "setup.plan"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/setup_plan_data"
+        }
       }
     },
     "setup_apply_success": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "command", "result", "data"],
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
       "properties": {
-        "schema_version": { "const": 2 },
-        "command": { "const": "setup.apply" },
-        "result": { "const": "ok" },
-        "data": { "$ref": "#/$defs/setup_apply_data" }
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "setup.apply"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/setup_apply_data"
+        }
       }
     },
     "source_prepare_success": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "command", "result", "data"],
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
       "properties": {
-        "schema_version": { "const": 2 },
-        "command": { "const": "source.prepare" },
-        "result": { "const": "ok" },
-        "data": { "$ref": "#/$defs/source_prepare_data" }
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "source.prepare"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/source_prepare_data"
+        }
       }
     },
     "source_write_success": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "command", "result", "data"],
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
       "properties": {
-        "schema_version": { "const": 2 },
-        "command": { "const": "source.write" },
-        "result": { "const": "ok" },
-        "data": { "$ref": "#/$defs/record_write_data" }
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "source.write"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/record_write_data"
+        }
       }
     },
     "knowledge_write_success": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "command", "result", "data"],
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
       "properties": {
-        "schema_version": { "const": 2 },
-        "command": { "const": "knowledge.write" },
-        "result": { "const": "ok" },
-        "data": { "$ref": "#/$defs/record_write_data" }
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "knowledge.write"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/record_write_data"
+        }
       }
     },
     "queue_success": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "command", "result", "data"],
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
       "properties": {
-        "schema_version": { "const": 2 },
-        "command": { "const": "queue" },
-        "result": { "const": "ok" },
-        "data": { "$ref": "#/$defs/queue_data" }
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "queue"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/queue_data"
+        }
       }
     },
     "show_success": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "command", "result", "data"],
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
       "properties": {
-        "schema_version": { "const": 2 },
-        "command": { "const": "show" },
-        "result": { "const": "ok" },
-        "data": { "$ref": "#/$defs/show_data" }
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "show"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/show_data"
+        }
       }
     },
     "review_open_success": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "command", "result", "data"],
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
       "properties": {
-        "schema_version": { "const": 2 },
-        "command": { "const": "review.open" },
-        "result": { "const": "ok" },
-        "data": { "$ref": "#/$defs/review_open_data" }
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "review.open"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/review_open_data"
+        }
       }
     },
     "review_feedback_success": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "command", "result", "data"],
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
       "properties": {
-        "schema_version": { "const": 2 },
-        "command": { "const": "review.feedback" },
-        "result": { "const": "ok" },
-        "data": { "$ref": "#/$defs/review_feedback_data" }
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "review.feedback"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/review_feedback_data"
+        }
       }
     },
     "dashboard_success": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "command", "result", "data"],
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
       "properties": {
-        "schema_version": { "const": 2 },
-        "command": { "const": "dashboard" },
-        "result": { "const": "ok" },
-        "data": { "$ref": "#/$defs/dashboard_data" }
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "dashboard"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/dashboard_data"
+        }
       }
     },
     "doctor_check": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["code", "status", "message", "path", "next_action"],
+      "required": [
+        "code",
+        "status",
+        "message",
+        "path",
+        "next_action"
+      ],
       "properties": {
-        "code": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "status": { "enum": ["healthy", "warning", "blocked"] },
-        "message": { "type": "string", "maxLength": 4096 },
-        "path": { "type": ["string", "null"], "maxLength": 4096 },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "status": {
+          "enum": [
+            "healthy",
+            "warning",
+            "blocked"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 4096
+        },
         "next_action": {
-          "anyOf": [{ "$ref": "#/$defs/next_action" }, { "type": "null" }]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/next_action"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
     "doctor_data": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["healthy", "checks", "next_action"],
+      "required": [
+        "healthy",
+        "checks",
+        "next_action"
+      ],
       "properties": {
-        "healthy": { "type": "boolean" },
+        "healthy": {
+          "type": "boolean"
+        },
         "checks": {
           "type": "array",
           "minItems": 1,
           "maxItems": 256,
-          "items": { "$ref": "#/$defs/doctor_check" }
+          "items": {
+            "$ref": "#/$defs/doctor_check"
+          }
         },
-        "next_action": { "$ref": "#/$defs/next_action" }
+        "next_action": {
+          "$ref": "#/$defs/next_action"
+        }
       }
     },
     "doctor_success": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "command", "result", "data"],
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
       "properties": {
-        "schema_version": { "const": 2 },
-        "command": { "const": "doctor" },
-        "result": { "const": "ok" },
-        "data": { "$ref": "#/$defs/doctor_data" }
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "doctor"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/doctor_data"
+        }
       }
     },
     "failure": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "command", "result", "error"],
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "error"
+      ],
       "properties": {
-        "schema_version": { "const": 2 },
-        "command": { "$ref": "#/$defs/command" },
-        "result": { "const": "error" },
-        "error": { "$ref": "#/$defs/error" }
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "$ref": "#/$defs/command"
+        },
+        "result": {
+          "const": "error"
+        },
+        "error": {
+          "$ref": "#/$defs/error"
+        }
       }
     }
   }

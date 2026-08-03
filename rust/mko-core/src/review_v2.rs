@@ -190,6 +190,9 @@ pub(crate) struct ReviewTargetHistoryV2 {
     pub previous_reviewed_revision: Option<String>,
     pub previous_approved_revision: Option<String>,
     pub current_feedback: Option<String>,
+    /// Feedback attached to the head of `previous_reviewed_revision` — what a
+    /// replacement revision claims to address.
+    pub previous_feedback: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1104,7 +1107,12 @@ fn review_history_from_graph(
         else {
             continue;
         };
-        let candidate = (event.created_at, review_id.clone(), key.revision.clone());
+        let candidate = (
+            event.created_at,
+            review_id.clone(),
+            key.revision.clone(),
+            target.feedback.clone(),
+        );
         reviewed.push(candidate.clone());
         if target.decision == ReviewDecisionV2::Approve {
             approved.push(candidate);
@@ -1113,12 +1121,16 @@ fn review_history_from_graph(
     reviewed.sort();
     approved.sort();
 
+    let previous_reviewed = reviewed.pop();
     Ok(ReviewTargetHistoryV2 {
         derived,
         current_reviewed_at,
-        previous_reviewed_revision: reviewed.pop().map(|(_, _, revision)| revision),
-        previous_approved_revision: approved.pop().map(|(_, _, revision)| revision),
+        previous_reviewed_revision: previous_reviewed
+            .as_ref()
+            .map(|(_, _, revision, _)| revision.clone()),
+        previous_approved_revision: approved.pop().map(|(_, _, revision, _)| revision),
         current_feedback,
+        previous_feedback: previous_reviewed.and_then(|(_, _, _, feedback)| feedback),
     })
 }
 
@@ -2342,6 +2354,9 @@ mod tests {
                     state: ReviewCardTargetStateV2::Unreviewed,
                     domain_policy: domain_policy.clone(),
                     previous_approved_revision: None,
+                    previous_reviewed_revision: None,
+                    current_feedback: None,
+                    addressed_feedback: None,
                     conflicting_review_head_ids: Vec::new(),
                     effects: vec!["approve_current_revision_via_tty".into()],
                 }],

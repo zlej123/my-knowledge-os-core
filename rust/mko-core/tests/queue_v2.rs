@@ -431,6 +431,81 @@ fn changed_pointer_changes_card_digest_and_historical_evidence_basis_remains_rea
 }
 
 #[test]
+fn regenerated_item_card_shows_addressed_feedback_and_bounded_diff() {
+    let environment = environment();
+    let feedback = "핵심 주장 1의 근거를 본문 수치가 있는 블록으로 교체";
+    let source = write_source(&environment, &environment.bundle, &environment.source, None);
+    let review_id = seed_review(
+        environment.root.path(),
+        ReviewTargetTypeV2::Source,
+        &source.record_id,
+        &source.revision,
+        ReviewDecisionV2::RequestChanges,
+        Some(feedback),
+        None,
+        "2026-07-23T01:00:00Z",
+    );
+    sync_projection(
+        &environment,
+        &source,
+        Some(review_id),
+        ProjectionStateV2::ChangesRequested,
+    );
+
+    let requested = show_review_card_v2(environment.root.path(), &source.record_id).unwrap();
+    assert_eq!(
+        requested.targets[0].state,
+        ReviewCardTargetStateV2::ChangesRequested
+    );
+    assert_eq!(
+        requested.targets[0].current_feedback.as_deref(),
+        Some(feedback)
+    );
+    assert_eq!(requested.targets[0].addressed_feedback, None);
+
+    let mut changed_source = environment.source.clone();
+    changed_source.general_summary =
+        "A regenerated summary that follows the requested change.".into();
+    let replacement = write_source(
+        &environment,
+        &environment.bundle,
+        &changed_source,
+        Some(&source.revision),
+    );
+
+    let queue = derive_queue_v2(environment.root.path()).unwrap();
+    assert_eq!(queue.items.len(), 1);
+    assert_eq!(queue.items[0].state, QueueItemStateV2::RevisedUnreviewed);
+    assert_eq!(queue.items[0].next_action, QueueNextActionV2::Display);
+
+    let revised = show_review_card_v2(environment.root.path(), &source.record_id).unwrap();
+    let target = &revised.targets[0];
+    assert_eq!(target.state, ReviewCardTargetStateV2::RevisedUnreviewed);
+    assert_eq!(target.current_feedback, None);
+    assert_eq!(target.addressed_feedback.as_deref(), Some(feedback));
+    assert_eq!(
+        target.previous_reviewed_revision.as_deref(),
+        Some(source.revision.as_str())
+    );
+
+    let text = String::from_utf8(revised.card_bytes.clone()).unwrap();
+    assert!(text.contains("Feedback addressed by this revision for"));
+    assert!(text.contains(feedback));
+    assert!(text.contains("Changes since the reviewed revision for"));
+    assert!(text.contains(&format!("--- reviewed {}", source.revision)));
+    assert!(text.contains(&format!("+++ current {}", replacement.revision)));
+    assert!(text.contains(
+        "-  \"general_summary\": \"A bounded summary grounded in the prepared content.\""
+    ));
+    assert!(text.contains(
+        "+  \"general_summary\": \"A regenerated summary that follows the requested change.\""
+    ));
+
+    let again = show_review_card_v2(environment.root.path(), &source.record_id).unwrap();
+    assert_eq!(revised.card_digest, again.card_digest);
+}
+
+#[test]
 fn missing_projection_blocks_the_queue() {
     let environment = environment();
     let source = write_source(&environment, &environment.bundle, &environment.source, None);

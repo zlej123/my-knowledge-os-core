@@ -545,6 +545,52 @@ fn knowledge_os_skill_pins_the_exact_cli_version_handshake() {
 }
 
 #[test]
+fn knowledge_os_skill_defines_the_regeneration_flow() {
+    let path = knowledge_os_skill_path();
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} must exist and be readable: {error}", path.display()));
+    let commands = executable_surfaces(&text);
+
+    assert!(
+        text.contains("## Regeneration after requested changes"),
+        "the Skill must name the regeneration flow the queue's 수정본 생성 action points to"
+    );
+    let canonical_source_replacement = concat!(
+        "mko source write-draft --bundle \"BUNDLE_PATH\" ",
+        "--response \".mko/runtime/source-response.json\" ",
+        "--expected-revision \"DISPLAYED_REVISION\" ",
+        "--format json-v2"
+    );
+    let canonical_knowledge_replacement = concat!(
+        "mko knowledge write --asset-id \"ASSET_ID\" ",
+        "--bundle \"BUNDLE_PATH\" ",
+        "--response \".mko/runtime/knowledge-response.json\" ",
+        "--expected-revision \"DISPLAYED_REVISION\" ",
+        "--format json-v2"
+    );
+    assert!(commands.contains(canonical_source_replacement));
+    assert!(commands.contains(canonical_knowledge_replacement));
+    for required in [
+        "`current_feedback` is null, stop",
+        "record_revision_stale",
+        "replacement_revision_required",
+        "never write without the binding and never retry blindly",
+        "Exactly one replacement per explicit request",
+        "report that part back to the owner instead\nof performing it",
+        "수정 후 미검토",
+    ] {
+        assert!(
+            text.contains(required),
+            "missing regeneration rule: {required}"
+        );
+    }
+    assert!(
+        !text.contains("--replace-pending"),
+        "replacement must bind with --expected-revision, not the legacy pending flag"
+    );
+}
+
+#[test]
 fn knowledge_os_skill_exposes_only_the_v2_core_workflow() {
     let path = knowledge_os_skill_path();
     let text = std::fs::read_to_string(&path)
@@ -670,15 +716,24 @@ fn knowledge_os_skill_defines_the_knowledge_extraction_flow() {
             .any(|line| line.trim_start_matches("$ ") == canonical_write),
         "mko knowledge write must reuse the Core-returned bundle and JSON v2"
     );
+    let knowledge_writes = commands
+        .lines()
+        .map(|line| line.trim_start_matches("$ "))
+        .filter(|line| line.starts_with("mko knowledge write "))
+        .collect::<Vec<_>>();
     assert_eq!(
-        commands
-            .lines()
-            .filter(|line| line
-                .trim_start_matches("$ ")
-                .starts_with("mko knowledge write "))
+        knowledge_writes.len(),
+        2,
+        "the Skill defines exactly two knowledge writes: the initial draft and the \
+         revision-bound replacement"
+    );
+    assert_eq!(
+        knowledge_writes
+            .iter()
+            .filter(|line| line.contains("--expected-revision \"DISPLAYED_REVISION\""))
             .count(),
         1,
-        "the Skill must execute exactly one knowledge write"
+        "exactly one knowledge write is the revision-bound replacement"
     );
 
     for required in [
