@@ -89,6 +89,50 @@ pub struct ProjectionInputV2 {
     pub tags: Vec<String>,
     pub record_link: String,
     pub asset_link: String,
+    #[serde(default, skip_serializing_if = "ProjectionBodyV2::is_empty")]
+    pub body: ProjectionBodyV2,
+}
+
+impl ProjectionBodyV2 {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// What a person needs to read on the page, derived from the exact revision.
+///
+/// The projection has always been a deterministic rendering of the record; it
+/// simply rendered none of the content. Everything here is a pure function of
+/// the revision, so the file stays regenerable and the digest keeps binding it.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectionBodyV2 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overview: Option<String>,
+    /// Statements the document supports, each carrying its evidence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grounded: Vec<ProjectionPointV2>,
+    /// The model's reading of the material. Kept apart from the grounded
+    /// section because confusing the two is the failure this product exists to
+    /// prevent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub analysis: Vec<ProjectionPointV2>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitations: Vec<ProjectionPointV2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_locator: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectionPointV2 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -107,6 +151,8 @@ struct ProjectionInputWireV2 {
     tags: Vec<String>,
     record_link: String,
     asset_link: String,
+    #[serde(default)]
+    body: ProjectionBodyV2,
 }
 
 impl<'de> Deserialize<'de> for ProjectionInputV2 {
@@ -127,6 +173,7 @@ impl<'de> Deserialize<'de> for ProjectionInputV2 {
             tags: wire.tags,
             record_link: wire.record_link,
             asset_link: wire.asset_link,
+            body: wire.body,
         };
         validate_input(&input).map_err(serde::de::Error::custom)?;
         Ok(input)
@@ -242,6 +289,7 @@ pub(crate) fn read_current_projection_input_v2(
         tags: Vec::new(),
         record_link: "projection-probe".into(),
         asset_link: "projection-probe".into(),
+        body: ProjectionBodyV2::default(),
     };
     let path = repository_root.join(projection_relative_path_unchecked(&probe));
     if matches!(
@@ -279,6 +327,7 @@ pub(crate) fn read_current_projection_input_v2(
         tags: metadata.tags,
         record_link: metadata.record_link,
         asset_link: metadata.asset_link,
+        body: ProjectionBodyV2::default(),
     };
     let rendered = render_projection_v2(&input)?;
     if rendered.projection_digest != metadata.projection_digest || rendered.bytes != bytes {
@@ -433,6 +482,126 @@ fn projection_relative_path_unchecked(input: &ProjectionInputV2) -> String {
     )
 }
 
+
+/// Build the readable body from the exact typed responses.
+///
+/// Both the write path and drift detection call this, so a projection that was
+/// generated and one that is merely expected agree byte for byte.
+pub fn source_projection_body_v2(
+    response: &crate::model_v2::SourceResponseV2,
+    document_locator: Option<String>,
+) -> ProjectionBodyV2 {
+    ProjectionBodyV2 {
+        summary: non_empty(&response.one_sentence_summary),
+        overview: non_empty(&response.general_summary),
+        grounded: response
+            .key_claims
+            .iter()
+            .map(|claim| ProjectionPointV2 {
+                label: None,
+                text: claim.text.clone(),
+                evidence: claim.evidence_refs.iter().map(evidence_label).collect(),
+            })
+            .collect(),
+        analysis: Vec::new(),
+        limitations: response
+            .limitations
+            .iter()
+            .map(|limitation| ProjectionPointV2 {
+                label: None,
+                text: limitation.text.clone(),
+                evidence: limitation.evidence_refs.iter().map(evidence_label).collect(),
+            })
+            .collect(),
+        document_locator,
+    }
+}
+
+pub fn knowledge_projection_body_v2(
+    response: &crate::model_v2::KnowledgeResponseV2,
+    document_locator: Option<String>,
+) -> ProjectionBodyV2 {
+    use crate::model_v2::KnowledgeUnitKindV2;
+    let point = |unit: &crate::model_v2::KnowledgeUnitV2| ProjectionPointV2 {
+        label: non_empty(&unit.title),
+        text: unit.body.clone(),
+        evidence: unit.evidence_refs.iter().map(evidence_label).collect(),
+    };
+    // The split the product exists to protect: what the document supports on
+    // one side, what the model made of it on the other.
+    let grounded_kind = |kind: &KnowledgeUnitKindV2| {
+        matches!(
+            kind,
+            KnowledgeUnitKindV2::Fact
+                | KnowledgeUnitKindV2::Definition
+                | KnowledgeUnitKindV2::Formula
+                | KnowledgeUnitKindV2::Result
+        )
+    };
+    ProjectionBodyV2 {
+        summary: non_empty(&response.synthesis),
+        overview: None,
+        grounded: response
+            .units
+            .iter()
+            .filter(|unit| grounded_kind(&unit.kind))
+            .map(point)
+            .collect(),
+        analysis: response
+            .units
+            .iter()
+            .filter(|unit| !grounded_kind(&unit.kind))
+            .map(point)
+            .collect(),
+        limitations: Vec::new(),
+        document_locator,
+    }
+}
+
+fn evidence_label(reference: &crate::model_v2::EvidenceRefV2) -> String {
+    format!("{} @ {}", reference.block_id, reference.locator)
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn append_projection_body(text: &mut String, body: &ProjectionBodyV2) {
+    if let Some(summary) = &body.summary {
+        text.push_str(&format!("\n## 한 줄 요약\n\n{}\n", normalize(summary)));
+    }
+    if let Some(overview) = &body.overview {
+        text.push_str(&format!("\n## 요약\n\n{}\n", normalize(overview)));
+    }
+    append_points(text, "문서가 뒷받침하는 내용", &body.grounded);
+    append_points(text, "LLM 분석 (문서의 주장 아님)", &body.analysis);
+    append_points(text, "한계", &body.limitations);
+    if let Some(locator) = &body.document_locator {
+        text.push_str(&format!("\n## 원본 문서\n\n- {}\n", normalize(locator)));
+    }
+}
+
+fn append_points(text: &mut String, heading: &str, points: &[ProjectionPointV2]) {
+    if points.is_empty() {
+        return;
+    }
+    text.push_str(&format!("\n## {heading}\n\n"));
+    for point in points {
+        match &point.label {
+            Some(label) => text.push_str(&format!(
+                "- **{}** — {}\n",
+                normalize(label),
+                normalize(&point.text)
+            )),
+            None => text.push_str(&format!("- {}\n", normalize(&point.text))),
+        }
+        for evidence in &point.evidence {
+            text.push_str(&format!("  - 근거: `{}`\n", normalize(evidence)));
+        }
+    }
+}
+
 pub fn render_projection_v2(input: &ProjectionInputV2) -> Result<RenderedProjectionV2, MkoError> {
     validate_input(input)?;
     render_projection_unchecked(input)
@@ -487,6 +656,8 @@ fn render_projection_unchecked(
         asset_link,
         input.current_revision,
     );
+    let mut text = text;
+    append_projection_body(&mut text, &input.body);
     Ok(RenderedProjectionV2 {
         bytes: text.into_bytes(),
         projection_digest,

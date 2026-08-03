@@ -540,6 +540,7 @@ fn self_consistent_projection_with_noncanonical_semantics_blocks_the_queue() {
             tags: environment.source.tags.clone(),
             record_link: format!("sources/{}/current.yaml", source.record_id),
             asset_link: format!("assets/registry/{}.json", environment.asset.id),
+            body: Default::default(),
         },
     )
     .unwrap();
@@ -629,6 +630,7 @@ fn sync_projection(
                 record.record_id
             ),
             asset_link: format!("assets/registry/{}.json", environment.asset.id),
+            body: Default::default(),
         },
     )
     .unwrap();

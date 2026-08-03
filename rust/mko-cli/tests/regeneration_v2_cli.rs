@@ -173,7 +173,7 @@ fn regeneration_closes_the_request_changes_loop_with_typed_surfaces() {
         &["review-feedback", "--input"],
         Some(&decision_path),
     );
-    assert!(ok);
+    assert!(ok, "review-feedback failed: {feedback}");
     assert_eq!(feedback["command"], "review.feedback");
 
     // The typed regeneration context: feedback, binding revision, and asset.

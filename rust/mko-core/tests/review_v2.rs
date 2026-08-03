@@ -552,6 +552,7 @@ fn seed_target(
             tags: Vec::new(),
             record_link: format!("{collection}/{record_id}/current.yaml"),
             asset_link: format!("assets/registry/personal-asset-{}.json", "a".repeat(64)),
+            body: Default::default(),
         },
     )
     .unwrap();

@@ -19,8 +19,9 @@ use crate::{
         LimitationBasisV2, PreparedContentV2, ReviewTargetTypeV2, SourceResponseV2,
     },
     projection_v2::{
-        ProjectionInputV2, ProjectionRecordTypeV2, ProjectionStateV2, ProjectionWriteOutcomeV2,
-        ProjectionWriteResultV2, projection_relative_path_v2, render_projection_v2,
+        ProjectionBodyV2, ProjectionInputV2, ProjectionRecordTypeV2, ProjectionStateV2,
+        ProjectionWriteOutcomeV2, ProjectionWriteResultV2, knowledge_projection_body_v2,
+        projection_relative_path_v2, render_projection_v2, source_projection_body_v2,
         write_projection_locked,
     },
     review_v2::{ReviewDerivedStateV2, derive_review_histories_v2},
@@ -239,6 +240,10 @@ pub fn write_source_record_v2(
         "uncategorized".into(),
         Vec::new(),
         request.asset.id.clone(),
+        source_projection_body_v2(
+            request.response,
+            Some(request.asset.provider.logical_locator.clone()),
+        ),
         clock,
     )
 }
@@ -288,6 +293,10 @@ pub fn write_knowledge_record_v2(
         "uncategorized".into(),
         Vec::new(),
         request.asset.id.clone(),
+        knowledge_projection_body_v2(
+            request.response,
+            Some(request.asset.provider.logical_locator.clone()),
+        ),
         clock,
     )
 }
@@ -382,6 +391,10 @@ pub(crate) fn replace_knowledge_perspectives_v2(
             .iter()
             .map(|perspective| format!("perspective:{}", perspective.as_str())),
     );
+    let body = knowledge_projection_body_v2(
+        &revision.response,
+        Some(asset.provider.logical_locator.clone()),
+    );
     publish_record_and_projection(
         repository_root,
         "knowledge",
@@ -396,6 +409,7 @@ pub(crate) fn replace_knowledge_perspectives_v2(
         primary_perspective(&perspectives),
         perspectives.clone(),
         asset.id,
+        body,
         clock,
     )
 }
@@ -722,6 +736,7 @@ fn publish_record_and_projection(
     domain: String,
     perspectives: Vec<PerspectiveV2>,
     asset_id: String,
+    body: ProjectionBodyV2,
     clock: &dyn Clock,
 ) -> Result<RecordWriteResultV2, MkoError> {
     let candidate_revision = sha256_digest(bytes);
@@ -744,6 +759,7 @@ fn publish_record_and_projection(
             domain,
             perspectives,
             asset_id,
+            body,
         },
     )?;
     // Rendering is deliberately completed before canonical publication. This
@@ -880,6 +896,9 @@ struct ProjectionMetadataV2 {
     domain: String,
     perspectives: Vec<PerspectiveV2>,
     asset_id: String,
+    /// Derived by the same functions drift detection uses, so a freshly written
+    /// projection and the expected one are identical.
+    body: ProjectionBodyV2,
 }
 
 fn expected_projection_input(
@@ -932,6 +951,7 @@ fn expected_projection_input(
         domain: metadata.domain,
         perspectives: metadata.perspectives,
         tags: metadata.tags,
+        body: metadata.body,
         record_link: format!("{collection}/{record_id}/current.yaml"),
         asset_link: format!("assets/registry/{}.json", metadata.asset_id),
     })
