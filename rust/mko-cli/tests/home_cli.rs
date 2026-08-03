@@ -231,4 +231,36 @@ mod macos {
             }
         }
     }
+    // Finding nothing used to end the conversation. Search only covers approved
+    // knowledge, so an owner whose material is all still waiting on them was
+    // told "not found" about a shelf they had never filled.
+    #[test]
+    #[allow(deprecated)]
+    fn an_empty_search_says_why_and_where_to_go() {
+        let root = tempdir().unwrap();
+        let repository = root.path().join("v3-kb");
+        let provider = root.path().join("provider");
+        scaffold_personal_kb_v2(&repository).unwrap();
+        fs::create_dir(&provider).unwrap();
+
+        let output = Command::new(assert_cmd::cargo::cargo_bin("mko"))
+            .args(["find", "sampling"])
+            .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+            .env("HOME", root.path())
+            .current_dir(&repository)
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        let screen = String::from_utf8_lossy(&output.stdout);
+        assert!(screen.contains("승인된 지식에서 찾지 못했습니다."));
+        assert!(
+            screen.contains("아직 승인된 지식이 없습니다"),
+            "an empty shelf must be named as such: {screen}"
+        );
+        assert!(
+            screen.contains("`mko`"),
+            "the owner needs somewhere to go: {screen}"
+        );
+    }
 }
