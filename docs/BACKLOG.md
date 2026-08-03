@@ -139,7 +139,7 @@ accepted but emits a human line with exit 0 instead of JSON
 the owner to redo setup.
 
 **P1 (found in the same run) — real PDFs fail extraction with no way
-forward.** Both documents already in the owner's Inbox failed
+forward (resolved 2026-08-03).** Both documents already in the owner's Inbox failed
 `mko source prepare`: `Signals and Systems.pdf` with `prepared_text_invalid`
 ("unsupported control characters"), and
 `CalterahRhineRadarBasebandUserGuide_v1.0.2-1.pdf` with `pdf_extraction_failed`
@@ -148,6 +148,22 @@ accepts these files but preparation rejects them, so the product's main path
 does not work on the owner's actual library. The two files are the natural test
 corpus. This is the reason items get stuck in the item above; surfacing stuck
 work does not fix it.
+
+Both were reproduced against the owner's own files and diagnosed. The first was
+ours: a 728-page book extracted cleanly and was then rejected whole over 24
+meaningless control bytes (0x01 x17, 0x00 x3, 0x10 x2, 0x11 x2, first on page
+196). Normalizing them away — the same pass that already collapses whitespace
+and applies NFC — keeps the property that canonical text carries no ambiguous
+controls, and the book now prepares into 728 blocks of readable text. The second
+is upstream: the extraction worker panics inside `adobe-cmap-parser` 0.4.1
+(`src/lib.rs:213`, "bad length of hexstring") on that document's CMap, which is
+why it died in under a second. Running the extractor in its own process already
+kept the CLI alive; the failure is now reported as `pdf_text_unreadable` with
+`next_action: add` and tells the owner to export or scan a new copy and register
+that, instead of `pdf_extraction_failed` with nothing to do. **Still open:**
+making that document itself readable needs an upstream fix or a different
+extractor, which is a dependency decision rather than a bug in this repository —
+the pinned `pdf-extract` 0.12.0 is the current constraint.
 
 **P2 — 검토 계속 is a machine-contract screen.** Choosing review drops the
 owner straight into long internal IDs and SHA-256 digests, raw Source/Knowledge

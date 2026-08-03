@@ -403,7 +403,7 @@ fn normalize_metadata(mut metadata: PreparedMetadataV2) -> Result<PreparedMetada
 }
 
 fn normalize_single_line(value: &str) -> Result<String, MkoError> {
-    reject_ambiguous_controls(value)?;
+    let value = strip_ambiguous_controls(value);
     Ok(value
         .replace("\r\n", "\n")
         .replace('\r', "\n")
@@ -415,7 +415,7 @@ fn normalize_single_line(value: &str) -> Result<String, MkoError> {
 }
 
 fn normalize_document_text(value: &str) -> Result<String, MkoError> {
-    reject_ambiguous_controls(value)?;
+    let value = strip_ambiguous_controls(value);
     let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
     let mut output = Vec::new();
     let mut previous_blank = true;
@@ -434,16 +434,23 @@ fn normalize_document_text(value: &str) -> Result<String, MkoError> {
     Ok(output.join("\n").nfc().collect())
 }
 
-fn reject_ambiguous_controls(value: &str) -> Result<(), MkoError> {
-    if value.chars().any(|character| {
-        character.is_control() && !matches!(character, '\n' | '\r' | '\t' | '\u{000c}')
-    }) {
-        return Err(MkoError::new(
-            "prepared_text_invalid",
-            "extracted content contains unsupported control characters",
-        ));
-    }
-    Ok(())
+/// Drop control characters that carry no text, keeping the ones that do.
+///
+/// Extractors emit occasional stray control bytes from font and encoding
+/// quirks — a few dozen in a long book. Rejecting the document over them
+/// discarded hundreds of readable pages and left the owner nothing to do, while
+/// the property that mattered was only ever that canonical text contains no
+/// ambiguous controls. Removing them keeps that property by construction, and
+/// belongs to the same normalization pass that already collapses whitespace and
+/// applies NFC: the bundle is a normalized projection, never a byte-exact copy
+/// of the original, which stays preserved and fingerprinted on its own.
+fn strip_ambiguous_controls(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| {
+            !character.is_control() || matches!(character, '\n' | '\r' | '\t' | '\u{000c}')
+        })
+        .collect()
 }
 
 fn bounded_chunks(value: &str) -> Vec<String> {

@@ -80,7 +80,7 @@ pub(crate) fn json_v2_next_action(code: &str) -> NextActionV2 {
         | "provider_not_hydrated"
         | "asset_not_hydrated"
         | "hydration_confirmation_required" => NextActionV2::Hydrate,
-        "asset_outside_inbox" | "asset_path_required" => NextActionV2::Add,
+        "asset_outside_inbox" | "asset_path_required" | "pdf_text_unreadable" => NextActionV2::Add,
         "projection_not_found"
         | "projection_snapshot_changed"
         | "projection_stale"

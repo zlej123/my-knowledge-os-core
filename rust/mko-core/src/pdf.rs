@@ -147,9 +147,14 @@ fn decode_worker_output(output: ChildOutput) -> Result<Vec<String>, MkoError> {
         ));
     }
     if !output.status.success() {
+        // The worker runs in its own process exactly so a parser that dies on an
+        // unusual PDF cannot take the CLI with it. Reaching here means it ran and
+        // died on this document, which is a fact about the file rather than about
+        // the installation — and one the owner can act on. Its stderr can quote
+        // document bytes, so it stays discarded instead of being echoed back.
         return Err(MkoError::new(
-            "pdf_extraction_failed",
-            "PDF extraction worker failed",
+            "pdf_text_unreadable",
+            "the extractor could not read this PDF's text layer; open the document, export or scan it to a new PDF, and register that copy",
         ));
     }
     let output: ExtractionWorkerResponse = serde_json::from_slice(&output.stdout)
@@ -393,6 +398,32 @@ mod tests {
     fn sleeping_child() {
         if std::env::var_os("MKO_TEST_SLEEPING_CHILD").is_some() {
             std::thread::sleep(Duration::from_secs(10));
+        }
+    }
+
+    // A parser that dies on an unusual document is why the worker is a separate
+    // process. What the owner gets back has to say that this file could not be
+    // read, and give them something to do about it.
+    #[test]
+    fn a_worker_that_dies_on_the_document_reports_an_unreadable_text_layer() {
+        let executable = std::env::current_exe().unwrap();
+        let mut command = Command::new(executable);
+        command
+            .args(["--exact", "pdf::tests::panicking_child", "--nocapture"])
+            .env("MKO_TEST_PANICKING_CHILD", "1");
+
+        let output = run_child_with_timeout(&mut command, Duration::from_secs(5)).unwrap();
+        assert!(!output.status.success());
+        let error = decode_worker_output(output).unwrap_err();
+
+        assert_eq!(error.code(), "pdf_text_unreadable");
+        assert!(error.message().contains("register that copy"));
+    }
+
+    #[test]
+    fn panicking_child() {
+        if std::env::var_os("MKO_TEST_PANICKING_CHILD").is_some() {
+            panic!("bad length of hexstring");
         }
     }
 
