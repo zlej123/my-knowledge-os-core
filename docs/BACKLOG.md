@@ -86,6 +86,103 @@ idea in the next section.
    and passed in isolation — likely load/timing sensitivity. Track before
    trusting full-suite green on slow machines.
 
+## Owner usability review — 2026-08-03 (live 0.3.2 run)
+
+The owner ran the first recorded live journey on the installed 0.3.2 build
+(`feat/revision-loop`, gates green) and reviewed the product as a daily tool.
+**Verdict: strong safety structure, not yet a daily product — an alpha a
+technical user verifies.** The core problem is not missing features but
+*recovery after interruption and connection to the next action*. Every item
+below was reproduced on a real KB with real documents, and each cited claim
+was verified against the code.
+
+**P1 — cancelling the approval screen locks the whole KB.** `mko` → 검토 계속
+→ Ctrl-C leaves `.knowledge-os/runtime/locks/repository-mutation.lock` behind;
+afterwards even reads (`mko queue`, 새 자료 정리) fail with
+`repository_lock_held`. Cause: `publish_tty_approval_review_v2`
+(`rust/mko-core/src/review_v2.rs`) takes the repository mutation lock *before*
+rendering the card and waiting for input, so any cancel strands it. Two
+aggravating factors: `repository_lock_held` is absent from the failure mapping
+in `rust/mko-cli/src/output.rs`, so it answers `retryable: false`,
+`next_action: none`; and **no caller anywhere passes
+`StaleRepositoryLockPolicy::Clear`** — every call site is `Preserve`, so the
+stale-lock takeover machinery in `lock.rs` is unreachable from any command.
+Core would classify the stranded lock as stale (dead PID, past the 15-minute
+TTL) but nothing can act on that. Direction: display and confirm without the
+lock; acquire only after the phrase is typed, then re-validate card and
+revision under it; treat Ctrl-C, EOF, and `q` as clean cancel; surface owner
+PID and time in `mko doctor` with an explicit, safe recovery path.
+
+**P1 — registered-but-unprocessed PDFs vanish from home.** The KB held three
+registered Assets and one Source (two PDFs stopped at extraction), yet home
+printed `새 자료 0 · 검토 1 · 수정 필요 0 · 승인된 지식 0 · 문제 0`.
+`inspect_home` computes `registered` (`rust/mko-core/src/home.rs`) but the
+render and recommendation logic in `rust/mko-cli/src/cli.rs` drops it. After an
+extraction failure or an interrupted run the owner cannot tell that material is
+waiting. Home needs a 정리 중 / 문제 count and per-item next actions (다시 추출,
+지원되지 않는 PDF, 복구 방법 보기).
+
+**P1 — `doctor` misdiagnoses a current v3 KB.** A real schema-v2 KB that bare
+`mko` opens fine reports `repository_incompatible` / `next_action: configure`
+through `mko doctor --format json-v1`, because doctor still reads only the v1
+`KnowledgeConfig` (`rust/mko-core/src/doctor.rs`). `--format json-v2` is
+accepted but emits a human line with exit 0 instead of JSON
+(`rust/mko-cli/src/cli.rs`). The tool that should guide recovery instead tells
+the owner to redo setup.
+
+**P1 (found in the same run) — real PDFs fail extraction with no way
+forward.** Both documents already in the owner's Inbox failed
+`mko source prepare`: `Signals and Systems.pdf` with `prepared_text_invalid`
+("unsupported control characters"), and
+`CalterahRhineRadarBasebandUserGuide_v1.0.2-1.pdf` with `pdf_extraction_failed`
+(worker failed in under a second). Both answer `next_action: none`. Registration
+accepts these files but preparation rejects them, so the product's main path
+does not work on the owner's actual library. The two files are the natural test
+corpus. This is the reason items get stuck in the item above; surfacing stuck
+work does not fix it.
+
+**P2 — 검토 계속 is a machine-contract screen.** Choosing review drops the
+owner straight into long internal IDs and SHA-256 digests, raw Source/Knowledge
+JSON, the full previous revision, English contract vocabulary, and a long
+approval phrase — and although it says "잘못되면 수정 요청", the screen offers no
+수정 요청 or 나중에 choice (`rust/mko-cli/src/cli_v2.rs` goes straight to the TTY
+approval function). Direction: a Korean human summary, evidence / LLM analysis /
+uncertainty separated, what changed since the previous version, then
+`[a] 승인 · [c] 수정 요청 · [d] 나중에 · [q] 취소`, with digest-bound confirmation
+kept but shown only after the owner chooses approve.
+
+**P2 — Obsidian is not yet a reading surface.** Generated record projections
+carry only title, internal record link, asset link, and revision hash; the
+summary, claims, and analysis are absent, and `current.yaml` holds only a
+revision digest, so the owner must hunt for the revision file. Projections need
+the one-sentence and general summary, key claims with evidence locators, LLM
+analysis / counterarguments / open questions, a link to open the original PDF,
+and review state with the next action.
+
+**P3 — search and empty states dead-end.** 지식 찾기 with no match ends at
+`승인된 지식에서 찾지 못했습니다` — no mention that pending knowledge exists and no
+route back to 검토 계속. Matches show a 140-character excerpt with no way to open
+the full knowledge item (`rust/mko-cli/src/cli.rs`).
+
+**What works.** Bare `mko` turned a command-centred tool into an
+action-centred one; `remember` re-displays the exact text and takes only a
+clear `y`; document evidence, LLM analysis, and owner judgment stay
+structurally separate; the revision loop (revision, feedback, addressed
+feedback, diff) is technically closed in 0.3.2; final approval, perspective,
+and investment high-risk policy correctly stay real-TTY; the embedded schema
+surface and handshake catch Core/Skill contract drift early.
+
+**Agreed order.** 1) Ctrl-C stale lock and a safe recovery path; 2) v3-aware
+`doctor` with accurate typed next actions; 3) show stuck-after-registration
+PDFs on home and make them resumable — with extraction robustness for the two
+failing real PDFs as its prerequisite; 4) split the review screen into a human
+decision UI; 5) make Obsidian projections readable knowledge documents;
+6) connect search results to detail, original, and review; 7) only then signed
+binary installation and promoting `feat/revision-loop` to `main`.
+
+The product's strongest property today is that it prevents a wrong approval.
+The next thing to earn is that an owner who stopped safely can start again.
+
 ## Rendered-document review (owner-proposed, 2026-08-01)
 
 **Idea.** When material arrives, the LLM's draft is delivered to the owner
