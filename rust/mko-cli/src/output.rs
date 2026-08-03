@@ -56,7 +56,10 @@ pub fn emit_json_v2_failure(command: JsonV2Command, error: &MkoError) -> Result<
             message: error.message().into(),
             retryable: matches!(
                 error.code(),
-                "lock_held" | "review_session_random_failed" | "setup_profile_locked"
+                "lock_held"
+                    | "repository_lock_held"
+                    | "review_session_random_failed"
+                    | "setup_profile_locked"
             ),
             next_action: json_v2_next_action(error.code()),
             details: ErrorDetailsV2::default(),
@@ -90,9 +93,11 @@ pub(crate) fn json_v2_next_action(code: &str) -> NextActionV2 {
         "dashboard_user_modified"
         | "dashboard_projection_user_modified"
         | "dashboard_orphan_projection" => NextActionV2::PreserveUserEdit,
-        "lock_held" | "review_session_random_failed" | "setup_profile_locked" => {
-            NextActionV2::Retry
-        }
+        "lock_held"
+        | "repository_lock_held"
+        | "review_session_random_failed"
+        | "setup_profile_locked" => NextActionV2::Retry,
+        "repository_lock_stale" => NextActionV2::Repair,
         "review_session_expired" | "review_session_consumed" | "review_snapshot_stale" => {
             NextActionV2::Review
         }

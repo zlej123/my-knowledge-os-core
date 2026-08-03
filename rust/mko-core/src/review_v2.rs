@@ -262,9 +262,17 @@ pub fn publish_tty_approval_review_v2(
     repository_root: &Path,
     stable_id: &str,
     clock: &dyn Clock,
-) -> Result<ReviewPublicationV2, MkoError> {
+) -> Result<TtyApprovalOutcomeV2, MkoError> {
     let mut terminal = ProcessTty;
     publish_tty_approval_with_terminal(repository_root, stable_id, clock, &mut terminal)
+}
+
+#[derive(Debug)]
+pub enum TtyApprovalOutcomeV2 {
+    Approved(Box<ReviewPublicationV2>),
+    /// The owner declined at the prompt, or the prompt ended without one.
+    /// Nothing was written.
+    Cancelled,
 }
 
 fn publish_tty_approval_with_terminal(
@@ -272,17 +280,26 @@ fn publish_tty_approval_with_terminal(
     stable_id: &str,
     clock: &dyn Clock,
     terminal: &mut dyn TtyInteraction,
-) -> Result<ReviewPublicationV2, MkoError> {
+) -> Result<TtyApprovalOutcomeV2, MkoError> {
+    // Display and confirmation deliberately run without the repository mutation
+    // lock: the owner may read for as long as they like, cancel, or be
+    // interrupted, and a lock held across that wait strands the whole
+    // repository. Correctness does not depend on holding it here, because the
+    // confirmed card is re-validated byte for byte under the lock below and any
+    // concurrent change is rejected as a stale snapshot.
+    let effect = prepare_tty_approval_snapshot(repository_root, stable_id)?;
+    let Some(confirmed) = confirm_tty_approval(effect, terminal)? else {
+        return Ok(TtyApprovalOutcomeV2::Cancelled);
+    };
     let _lock = RepositoryMutationLock::acquire(
         repository_root,
         "v2 TTY review approval",
         clock,
         StaleRepositoryLockPolicy::Preserve,
     )?;
-    let effect = prepare_tty_approval_locked(repository_root, stable_id)?;
-    let confirmed = confirm_tty_approval(effect, terminal)?;
     validate_confirmed_tty_approval_locked(repository_root, &confirmed)?;
     publish_confirmed_tty_approval_locked(repository_root, confirmed, clock)
+        .map(|publication| TtyApprovalOutcomeV2::Approved(Box::new(publication)))
 }
 
 pub fn publish_review_resolution_v2(
@@ -416,7 +433,7 @@ fn publish_confirmed_tty_approval_locked(
     publish_review_locked(repository_root, targets, clock)
 }
 
-fn prepare_tty_approval_locked(
+fn prepare_tty_approval_snapshot(
     repository_root: &Path,
     stable_id: &str,
 ) -> Result<TtyApprovalEffectV2, MkoError> {
@@ -529,7 +546,7 @@ fn validate_confirmed_tty_approval_locked(
         TtyApprovalSelectionV2::All => &confirmed.0.card.item_id,
         TtyApprovalSelectionV2::Record(record_id) => record_id,
     };
-    let current = prepare_tty_approval_locked(repository_root, stable_id)
+    let current = prepare_tty_approval_snapshot(repository_root, stable_id)
         .map_err(|_| review_snapshot_stale())?;
     if current.card.card_bytes != confirmed.0.card.card_bytes
         || current.card.card_digest != confirmed.0.card.card_digest
@@ -584,7 +601,7 @@ impl TtyInteraction for ProcessTty {
 fn confirm_tty_approval(
     effect: TtyApprovalEffectV2,
     terminal: &mut dyn TtyInteraction,
-) -> Result<ConfirmedTtyApprovalV2, MkoError> {
+) -> Result<Option<ConfirmedTtyApprovalV2>, MkoError> {
     let mut phrase = format!(
         "approve {} {}",
         effect.card.card_digest, effect.effect_digest
@@ -651,7 +668,7 @@ fn confirm_tty_approval(
     }
     write!(
         display,
-        "\nEffect: approve every exact target listed above\nCard digest: {}\nDisplayed effect digest: {}\nApproval effect digest: {}\n\nType exactly:\n{}\n> ",
+        "\nEffect: approve every exact target listed above\nCard digest: {}\nDisplayed effect digest: {}\nApproval effect digest: {}\n\nType exactly:\n{}\n\n승인하지 않으려면 q 또는 빈 줄을 입력하세요 (아무것도 바뀌지 않습니다).\n> ",
         effect.card.card_digest,
         effect.card.effect_digest,
         effect.effect_digest,
@@ -672,14 +689,20 @@ fn confirm_tty_approval(
         .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
     let input = input
         .strip_suffix("\r\n")
-        .or_else(|| input.strip_suffix('\n'));
-    if input != Some(phrase.as_str()) {
+        .or_else(|| input.strip_suffix('\n'))
+        .unwrap_or(input.as_str());
+    // An owner who declines, or a prompt that ends without an answer, is not a
+    // failure: nothing has been written yet, so this is an ordinary "no".
+    if matches!(input.trim(), "" | "q" | "Q") {
+        return Ok(None);
+    }
+    if input != phrase.as_str() {
         return Err(MkoError::new(
             "review_confirmation_mismatch",
             "the exact Core-rendered approval phrase was not entered",
         ));
     }
-    Ok(ConfirmedTtyApprovalV2(effect))
+    Ok(Some(ConfirmedTtyApprovalV2(effect)))
 }
 
 fn domain_policy_name(policy: &DomainPolicyV2) -> &'static str {
@@ -1696,6 +1719,13 @@ mod tests {
     };
     use tempfile::tempdir;
 
+    fn approved(outcome: TtyApprovalOutcomeV2) -> ReviewPublicationV2 {
+        match outcome {
+            TtyApprovalOutcomeV2::Approved(publication) => *publication,
+            TtyApprovalOutcomeV2::Cancelled => panic!("expected an approval, not a cancellation"),
+        }
+    }
+
     struct FakeTty {
         real: bool,
         input: String,
@@ -1764,6 +1794,134 @@ mod tests {
         clock: FixedClock,
     }
 
+    // The lock must not span the human wait: an owner who reads slowly, says no,
+    // or interrupts the process would otherwise strand the whole repository.
+    #[test]
+    fn the_repository_stays_usable_while_the_owner_decides_and_after_a_decline() {
+        let environment = combined_environment();
+        let repository = environment.root.path();
+
+        struct AssertsUnlockedTty(std::path::PathBuf);
+
+        impl TtyInteraction for AssertsUnlockedTty {
+            fn is_real_tty(&self) -> bool {
+                true
+            }
+
+            fn display(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
+                Ok(())
+            }
+
+            fn read_confirmation(&mut self, _byte_limit: u64) -> std::io::Result<String> {
+                // Standing at the prompt is exactly when the owner might open
+                // another window; nothing may be blocked yet.
+                let concurrent = RepositoryMutationLock::acquire(
+                    &self.0,
+                    "concurrent work while the card is displayed",
+                    &crate::clock::SystemClock,
+                    StaleRepositoryLockPolicy::Preserve,
+                )
+                .expect("the repository must not be locked while the card is displayed");
+                drop(concurrent);
+                Ok("q\n".into())
+            }
+        }
+
+        let mut terminal = AssertsUnlockedTty(repository.to_path_buf());
+        let outcome = publish_tty_approval_with_terminal(
+            repository,
+            &environment.source.record_id,
+            &environment.clock,
+            &mut terminal,
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, TtyApprovalOutcomeV2::Cancelled));
+        assert_eq!(
+            fs::read_dir(repository.join("reviews")).unwrap().count(),
+            0,
+            "declining must not publish a review"
+        );
+        let after = RepositoryMutationLock::acquire(
+            repository,
+            "work after the owner declined",
+            &crate::clock::SystemClock,
+            StaleRepositoryLockPolicy::Preserve,
+        )
+        .expect("declining must leave no lock behind");
+        drop(after);
+    }
+
+    #[test]
+    fn a_stale_lock_names_recovery_and_a_live_lock_asks_for_a_retry() {
+        let environment = combined_environment();
+        let repository = environment.root.path();
+
+        let live = RepositoryMutationLock::acquire(
+            repository,
+            "a running operation",
+            &crate::clock::SystemClock,
+            StaleRepositoryLockPolicy::Preserve,
+        )
+        .unwrap();
+        // Approving is what needs the lock; cancelling now returns before it.
+        let contended = publish_tty_approval_with_terminal(
+            repository,
+            &environment.source.record_id,
+            &environment.clock,
+            &mut MutatingTty {
+                displayed: Vec::new(),
+                mutation: Some(|| {}),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(contended.code(), "repository_lock_held");
+        assert!(
+            !crate::lock::clear_stale_repository_lock(repository, &crate::clock::SystemClock)
+                .unwrap(),
+            "recovery must never take over a lock a live process owns"
+        );
+        drop(live);
+
+        // A lock whose owner is gone: same file, but the process died and the
+        // stale TTL has passed.
+        let path = repository.join(".knowledge-os/runtime/locks/repository-mutation.lock");
+        let abandoned = serde_json::json!({
+            "pid": 999_999_u32,
+            "hostname": hostname::get().unwrap().to_string_lossy(),
+            "started_at": "2020-01-01T00:00:00Z",
+            "command": "an interrupted approval",
+            "asset_id": "repository-v2-mutation",
+            "owner_token": "999999-1-0123456789abcdef0123456789abcdef",
+        });
+        fs::write(&path, serde_json::to_vec(&abandoned).unwrap()).unwrap();
+
+        let stranded = publish_tty_approval_with_terminal(
+            repository,
+            &environment.source.record_id,
+            &environment.clock,
+            &mut MutatingTty {
+                displayed: Vec::new(),
+                mutation: Some(|| {}),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(stranded.code(), "repository_lock_stale");
+        assert!(stranded.message().contains("no longer running"));
+
+        assert!(
+            crate::lock::clear_stale_repository_lock(repository, &crate::clock::SystemClock)
+                .unwrap(),
+            "an abandoned lock must be recoverable"
+        );
+        assert!(!path.exists());
+        assert!(
+            !crate::lock::clear_stale_repository_lock(repository, &crate::clock::SystemClock)
+                .unwrap(),
+            "a second recovery has nothing to clear"
+        );
+    }
+
     #[test]
     fn tty_confirmation_renders_the_full_card_and_binds_both_digests() {
         let digest = format!("sha256:{}", "a".repeat(64));
@@ -1783,7 +1941,9 @@ mod tests {
         let card_bytes = effect.card.card_bytes.clone();
         let card_digest = effect.card.card_digest.clone();
 
-        confirm_tty_approval(effect, &mut terminal).unwrap();
+        confirm_tty_approval(effect, &mut terminal)
+            .unwrap()
+            .expect("the exact phrase approves");
 
         let displayed = String::from_utf8(terminal.displayed).unwrap();
         assert!(displayed.contains(std::str::from_utf8(&card_bytes).unwrap()));
@@ -1793,6 +1953,32 @@ mod tests {
         assert!(displayed.contains(&digest));
         assert!(displayed.contains(&phrase));
         assert_eq!(terminal.reads, 1);
+    }
+
+    #[test]
+    fn declining_at_the_prompt_is_an_ordinary_answer_not_a_failure() {
+        for declined in ["", "\n", "q\n", "Q\n", "  \n"] {
+            let effect = test_effect(
+                format!("sha256:{}", "b".repeat(64)),
+                ReviewTargetTypeV2::Source,
+            );
+            let mut terminal = FakeTty {
+                real: true,
+                input: declined.into(),
+                displayed: Vec::new(),
+                reads: 0,
+            };
+
+            let outcome = confirm_tty_approval(effect, &mut terminal)
+                .unwrap_or_else(|error| panic!("{declined:?} must not error: {}", error.code()));
+
+            assert!(outcome.is_none(), "{declined:?} must not approve");
+            assert!(
+                String::from_utf8(terminal.displayed)
+                    .unwrap()
+                    .contains("승인하지 않으려면")
+            );
+        }
     }
 
     #[test]
@@ -1857,7 +2043,9 @@ mod tests {
             reads: 0,
         };
 
-        confirm_tty_approval(effect, &mut terminal).unwrap();
+        confirm_tty_approval(effect, &mut terminal)
+            .unwrap()
+            .expect("the exact phrase approves");
 
         let displayed = String::from_utf8(terminal.displayed).unwrap();
         assert!(displayed.contains("Required per-document domain confirmation"));
@@ -1874,13 +2062,15 @@ mod tests {
             mutation: Some(|| {}),
         };
 
-        let publication = publish_tty_approval_with_terminal(
-            environment.root.path(),
-            &environment.source.record_id,
-            &environment.clock,
-            &mut terminal,
-        )
-        .unwrap();
+        let publication = approved(
+            publish_tty_approval_with_terminal(
+                environment.root.path(),
+                &environment.source.record_id,
+                &environment.clock,
+                &mut terminal,
+            )
+            .unwrap(),
+        );
 
         assert_eq!(publication.record.targets.len(), 1);
         assert_eq!(
@@ -1920,13 +2110,15 @@ mod tests {
             mutation: Some(|| {}),
         };
 
-        let publication = publish_tty_approval_with_terminal(
-            environment.root.path(),
-            &environment.knowledge.record_id,
-            &environment.clock,
-            &mut terminal,
-        )
-        .unwrap();
+        let publication = approved(
+            publish_tty_approval_with_terminal(
+                environment.root.path(),
+                &environment.knowledge.record_id,
+                &environment.clock,
+                &mut terminal,
+            )
+            .unwrap(),
+        );
 
         assert_eq!(publication.record.targets.len(), 1);
         assert_eq!(
@@ -1970,13 +2162,15 @@ mod tests {
             mutation: Some(|| {}),
         };
 
-        let publication = publish_tty_approval_with_terminal(
-            environment.root.path(),
-            &item_id,
-            &environment.clock,
-            &mut terminal,
-        )
-        .unwrap();
+        let publication = approved(
+            publish_tty_approval_with_terminal(
+                environment.root.path(),
+                &item_id,
+                &environment.clock,
+                &mut terminal,
+            )
+            .unwrap(),
+        );
 
         assert_eq!(publication.record.targets.len(), 2);
         assert_eq!(
@@ -2103,13 +2297,15 @@ mod tests {
             displayed: Vec::new(),
             mutation: Some(|| {}),
         };
-        let publication = publish_tty_approval_with_terminal(
-            root.path(),
-            &knowledge.record_id,
-            &clock,
-            &mut current_terminal,
-        )
-        .expect("the newly displayed current card remains approvable");
+        let publication = approved(
+            publish_tty_approval_with_terminal(
+                root.path(),
+                &knowledge.record_id,
+                &clock,
+                &mut current_terminal,
+            )
+            .expect("the newly displayed current card remains approvable"),
+        );
         assert_eq!(publication.record.targets.len(), 1);
         assert_eq!(
             publication.record.targets[0].displayed_revision,
