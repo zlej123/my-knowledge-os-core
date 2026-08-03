@@ -752,6 +752,16 @@ fn hook_check(repository: &Path) -> DoctorCheck {
             Some(repository),
             RecoveryKind::ResolveHookConflict,
         ),
+        // Git is an optional sync choice, not a precondition — setup completes a
+        // local KB without it. Reporting a missing Git worktree as a broken hook
+        // made a supported configuration look damaged, with a repair the owner
+        // could not perform.
+        Err(error) if error.code() == "git_repository_required" => healthy(
+            DiagnosticArea::Hook,
+            "hook_not_applicable",
+            "this knowledge base does not use Git, so no hook is required",
+            Some(repository),
+        ),
         Err(_) => blocked(
             DiagnosticArea::Hook,
             "hook_unreadable",
