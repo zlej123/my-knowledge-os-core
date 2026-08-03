@@ -548,6 +548,10 @@ struct CheckArgs {
 struct DoctorArgs {
     #[arg(long)]
     repo: Option<PathBuf>,
+    /// Take over a lock left behind by an interrupted operation. Core refuses
+    /// while the owning process is still running.
+    #[arg(long)]
+    clear_stale_lock: bool,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
 }
@@ -909,6 +913,7 @@ fn home() -> Result<(), MkoError> {
         }),
         (HomeReport::V3(report), "5") if report.blocked > 0 => doctor(DoctorArgs {
             repo: Some(context.repository_root),
+            clear_stale_lock: false,
             format: OutputFormat::Human,
         }),
         (HomeReport::V3(_), "5") => resurface(&context.repository_root),
@@ -1002,6 +1007,7 @@ fn legacy_home_action(
     if report.blocked > 0 {
         return doctor(DoctorArgs {
             repo: Some(repository.to_path_buf()),
+            clear_stale_lock: false,
             format: OutputFormat::Human,
         });
     }
@@ -2034,7 +2040,23 @@ fn check(arguments: CheckArgs) -> Result<Exit, MkoError> {
     })
 }
 
+// Recovery for the owner who stopped mid-operation: Core only takes over a
+// lock whose owning process is gone, so this can never interrupt live work.
+fn clear_stale_lock(repo: Option<PathBuf>) -> Result<(), MkoError> {
+    let repository = setup_repository(repo)?;
+    if mko_core::lock::clear_stale_repository_lock(&repository, &SystemClock)? {
+        println!("중단된 작업이 남긴 잠금을 해제했습니다. 이제 다시 사용할 수 있습니다.");
+    } else {
+        println!("해제할 잠금이 없습니다.");
+        println!("다른 My Knowledge OS 작업이 실행 중이라면 끝난 뒤 다시 시도하세요.");
+    }
+    Ok(())
+}
+
 fn doctor(arguments: DoctorArgs) -> Result<(), MkoError> {
+    if arguments.clear_stale_lock {
+        return clear_stale_lock(arguments.repo);
+    }
     let request = match arguments.repo {
         Some(repository) => DoctorRequest::new().with_repository(repository),
         None => DoctorRequest::new(),

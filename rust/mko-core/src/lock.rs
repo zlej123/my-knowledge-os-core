@@ -271,9 +271,65 @@ impl RepositoryMutationLock {
         )?;
         match create_repository_mutation_lock(&directory, &repository_root, command, clock) {
             Ok(lock) => Ok(lock),
-            Err(error) if error.code() == "lock_exists" => Err(lock_held_error()),
+            Err(error) if error.code() == "lock_exists" => {
+                Err(blocking_lock_error(&directory, filename, clock))
+            }
             Err(error) => Err(error),
         }
+    }
+}
+
+/// Take over a repository mutation lock only if Core itself classifies it as
+/// stale, then release it immediately.
+///
+/// `remove_stale_entry` refuses anything a live process still owns, so this is
+/// a recovery path an owner can run without risking a concurrent operation.
+pub fn clear_stale_repository_lock(
+    repository_root: &Path,
+    clock: &dyn Clock,
+) -> Result<bool, MkoError> {
+    // Acquiring succeeds on a healthy repository too, so report only a genuine
+    // takeover; otherwise recovery would claim to have fixed nothing.
+    let stale_present = inspect_locks(repository_root, clock)?
+        .into_iter()
+        .any(|inspection| {
+            inspection.state == LockState::Stale
+                && inspection.path.file_name().and_then(|name| name.to_str())
+                    == Some(REPOSITORY_MUTATION_FILENAME)
+        });
+    if !stale_present {
+        return Ok(false);
+    }
+    match RepositoryMutationLock::acquire(
+        repository_root,
+        "stale repository lock recovery",
+        clock,
+        StaleRepositoryLockPolicy::Clear,
+    ) {
+        Ok(lock) => {
+            drop(lock);
+            Ok(true)
+        }
+        Err(error) if error.code() == "repository_lock_held" => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Distinguish a live operation from an abandoned one at the moment of failure.
+///
+/// The owner's next action differs completely: waiting helps only when another
+/// process really is running, and a stranded lock otherwise looks like a dead
+/// end with nothing to retry.
+fn blocking_lock_error(directory: &Dir, filename: &str, clock: &dyn Clock) -> MkoError {
+    match read_lock_record(directory, filename) {
+        Ok((record, _)) if record_is_stale(&record, clock).unwrap_or(false) => MkoError::new(
+            "lock_stale",
+            format!(
+                "an interrupted operation ({}) left a lock from process {}, which is no longer running; recover it explicitly",
+                record.command, record.pid
+            ),
+        ),
+        _ => lock_held_error(),
     }
 }
 
@@ -1309,8 +1365,11 @@ fn map_repository_lock_error(error: MkoError) -> MkoError {
     if error.code() == "lock_held" {
         return MkoError::new(
             "repository_lock_held",
-            "repository mutation lock is held; a stale lock requires an explicit clear policy",
+            "another My Knowledge OS operation is running in this repository; wait for it to finish and try again",
         );
+    }
+    if error.code() == "lock_stale" {
+        return MkoError::new("repository_lock_stale", error.message());
     }
     let Some(suffix) = error.code().strip_prefix("lock_") else {
         return error;

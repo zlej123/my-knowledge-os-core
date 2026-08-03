@@ -34,7 +34,7 @@ use mko_core::{
     review_session_v2::{
         ReviewSessionDecisionInputV2, apply_review_session_decision_v2, open_review_session_v2,
     },
-    review_v2::publish_tty_approval_review_v2,
+    review_v2::{TtyApprovalOutcomeV2, publish_tty_approval_review_v2},
 };
 use serde::de::DeserializeOwned;
 
@@ -295,8 +295,13 @@ pub fn review(
                 MkoError::new("review_queue_empty", "there is no pending review item")
             })?,
     };
-    let publication = publish_tty_approval_review_v2(repository, &selected_id, clock)?;
-    report_review_publication(&publication)?;
+    match publish_tty_approval_review_v2(repository, &selected_id, clock)? {
+        TtyApprovalOutcomeV2::Approved(publication) => report_review_publication(&publication)?,
+        TtyApprovalOutcomeV2::Cancelled => {
+            println!("승인하지 않았습니다. 저장된 내용은 그대로입니다.");
+            println!("이 항목은 검토 대기열에 남아 있습니다: `mko`로 다시 열 수 있습니다.");
+        }
+    }
     Ok(())
 }
 

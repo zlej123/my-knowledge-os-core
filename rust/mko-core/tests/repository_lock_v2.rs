@@ -123,7 +123,10 @@ fn stale_repository_lock_is_cleared_only_when_explicitly_requested() {
         StaleRepositoryLockPolicy::Preserve,
     )
     .expect_err("implicit stale clearing must not occur");
-    assert_eq!(error.code(), "repository_lock_held");
+    // Distinct from live contention: waiting never resolves an abandoned lock,
+    // so the owner is told it needs recovery instead of a retry.
+    assert_eq!(error.code(), "repository_lock_stale");
+    assert!(error.message().contains("no longer running"));
     assert!(lock_path.exists());
 
     let recovered = RepositoryMutationLock::acquire(
