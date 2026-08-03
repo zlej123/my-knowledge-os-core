@@ -82,9 +82,17 @@ idea in the next section.
    stores feedback and stops; replacement needs the current revision, and
    the queue only says "수정본 생성" without naming the regeneration flow.
    Fix direction: one guided path from feedback to replacement revision.
-3. **Flaky test.** `registry_scan_limit` failed once in a full-workspace run
-   and passed in isolation — likely load/timing sensitivity. Track before
-   trusting full-suite green on slow machines.
+3. **Flaky test (resolved 2026-08-03).** `registry_scan_limit` failed once in a
+   full-workspace run and passed in isolation. Confirmed on 2026-08-03: the same
+   commit failed a Windows CI job and passed on re-run, twice, in two different
+   acceptance tests. Cause: acquiring a publication lock gives each quarantine
+   scan a slice of the one-second acquire budget, and when that slice expired
+   the raw scan failure escaped as the caller's answer — even though the lock
+   file was plainly present and the acquire budget still had room. A scan that
+   ran out of time now says so distinctly and the acquire loop retries within
+   its budget, so a held lock is reported as `registry_locked` whatever the
+   machine speed. The work limit (entry count) still reports a directory that
+   genuinely needs attention.
 
 ## Owner usability review — 2026-08-03 (live 0.3.2 run)
 
