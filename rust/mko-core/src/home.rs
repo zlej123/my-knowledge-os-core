@@ -2,6 +2,8 @@ use std::path::Path;
 
 use crate::{
     asset_v2::inspect_inbox_pdf_assets_v2,
+    asset_v2::read_asset_v2,
+    attempt_v2::{StuckReasonV2, latest_preparation_attempt_v2},
     config::KnowledgeConfig,
     config_v2::KnowledgeConfigV2,
     error::MkoError,
@@ -45,10 +47,19 @@ pub struct V3HomeReport {
     /// Extraction can fail, and a session can end mid-way; without this the
     /// material is registered, invisible, and nobody is waiting on it.
     pub in_progress: u64,
+    /// Why each of them stopped, when an attempt is on file to say so.
+    pub stuck: Vec<StuckMaterialV2>,
     pub review_pending: u64,
     pub changes_requested: u64,
     pub approved_knowledge: u64,
     pub blocked: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StuckMaterialV2 {
+    pub asset_id: String,
+    pub title: String,
+    pub reason: StuckReasonV2,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -134,15 +145,40 @@ pub fn inspect_home(
         RepositoryGeneration::V3 => {
             let inbox = inspect_inbox_pdf_assets_v2(repository_root, provider_root, elapsed_clock)?;
             let queue = summarize_home_queue_v2(repository_root)?;
-            let in_progress = inbox
+            let unfinished = inbox
                 .registered_asset_ids
                 .iter()
                 .filter(|id| !queue.recorded_asset_ids.contains(*id))
-                .count() as u64;
+                .collect::<Vec<_>>();
+            let in_progress = unfinished.len() as u64;
+            let stuck = unfinished
+                .into_iter()
+                .map(|asset_id| {
+                    // No attempt on file is not an unknown failure: it is
+                    // material nobody has processed yet, which is also what an
+                    // Asset registered before attempts existed looks like.
+                    let reason = latest_preparation_attempt_v2(repository_root, asset_id)
+                        .ok()
+                        .flatten()
+                        .and_then(|attempt| attempt.code)
+                        .map_or(StuckReasonV2::NotAttempted, |code| {
+                            StuckReasonV2::from_code(&code)
+                        });
+                    let title = read_asset_v2(repository_root, asset_id)
+                        .map(|asset| asset.title_fallback)
+                        .unwrap_or_else(|_| asset_id.clone());
+                    StuckMaterialV2 {
+                        asset_id: asset_id.clone(),
+                        title,
+                        reason,
+                    }
+                })
+                .collect();
             Ok(HomeReport::V3(V3HomeReport {
                 new_material: inbox.new_count,
                 registered: inbox.registered_count,
                 in_progress,
+                stuck,
                 review_pending: queue.review_pending,
                 changes_requested: queue.changes_requested,
                 approved_knowledge: queue.approved_knowledge,

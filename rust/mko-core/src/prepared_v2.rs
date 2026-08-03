@@ -19,6 +19,7 @@ use crate::{
         HydrationConfirmationV2, inspect_provider_file, read_asset_v2,
         require_hydration_confirmation, revalidate_provider_snapshot, validated_disjoint_roots,
     },
+    attempt_v2::{PreparationOutcomeV2, record_preparation_attempt_v2},
     clock::{Clock, SystemClock},
     config_v2::{DerivedArtifactsPolicyV2, KnowledgeConfigV2},
     error::MkoError,
@@ -92,9 +93,28 @@ pub fn prepare_pdf_asset_v2(
     request: PreparePdfAssetRequestV2<'_>,
     worker_executable: &Path,
 ) -> Result<PreparedPdfResultV2, MkoError> {
-    prepare_pdf_asset_v2_with_extractor_and_clock(request, &SystemClock, |snapshot, expected| {
-        extract_pdf_pages_in_child(worker_executable, snapshot, expected)
-    })
+    let repository_root = request.repository_root.to_path_buf();
+    let asset_id = request.asset_id.to_owned();
+    let outcome = prepare_pdf_asset_v2_with_extractor_and_clock(
+        request,
+        &SystemClock,
+        |snapshot, expected| extract_pdf_pages_in_child(worker_executable, snapshot, expected),
+    );
+    // Record what happened so a later session can say why material stopped.
+    // Failing to write the observation must never replace the real answer: the
+    // caller still gets its result, and home simply stays as uninformative as
+    // it was before attempts existed.
+    let _ = record_preparation_attempt_v2(
+        &repository_root,
+        &asset_id,
+        match &outcome {
+            Ok(_) => PreparationOutcomeV2::Prepared,
+            Err(_) => PreparationOutcomeV2::Failed,
+        },
+        outcome.as_ref().err().map(|error| error.code()),
+        &SystemClock,
+    );
+    outcome
 }
 
 pub fn prepare_pdf_asset_v2_with_extractor<F>(

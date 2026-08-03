@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://my-knowledge-os.local/schemas/v2/preparation-attempt.schema.json",
+  "title": "My Knowledge OS preparation attempt v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "record_type",
+    "asset_id",
+    "outcome",
+    "code",
+    "observed_at"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "id": { "type": "string", "pattern": "^personal-attempt-sha256-[0-9a-f]{64}$" },
+    "record_type": { "const": "attempt" },
+    "asset_id": { "type": "string", "pattern": "^personal-asset-[0-9a-f]{64}$" },
+    "outcome": { "enum": ["prepared", "failed"] },
+    "code": { "type": ["string", "null"], "maxLength": 256 },
+    "observed_at": { "type": "string", "format": "date-time" }
+  }
+}

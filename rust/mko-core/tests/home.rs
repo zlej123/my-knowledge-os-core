@@ -111,3 +111,81 @@ fn material_registered_but_not_yet_recorded_stays_visible_on_home() {
         "home must point at the material instead of recommending nothing"
     );
 }
+
+// A count without a reason leaves the owner guessing, and guessing wrong sends
+// them around a loop that fails the same way. Each recorded failure has to
+// resolve to the one action that would actually move the item.
+#[test]
+fn stopped_material_reports_why_it_stopped() {
+    use mko_core::attempt_v2::{
+        PreparationOutcomeV2, StuckReasonV2, record_preparation_attempt_v2,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let repository = root.path().join("kb");
+    let provider = root.path().join("provider");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    fs::create_dir(&provider).unwrap();
+    fs::write(provider.join("stuck.pdf"), b"%PDF-1.7\nfixture").unwrap();
+    let asset =
+        mko_core::asset_v2::register_pdf_asset_v2(mko_core::asset_v2::RegisterAssetRequestV2 {
+            repository_root: &repository,
+            provider_root: &provider,
+            logical_locator: "stuck.pdf",
+            hydration_confirmation: mko_core::asset_v2::HydrationConfirmationV2::NotConfirmed,
+        })
+        .unwrap()
+        .asset;
+
+    let reason = |repository: &std::path::Path| {
+        let HomeReport::V3(report) =
+            inspect_home(repository, &provider, &FixedElapsedClock::new()).unwrap()
+        else {
+            panic!("expected a v3 home report");
+        };
+        assert_eq!(report.stuck.len(), 1);
+        assert_eq!(report.stuck[0].asset_id, asset.id);
+        assert_eq!(report.stuck[0].title, asset.title_fallback);
+        report.stuck[0].reason
+    };
+
+    // Registered and untouched: not a failure, and not a wrong claim either.
+    assert_eq!(reason(&repository), StuckReasonV2::NotAttempted);
+
+    for (code, expected) in [
+        ("pdf_text_unreadable", StuckReasonV2::TextUnreadable),
+        (
+            "hydration_confirmation_required",
+            StuckReasonV2::DownloadRequired,
+        ),
+        ("prepared_text_invalid", StuckReasonV2::Retryable),
+    ] {
+        record_preparation_attempt_v2(
+            &repository,
+            &asset.id,
+            PreparationOutcomeV2::Failed,
+            Some(code),
+            &FixedClock(
+                chrono::DateTime::parse_from_rfc3339("2026-08-04T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+                    + chrono::Duration::minutes(match code {
+                        "pdf_text_unreadable" => 1,
+                        "hydration_confirmation_required" => 2,
+                        _ => 3,
+                    }),
+            ),
+        )
+        .unwrap();
+        assert_eq!(reason(&repository), expected, "code {code}");
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FixedClock(chrono::DateTime<chrono::Utc>);
+
+impl mko_core::clock::Clock for FixedClock {
+    fn now_utc(&self) -> chrono::DateTime<chrono::Utc> {
+        self.0
+    }
+}
