@@ -941,8 +941,9 @@ fn render_home(report: &HomeReport) {
         HomeReport::V3(report) => {
             let next_action = HomeReport::V3(report.clone()).next_action();
             println!(
-                "새 자료 {} · 검토 {} · 수정 필요 {} · 승인된 지식 {} · 문제 {}",
+                "새 자료 {} · 정리 중 {} · 검토 {} · 수정 필요 {} · 승인된 지식 {} · 문제 {}",
                 report.new_material,
+                report.in_progress,
                 report.review_pending,
                 report.changes_requested,
                 report.approved_knowledge,
@@ -951,6 +952,7 @@ fn render_home(report: &HomeReport) {
             println!(
                 "추천: {}",
                 match next_action {
+                    HomeNextAction::Add if report.new_material == 0 => "멈춘 자료 계속 정리",
                     HomeNextAction::Add => "새 자료 정리",
                     HomeNextAction::Review => "검토 계속",
                     HomeNextAction::Repair => "문제 확인",
@@ -958,7 +960,14 @@ fn render_home(report: &HomeReport) {
                 }
             );
             println!();
-            println!("[1] 새 자료 정리");
+            if report.in_progress > 0 {
+                println!(
+                    "[1] 자료 정리 (새 자료 {} · 정리하다 멈춘 자료 {})",
+                    report.new_material, report.in_progress
+                );
+            } else {
+                println!("[1] 새 자료 정리");
+            }
             println!("[2] 검토 계속");
             println!("[3] 지식 찾기");
             println!("[4] 빠른 메모");

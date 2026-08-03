@@ -40,6 +40,11 @@ pub struct LegacyHomeReport {
 pub struct V3HomeReport {
     pub new_material: u64,
     pub registered: u64,
+    /// Registered Assets that have not become a Source or Knowledge record yet.
+    ///
+    /// Extraction can fail, and a session can end mid-way; without this the
+    /// material is registered, invisible, and nobody is waiting on it.
+    pub in_progress: u64,
     pub review_pending: u64,
     pub changes_requested: u64,
     pub approved_knowledge: u64,
@@ -79,7 +84,7 @@ impl HomeReport {
                     HomeNextAction::Repair
                 } else if report.review_pending > 0 || report.changes_requested > 0 {
                     HomeNextAction::Review
-                } else if report.new_material > 0 {
+                } else if report.new_material > 0 || report.in_progress > 0 {
                     HomeNextAction::Add
                 } else {
                     HomeNextAction::None
@@ -129,9 +134,15 @@ pub fn inspect_home(
         RepositoryGeneration::V3 => {
             let inbox = inspect_inbox_pdf_assets_v2(repository_root, provider_root, elapsed_clock)?;
             let queue = summarize_home_queue_v2(repository_root)?;
+            let in_progress = inbox
+                .registered_asset_ids
+                .iter()
+                .filter(|id| !queue.recorded_asset_ids.contains(*id))
+                .count() as u64;
             Ok(HomeReport::V3(V3HomeReport {
                 new_material: inbox.new_count,
                 registered: inbox.registered_count,
+                in_progress,
                 review_pending: queue.review_pending,
                 changes_requested: queue.changes_requested,
                 approved_knowledge: queue.approved_knowledge,

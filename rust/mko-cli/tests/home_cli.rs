@@ -60,6 +60,42 @@ mod macos {
         assert_eq!(snapshot(&repository), before);
     }
 
+    // The count is useless if it stops at the report: this is the screen the
+    // owner actually reads when they come back to unfinished work.
+    #[test]
+    #[allow(deprecated)]
+    fn home_shows_material_that_was_registered_but_never_finished() {
+        let root = tempdir().unwrap();
+        let repository = root.path().join("v3-kb");
+        let provider = root.path().join("provider");
+        scaffold_personal_kb_v2(&repository).unwrap();
+        fs::create_dir(&provider).unwrap();
+        fs::write(provider.join("stuck.pdf"), b"%PDF-1.7\nfixture").unwrap();
+        mko_core::asset_v2::register_pdf_asset_v2(mko_core::asset_v2::RegisterAssetRequestV2 {
+            repository_root: &repository,
+            provider_root: &provider,
+            logical_locator: "stuck.pdf",
+            hydration_confirmation: mko_core::asset_v2::HydrationConfirmationV2::NotConfirmed,
+        })
+        .unwrap();
+        let before = snapshot(&repository);
+
+        let output = run_home_and_quit(&repository, &provider, root.path());
+
+        assert!(output.status.success());
+        let screen = String::from_utf8_lossy(&output.stdout);
+        assert!(screen.contains("정리 중 1"), "missing the count: {screen}");
+        assert!(
+            screen.contains("멈춘 자료 계속 정리"),
+            "home must recommend the unfinished material: {screen}"
+        );
+        assert!(
+            screen.contains("정리하다 멈춘 자료 1"),
+            "the action must say how much is waiting: {screen}"
+        );
+        assert_eq!(snapshot(&repository), before);
+    }
+
     #[test]
     #[allow(deprecated)]
     fn empty_resurface_filter_is_id_free_and_read_only() {

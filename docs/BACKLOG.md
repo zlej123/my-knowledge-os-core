@@ -121,14 +121,23 @@ lock; acquire only after the phrase is typed, then re-validate card and
 revision under it; treat Ctrl-C, EOF, and `q` as clean cancel; surface owner
 PID and time in `mko doctor` with an explicit, safe recovery path.
 
-**P1 — registered-but-unprocessed PDFs vanish from home.** The KB held three
+**P1 — registered-but-unprocessed PDFs vanish from home (partly resolved
+2026-08-03).** The KB held three
 registered Assets and one Source (two PDFs stopped at extraction), yet home
 printed `새 자료 0 · 검토 1 · 수정 필요 0 · 승인된 지식 0 · 문제 0`.
 `inspect_home` computes `registered` (`rust/mko-core/src/home.rs`) but the
 render and recommendation logic in `rust/mko-cli/src/cli.rs` drops it. After an
 extraction failure or an interrupted run the owner cannot tell that material is
 waiting. Home needs a 정리 중 / 문제 count and per-item next actions (다시 추출,
-지원되지 않는 PDF, 복구 방법 보기).
+지원되지 않는 PDF, 복구 방법 보기). Fixed for the count: `inspect_home` now
+distinguishes registered Assets that have become a record from those that have
+not, home shows 정리 중, recommends 멈춘 자료 계속 정리 when nothing else is
+pending, and the 자료 정리 action says how much is waiting. **Still open:**
+per-item next actions need Core to remember *why* an Asset stopped — a
+preparation failure is not recorded anywhere today, so a listing can say an item
+is unfinished but not whether it needs a re-run, a new copy, or a repair. That
+per-Asset processing state is the design question to settle before building the
+per-item recovery UI.
 
 **P1 — `doctor` misdiagnoses a current v3 KB.** A real schema-v2 KB that bare
 `mko` opens fine reports `repository_incompatible` / `next_action: configure`

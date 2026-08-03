@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     io::Read,
     path::Path,
@@ -99,6 +99,8 @@ pub struct HomeQueueSummaryV2 {
     pub changes_requested: u64,
     pub blocked: u64,
     pub approved_knowledge: u64,
+    /// Assets that already have a Source or Knowledge record, in any state.
+    pub recorded_asset_ids: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -213,6 +215,11 @@ pub fn summarize_home_queue_v2(repository_root: &Path) -> Result<HomeQueueSummar
             }
         }
     }
+    summary.recorded_asset_ids = groups
+        .values()
+        .flatten()
+        .map(|target| target.asset.id.clone())
+        .collect();
     summary.approved_knowledge = groups
         .values()
         .flatten()
