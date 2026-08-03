@@ -227,10 +227,16 @@ file is untouched: the body travels in the input so the digest binds it, and is
 recovered from the stored file for comparison rather than re-derived, so the
 check needs nothing beyond the file it is checking.
 
-**P3 — search and empty states dead-end.** 지식 찾기 with no match ends at
+**P3 — search and empty states dead-end (resolved 2026-08-03).** 지식 찾기 with no match ends at
 `승인된 지식에서 찾지 못했습니다` — no mention that pending knowledge exists and no
 route back to 검토 계속. Matches show a 140-character excerpt with no way to open
 the full knowledge item (`rust/mko-cli/src/cli.rs`).
+
+Fixed: a result now names the readable document it came from, which is worth
+opening since projections carry the content (item 5), and the path comes from
+one Core helper so it cannot drift from the layout. An empty result says which
+emptiness it is — no approved knowledge at all, or items still waiting on the
+owner — and points at `mko` to continue rather than stopping at "찾지 못했습니다".
 
 **What works.** Bare `mko` turned a command-centred tool into an
 action-centred one; `remember` re-displays the exact text and takes only a

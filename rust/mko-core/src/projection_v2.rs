@@ -282,11 +282,7 @@ pub(crate) fn read_current_projection_input_v2(
     record_type: ProjectionRecordTypeV2,
     record_id: &str,
 ) -> Result<ProjectionInputV2, MkoError> {
-    let path = repository_root.join(format!(
-        "views/records/{}-{}.md",
-        record_type.as_str(),
-        record_id
-    ));
+    let path = repository_root.join(record_projection_relative_path_v2(record_type, record_id));
     if matches!(
         fs::symlink_metadata(&path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound
@@ -482,11 +478,17 @@ pub fn projection_relative_path_v2(input: &ProjectionInputV2) -> Result<String, 
 }
 
 fn projection_relative_path_unchecked(input: &ProjectionInputV2) -> String {
-    format!(
-        "views/records/{}-{}.md",
-        input.record_type.as_str(),
-        input.id
-    )
+    record_projection_relative_path_v2(input.record_type, &input.id)
+}
+
+/// Where a record's readable projection lives, for callers that hold an
+/// identifier rather than a whole input — so nobody has to spell the layout out
+/// a second time and watch it rot.
+pub fn record_projection_relative_path_v2(
+    record_type: ProjectionRecordTypeV2,
+    record_id: &str,
+) -> String {
+    format!("views/records/{}-{}.md", record_type.as_str(), record_id)
 }
 
 /// Build the readable body from the exact typed responses.

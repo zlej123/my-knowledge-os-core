@@ -121,6 +121,22 @@ fn search_returns_only_approved_knowledge_and_home_counts_it() {
     let matches = search_approved_knowledge_v2(environment.root.path(), "reported").unwrap();
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].title, "Reported result");
+    // An excerpt is only useful if it leads somewhere: the path a result points
+    // at must be the readable document that actually exists.
+    let readable =
+        environment
+            .root
+            .path()
+            .join(mko_core::projection_v2::record_projection_relative_path_v2(
+                mko_core::projection_v2::ProjectionRecordTypeV2::Knowledge,
+                &matches[0].knowledge_id,
+            ));
+    assert!(
+        readable.is_file(),
+        "missing readable document: {readable:?}"
+    );
+    let document = fs::read_to_string(&readable).unwrap();
+    assert!(document.contains(&matches[0].title));
     let summary = summarize_home_queue_v2(environment.root.path()).unwrap();
     assert_eq!(summary.review_pending, 0);
     assert_eq!(summary.approved_knowledge, 1);

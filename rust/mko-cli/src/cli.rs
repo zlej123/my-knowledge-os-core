@@ -56,7 +56,7 @@ use mko_core::{
     provider_scan::MonotonicElapsedClock,
     queue_v2::{
         KnowledgeSearchLayerV2, ResurfacedKnowledgeStateV2, resurface_knowledge_by_perspective_v2,
-        search_approved_knowledge_by_perspective_v2,
+        search_approved_knowledge_by_perspective_v2, summarize_home_queue_v2,
     },
     quick_note_v2::{
         QuickNotePublicationOutcomeV2, prepare_quick_note_v2, publish_quick_note_v2,
@@ -1036,6 +1036,25 @@ fn legacy_home_action(
     Ok(())
 }
 
+/// Finding nothing is a normal outcome, but ending there hides the reason.
+/// Approved knowledge is the only thing search covers, so when the shelf is
+/// empty or everything is still waiting on the owner, say which it is.
+fn report_search_dead_end(repository: &Path) {
+    let Ok(summary) = summarize_home_queue_v2(repository) else {
+        return;
+    };
+    if summary.approved_knowledge == 0 {
+        println!("아직 승인된 지식이 없습니다. 검색은 승인된 지식만 찾습니다.");
+    }
+    let waiting = summary.review_pending + summary.changes_requested;
+    if waiting > 0 {
+        println!("검토를 기다리는 항목이 {waiting}개 있습니다.");
+        println!("`mko`를 열어 검토를 계속하면 검색에도 나타납니다.");
+    } else if summary.approved_knowledge == 0 {
+        println!("`mko`를 열어 새 자료를 정리하는 것부터 시작할 수 있습니다.");
+    }
+}
+
 fn find(arguments: FindArgs) -> Result<(), MkoError> {
     let repository = setup_repository(arguments.repo)?;
     let perspective = arguments.perspective.map(Into::into);
@@ -1076,6 +1095,7 @@ fn find(arguments: FindArgs) -> Result<(), MkoError> {
             };
             if matches.is_empty() && notes.is_empty() {
                 println!("승인된 지식에서 찾지 못했습니다.");
+                report_search_dead_end(&repository);
             } else {
                 for item in matches {
                     println!(
@@ -1103,6 +1123,15 @@ fn find(arguments: FindArgs) -> Result<(), MkoError> {
                     if !item.locators.is_empty() {
                         println!("  근거: {}", item.locators.join(", "));
                     }
+                    // A 140-character excerpt is a pointer, not an answer. The
+                    // projection is the readable document, so name it.
+                    println!(
+                        "  전체 보기: {}",
+                        mko_core::projection_v2::record_projection_relative_path_v2(
+                            mko_core::projection_v2::ProjectionRecordTypeV2::Knowledge,
+                            &item.knowledge_id,
+                        )
+                    );
                 }
                 for note in notes {
                     println!("[내 생각] {}", compact_excerpt(&note.text, 140));
