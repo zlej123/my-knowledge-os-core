@@ -50,7 +50,7 @@ This Skill is written for exactly one Core version. Before the first `mko` comma
 (after installation checks), verify the contract:
 
 ```bash
-mko handshake --skill-version "0.3.4" --format json-v2
+mko handshake --skill-version "0.3.5" --format json-v2
 ```
 
 Pass the pinned version string above exactly; never substitute the CLI's own reported version.
@@ -272,6 +272,11 @@ mko review-feedback --input ".mko/runtime/review-feedback.json" --format json-v2
 Never encode `approve` in non-interactive input. If the user says approve, tell them to run
 `mko review "STABLE_ID"` in a real terminal; that command redisplays the exact revision and requires
 the revision-bound confirmation.
+
+That terminal is also where the owner can decide anything else about the item: the card offers
+approve, request changes with their own wording, defer, and cancel. Prefer directing them there
+when they are at a terminal, and use the machine feedback surface above when you are carrying out
+a decision they have already stated to you.
 
 ## Regeneration after requested changes
 

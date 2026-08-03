@@ -31,7 +31,7 @@
           "checks": [
             {
               "code": "product_version",
-              "message": "0.3.4",
+              "message": "0.3.5",
               "path": null,
               "recovery": null,
               "status": "healthy"

@@ -442,6 +442,11 @@ fn run_tty_review(environment: &Environment, selected_id: &str, confirmation: &s
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     std::thread::sleep(std::time::Duration::from_millis(100));
+    // The card now asks what the owner wants to do before it asks them to
+    // confirm it: choose approval, then type the exact phrase.
+    stdin.write_all(b"a\n").unwrap();
+    stdin.flush().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
     stdin.write_all(confirmation.as_bytes()).unwrap();
     stdin.flush().unwrap();
     let output = child.wait_with_output().unwrap();

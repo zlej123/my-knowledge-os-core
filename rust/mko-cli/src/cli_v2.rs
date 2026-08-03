@@ -34,7 +34,7 @@ use mko_core::{
     review_session_v2::{
         ReviewSessionDecisionInputV2, apply_review_session_decision_v2, open_review_session_v2,
     },
-    review_v2::{TtyApprovalOutcomeV2, publish_tty_approval_review_v2},
+    review_v2::{TtyReviewOutcomeV2, publish_tty_review_v2},
 };
 use serde::de::DeserializeOwned;
 
@@ -299,10 +299,18 @@ pub fn review(
                 MkoError::new("review_queue_empty", "there is no pending review item")
             })?,
     };
-    match publish_tty_approval_review_v2(repository, &selected_id, clock)? {
-        TtyApprovalOutcomeV2::Approved(publication) => report_review_publication(&publication)?,
-        TtyApprovalOutcomeV2::Cancelled => {
-            println!("승인하지 않았습니다. 저장된 내용은 그대로입니다.");
+    match publish_tty_review_v2(repository, &selected_id, clock)? {
+        TtyReviewOutcomeV2::Approved(publication) => report_review_publication(&publication)?,
+        TtyReviewOutcomeV2::ChangesRequested(publication) => {
+            println!("수정을 요청했습니다: {}", publication.record.id);
+            println!("다음 초안이 준비되면 이 항목이 다시 검토 대기열에 올라옵니다.");
+        }
+        TtyReviewOutcomeV2::Deferred(publication) => {
+            println!("나중에 보기로 했습니다: {}", publication.record.id);
+            println!("이 항목은 검토 대기열에 그대로 남아 있습니다.");
+        }
+        TtyReviewOutcomeV2::Cancelled => {
+            println!("아무것도 바꾸지 않았습니다.");
             println!("이 항목은 검토 대기열에 남아 있습니다: `mko`로 다시 열 수 있습니다.");
         }
     }
