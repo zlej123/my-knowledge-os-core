@@ -1,7 +1,10 @@
 # My Knowledge OS — Readable Projection Design
 
 Date: 2026-08-03
-Status: Proposed; implementation follows owner decisions in §5
+Status: Proposed. The owner has said the current KB may be wiped, which removes
+the migration weight from D1. Implementation started 2026-08-03 and stopped on a
+constraint found in the code, recorded in §4a; the branch
+`feat/readable-projection` holds that work.
 Applies to: `mko` after the 2026-08-03 usability lane (PRs #8–#13)
 Responds to: usability review item 5 ("Obsidian이 아직 읽기 화면 역할을 못 합니다")
 Related: the queued "Rendered-document review" proposal in `docs/BACKLOG.md` — the
@@ -91,13 +94,38 @@ one-time repair, and it must be announced rather than discovered.
 
 This is the reason this design is queued rather than implemented directly.
 
+## 4a. The constraint that actually blocks this (found 2026-08-03)
+
+Adding body content compiles and works through the write path and the queue's
+drift path — both derive the body from the record with one shared function, so
+they agree. Review publication then fails every time with
+`projection_snapshot_changed`.
+
+The cause is architectural, not a bug in the new code.
+`read_current_projection_input_v2` proves a projection has not been hand-edited
+by **rebuilding the projection input from the stored file's own frontmatter**
+and re-rendering it: if the bytes and digest match, the file is untouched. Body
+content is not frontmatter, so the rebuild cannot reproduce it, the re-render
+never matches, and every projection looks modified.
+
+The fix is not to smuggle the body into frontmatter. It is that **anything
+regenerating a projection must start from the record, not from the previous
+file** — which is what the queue path already does and what the projection
+being a projection actually means. So the review path should derive its expected
+input from the current revision the same way, and keep the stored-file
+comparison for the one question it is good at: has the owner edited this file?
+
+That refactor touches the guard that protects an owner's edits from being
+overwritten, so it deserves its own change rather than riding along with the
+content work. Sequence: refactor the drift check to compare against a
+record-derived expectation, then land the body.
+
 ## 5. Decisions for the owner
 
-- **D1 — schema version.** Bump `projection_schema_version` 2 → 3 (recommended)
-  or extend within 2. A bump makes the change legible in the files themselves
-  and lets `mko dashboard` explain the repair as a format upgrade rather than as
-  drift. Extending within 2 avoids touching the projection schema contract but
-  leaves an owner staring at unexplained drift.
+- **D1 — schema version (weight reduced).** The owner has said the current KB
+  holds nothing worth keeping and may be wiped, so the migration this decision
+  was mostly about no longer bites. A bump to `projection_schema_version` 3 is
+  still recommended for legibility once other KBs exist.
 - **D2 — how much content.** Full body (recommended: the point is to stop the
   terminal being the only place knowledge is legible), or summary plus a link
   into the revision. Full body duplicates text that also lives in the revision;
