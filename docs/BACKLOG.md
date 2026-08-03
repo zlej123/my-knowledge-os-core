@@ -209,13 +209,23 @@ after the owner has chosen to approve — the weight of the confirmation now
 matches the weight of the act. The decision is re-validated against the exact
 displayed card under the lock, so every choice binds to what was on screen.
 
-**P2 — Obsidian is not yet a reading surface.** Generated record projections
+**P2 — Obsidian is not yet a reading surface (resolved 2026-08-03).** Generated record projections
 carry only title, internal record link, asset link, and revision hash; the
 summary, claims, and analysis are absent, and `current.yaml` holds only a
 revision digest, so the owner must hunt for the revision file. Projections need
 the one-sentence and general summary, key claims with evidence locators, LLM
 analysis / counterarguments / open questions, a link to open the original PDF,
 and review state with the next action.
+
+Fixed: projections now carry the readable document. The one-sentence and
+general summary, the claims with their evidence locators, LLM analysis kept
+visibly apart from grounded material, limitations, and a link to the original
+document are rendered into the page, derived deterministically from the exact
+revision. Verified on the owner's own KB, where the file that held only a title
+and two links now reads as the note it projects. The drift guard still proves a
+file is untouched: the body travels in the input so the digest binds it, and is
+recovered from the stored file for comparison rather than re-derived, so the
+check needs nothing beyond the file it is checking.
 
 **P3 — search and empty states dead-end.** 지식 찾기 with no match ends at
 `승인된 지식에서 찾지 못했습니다` — no mention that pending knowledge exists and no

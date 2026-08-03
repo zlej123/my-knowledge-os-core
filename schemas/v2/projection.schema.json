@@ -17,20 +17,34 @@
     "asset_link"
   ],
   "properties": {
-    "record_type": { "enum": ["source", "knowledge"] },
+    "record_type": {
+      "enum": [
+        "source",
+        "knowledge"
+      ]
+    },
     "id": {
       "type": "string",
       "pattern": "^personal-(source|knowledge)-[a-f0-9]{64}$"
     },
-    "title": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
     "current_revision": {
       "type": "string",
       "pattern": "^sha256:[a-f0-9]{64}$"
     },
     "review_head_id": {
       "anyOf": [
-        { "type": "string", "pattern": "^personal-review-[a-f0-9]{64}$" },
-        { "type": "null" }
+        {
+          "type": "string",
+          "pattern": "^personal-review-[a-f0-9]{64}$"
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "derived_state": {
@@ -43,48 +57,92 @@
         "blocked"
       ]
     },
-    "domain": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "domain": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
     "perspectives": {
       "type": "array",
       "maxItems": 5,
       "uniqueItems": true,
       "items": {
-        "enum": ["life", "learning", "technical", "project", "investment"]
+        "enum": [
+          "life",
+          "learning",
+          "technical",
+          "project",
+          "investment"
+        ]
       }
     },
     "tags": {
       "type": "array",
       "maxItems": 256,
-      "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
     },
     "record_link": {
       "type": "string",
       "minLength": 1,
       "maxLength": 4096,
       "pattern": "^[A-Za-z0-9._/-]+$",
-      "not": { "pattern": "(^|/)\\.\\.?(/|$)" }
+      "not": {
+        "pattern": "(^|/)\\.\\.?(/|$)"
+      }
     },
     "asset_link": {
       "type": "string",
       "minLength": 1,
       "maxLength": 4096,
       "pattern": "^[A-Za-z0-9._/-]+$",
-      "not": { "pattern": "(^|/)\\.\\.?(/|$)" }
+      "not": {
+        "pattern": "(^|/)\\.\\.?(/|$)"
+      }
+    },
+    "body_markdown": {
+      "type": "string",
+      "maxLength": 1048576
     }
   },
   "allOf": [
     {
-      "if": { "properties": { "record_type": { "const": "source" } } },
+      "if": {
+        "properties": {
+          "record_type": {
+            "const": "source"
+          }
+        }
+      },
       "then": {
         "properties": {
-          "id": { "pattern": "^personal-source-[a-f0-9]{64}$" },
-          "perspectives": { "maxItems": 0 }
+          "id": {
+            "pattern": "^personal-source-[a-f0-9]{64}$"
+          },
+          "perspectives": {
+            "maxItems": 0
+          }
         }
       }
     },
     {
-      "if": { "properties": { "record_type": { "const": "knowledge" } } },
-      "then": { "properties": { "id": { "pattern": "^personal-knowledge-[a-f0-9]{64}$" } } }
+      "if": {
+        "properties": {
+          "record_type": {
+            "const": "knowledge"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "pattern": "^personal-knowledge-[a-f0-9]{64}$"
+          }
+        }
+      }
     }
   ]
 }

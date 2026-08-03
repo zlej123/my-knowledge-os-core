@@ -126,6 +126,7 @@ fn manifest_digest_cannot_make_an_orphan_projection_semantically_current() {
             tags: Vec::new(),
             record_link: format!("sources/{record_id}/current.yaml"),
             asset_link: format!("assets/registry/personal-asset-{}.json", "c".repeat(64)),
+            body_markdown: String::new(),
         },
     )
     .unwrap();
@@ -177,6 +178,7 @@ fn repair_regenerates_missing_and_semantically_stale_unmodified_projection() {
             tags: response.tags.clone(),
             record_link: format!("sources/{}/current.yaml", record.record_id),
             asset_link: format!("assets/registry/{}.json", asset.id),
+            body_markdown: String::new(),
         },
     )
     .unwrap();
