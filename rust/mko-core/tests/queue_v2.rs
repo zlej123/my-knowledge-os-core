@@ -538,9 +538,9 @@ fn self_consistent_projection_with_noncanonical_semantics_blocks_the_queue() {
             domain: "uncategorized".into(),
             perspectives: Vec::new(),
             tags: environment.source.tags.clone(),
+            body_markdown: String::new(),
             record_link: format!("sources/{}/current.yaml", source.record_id),
             asset_link: format!("assets/registry/{}.json", environment.asset.id),
-            body: Default::default(),
         },
     )
     .unwrap();
@@ -630,7 +630,20 @@ fn sync_projection(
                 record.record_id
             ),
             asset_link: format!("assets/registry/{}.json", environment.asset.id),
-            body: Default::default(),
+            body_markdown: if is_source {
+                mko_core::projection_v2::source_projection_body_v2(
+                    &environment.source,
+                    Some(environment.asset.provider.logical_locator.clone()),
+                )
+            } else {
+                mko_core::projection_v2::knowledge_projection_body_v2(
+                    knowledge
+                        .as_ref()
+                        .map(|knowledge| &knowledge.revision.response)
+                        .unwrap_or(&environment.knowledge),
+                    Some(environment.asset.provider.logical_locator.clone()),
+                )
+            },
         },
     )
     .unwrap();

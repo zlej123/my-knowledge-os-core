@@ -19,10 +19,9 @@ use crate::{
         LimitationBasisV2, PreparedContentV2, ReviewTargetTypeV2, SourceResponseV2,
     },
     projection_v2::{
-        ProjectionBodyV2, ProjectionInputV2, ProjectionRecordTypeV2, ProjectionStateV2,
-        ProjectionWriteOutcomeV2, ProjectionWriteResultV2, knowledge_projection_body_v2,
-        projection_relative_path_v2, render_projection_v2, source_projection_body_v2,
-        write_projection_locked,
+        ProjectionInputV2, ProjectionRecordTypeV2, ProjectionStateV2, ProjectionWriteOutcomeV2,
+        ProjectionWriteResultV2, knowledge_projection_body_v2, projection_relative_path_v2,
+        render_projection_v2, source_projection_body_v2, write_projection_locked,
     },
     review_v2::{ReviewDerivedStateV2, derive_review_histories_v2},
     revision_v2::{
@@ -736,7 +735,7 @@ fn publish_record_and_projection(
     domain: String,
     perspectives: Vec<PerspectiveV2>,
     asset_id: String,
-    body: ProjectionBodyV2,
+    body: String,
     clock: &dyn Clock,
 ) -> Result<RecordWriteResultV2, MkoError> {
     let candidate_revision = sha256_digest(bytes);
@@ -898,7 +897,7 @@ struct ProjectionMetadataV2 {
     asset_id: String,
     /// Derived by the same functions drift detection uses, so a freshly written
     /// projection and the expected one are identical.
-    body: ProjectionBodyV2,
+    body: String,
 }
 
 fn expected_projection_input(
@@ -951,7 +950,7 @@ fn expected_projection_input(
         domain: metadata.domain,
         perspectives: metadata.perspectives,
         tags: metadata.tags,
-        body: metadata.body,
+        body_markdown: metadata.body,
         record_link: format!("{collection}/{record_id}/current.yaml"),
         asset_link: format!("assets/registry/{}.json", metadata.asset_id),
     })

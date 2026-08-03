@@ -573,6 +573,31 @@ fn derive_groups(repository_root: &Path) -> Result<BTreeMap<String, Vec<ScannedT
     Ok(groups)
 }
 
+/// The projection Core would generate for a record right now, derived from the
+/// record itself.
+///
+/// Anything that regenerates a projection has to start here rather than from
+/// the previous file: the file is the output, and once it carries content there
+/// is no way to read an input back out of it.
+pub fn expected_projection_input_for_record_v2(
+    repository_root: &Path,
+    record_type: ReviewTargetTypeV2,
+    record_id: &str,
+) -> Result<ProjectionInputV2, MkoError> {
+    let groups = derive_groups(repository_root)?;
+    let target = groups
+        .values()
+        .flatten()
+        .find(|target| target.record_type == record_type && target.record_id == record_id)
+        .ok_or_else(|| {
+            MkoError::new(
+                "projection_not_found",
+                "no current record matches the requested projection",
+            )
+        })?;
+    canonical_projection_input(target)
+}
+
 fn canonical_projection_input(target: &ScannedTarget) -> Result<ProjectionInputV2, MkoError> {
     let history = target
         .history
@@ -626,7 +651,7 @@ fn canonical_projection_input(target: &ScannedTarget) -> Result<ProjectionInputV
         domain: primary_perspective(&perspectives),
         perspectives,
         tags,
-        body,
+        body_markdown: body,
         record_link: format!("{collection}/{}/current.yaml", target.record_id),
         asset_link: format!("assets/registry/{}.json", target.asset.id),
     })

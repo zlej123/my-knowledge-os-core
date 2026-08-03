@@ -89,14 +89,13 @@ pub struct ProjectionInputV2 {
     pub tags: Vec<String>,
     pub record_link: String,
     pub asset_link: String,
-    #[serde(default, skip_serializing_if = "ProjectionBodyV2::is_empty")]
-    pub body: ProjectionBodyV2,
-}
-
-impl ProjectionBodyV2 {
-    fn is_empty(&self) -> bool {
-        *self == Self::default()
-    }
+    /// The readable part of the page, already rendered.
+    ///
+    /// It travels in the input so the digest binds it, and it is written
+    /// verbatim, which is what lets verification recover it from the stored
+    /// file rather than having to re-derive it from the record.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub body_markdown: String,
 }
 
 /// What a person needs to read on the page, derived from the exact revision.
@@ -152,7 +151,7 @@ struct ProjectionInputWireV2 {
     record_link: String,
     asset_link: String,
     #[serde(default)]
-    body: ProjectionBodyV2,
+    body_markdown: String,
 }
 
 impl<'de> Deserialize<'de> for ProjectionInputV2 {
@@ -173,7 +172,7 @@ impl<'de> Deserialize<'de> for ProjectionInputV2 {
             tags: wire.tags,
             record_link: wire.record_link,
             asset_link: wire.asset_link,
-            body: wire.body,
+            body_markdown: wire.body_markdown,
         };
         validate_input(&input).map_err(serde::de::Error::custom)?;
         Ok(input)
@@ -270,28 +269,24 @@ pub(crate) fn projection_snapshot_status_v2(
     }
 }
 
+/// Prove the stored projection is exactly what Core would generate for the
+/// record right now.
+///
+/// This used to rebuild the input from the file's own frontmatter and re-render
+/// it, which only worked while the file carried nothing but frontmatter. The
+/// question worth asking is the same either way — has anything about this file
+/// diverged from the record it projects — and asking it against a
+/// record-derived expectation answers it for a file with content too.
 pub(crate) fn read_current_projection_input_v2(
     repository_root: &Path,
     record_type: ProjectionRecordTypeV2,
     record_id: &str,
 ) -> Result<ProjectionInputV2, MkoError> {
-    let expected_prefix = format!("personal-{}-", record_type.as_str());
-    validate_prefixed_hex(record_id, &expected_prefix, "record ID")?;
-    let probe = ProjectionInputV2 {
-        record_type,
-        id: record_id.to_owned(),
-        title: "projection probe".into(),
-        current_revision: format!("sha256:{}", "0".repeat(64)),
-        review_head_id: None,
-        derived_state: ProjectionStateV2::Unreviewed,
-        domain: "projection probe".into(),
-        perspectives: Vec::new(),
-        tags: Vec::new(),
-        record_link: "projection-probe".into(),
-        asset_link: "projection-probe".into(),
-        body: ProjectionBodyV2::default(),
-    };
-    let path = repository_root.join(projection_relative_path_unchecked(&probe));
+    let path = repository_root.join(format!(
+        "views/records/{}-{}.md",
+        record_type.as_str(),
+        record_id
+    ));
     if matches!(
         fs::symlink_metadata(&path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound
@@ -315,7 +310,7 @@ pub(crate) fn read_current_projection_input_v2(
             "projection does not identify the requested record",
         ));
     }
-    let input = ProjectionInputV2 {
+    let mut input = ProjectionInputV2 {
         record_type: metadata.record_type,
         id: metadata.record_id,
         title: metadata.title,
@@ -327,8 +322,20 @@ pub(crate) fn read_current_projection_input_v2(
         tags: metadata.tags,
         record_link: metadata.record_link,
         asset_link: metadata.asset_link,
-        body: ProjectionBodyV2::default(),
+        body_markdown: String::new(),
     };
+    // The readable part is recovered from the file rather than re-derived. The
+    // generated header ends with the current-revision line, so everything after
+    // it is the body; an edit anywhere still fails the digest and byte
+    // comparison below, which is the property this check exists for.
+    let header_end = format!("- Current revision: `{}`\n", input.current_revision);
+    let Some(position) = text.find(&header_end) else {
+        return Err(MkoError::new(
+            "projection_snapshot_changed",
+            "the current projection is stale or user-modified",
+        ));
+    };
+    input.body_markdown = text[position + header_end.len()..].to_owned();
     let rendered = render_projection_v2(&input)?;
     if rendered.projection_digest != metadata.projection_digest || rendered.bytes != bytes {
         return Err(MkoError::new(
@@ -482,7 +489,6 @@ fn projection_relative_path_unchecked(input: &ProjectionInputV2) -> String {
     )
 }
 
-
 /// Build the readable body from the exact typed responses.
 ///
 /// Both the write path and drift detection call this, so a projection that was
@@ -490,8 +496,8 @@ fn projection_relative_path_unchecked(input: &ProjectionInputV2) -> String {
 pub fn source_projection_body_v2(
     response: &crate::model_v2::SourceResponseV2,
     document_locator: Option<String>,
-) -> ProjectionBodyV2 {
-    ProjectionBodyV2 {
+) -> String {
+    render_body(ProjectionBodyV2 {
         summary: non_empty(&response.one_sentence_summary),
         overview: non_empty(&response.general_summary),
         grounded: response
@@ -510,17 +516,21 @@ pub fn source_projection_body_v2(
             .map(|limitation| ProjectionPointV2 {
                 label: None,
                 text: limitation.text.clone(),
-                evidence: limitation.evidence_refs.iter().map(evidence_label).collect(),
+                evidence: limitation
+                    .evidence_refs
+                    .iter()
+                    .map(evidence_label)
+                    .collect(),
             })
             .collect(),
         document_locator,
-    }
+    })
 }
 
 pub fn knowledge_projection_body_v2(
     response: &crate::model_v2::KnowledgeResponseV2,
     document_locator: Option<String>,
-) -> ProjectionBodyV2 {
+) -> String {
     use crate::model_v2::KnowledgeUnitKindV2;
     let point = |unit: &crate::model_v2::KnowledgeUnitV2| ProjectionPointV2 {
         label: non_empty(&unit.title),
@@ -538,7 +548,7 @@ pub fn knowledge_projection_body_v2(
                 | KnowledgeUnitKindV2::Result
         )
     };
-    ProjectionBodyV2 {
+    render_body(ProjectionBodyV2 {
         summary: non_empty(&response.synthesis),
         overview: None,
         grounded: response
@@ -555,7 +565,13 @@ pub fn knowledge_projection_body_v2(
             .collect(),
         limitations: Vec::new(),
         document_locator,
-    }
+    })
+}
+
+fn render_body(body: ProjectionBodyV2) -> String {
+    let mut text = String::new();
+    append_projection_body(&mut text, &body);
+    text
 }
 
 fn evidence_label(reference: &crate::model_v2::EvidenceRefV2) -> String {
@@ -657,7 +673,7 @@ fn render_projection_unchecked(
         input.current_revision,
     );
     let mut text = text;
-    append_projection_body(&mut text, &input.body);
+    text.push_str(&input.body_markdown);
     Ok(RenderedProjectionV2 {
         bytes: text.into_bytes(),
         projection_digest,

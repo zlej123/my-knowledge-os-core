@@ -317,7 +317,7 @@ fn projection(title: &str) -> ProjectionInputV2 {
         tags: vec!["example".into(), "paper".into()],
         record_link: format!("sources/personal-source-{}/current.yaml", "a".repeat(64)),
         asset_link: format!("assets/registry/personal-asset-{}.yaml", "c".repeat(64)),
-        body: Default::default(),
+        body_markdown: String::new(),
     }
 }
 
