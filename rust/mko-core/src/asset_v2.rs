@@ -90,6 +90,9 @@ pub struct InboxAssetInspectionV2 {
     pub registered_count: u64,
     pub blocked_count: u64,
     pub scan_complete: bool,
+    /// Identifiers of the registered Assets found in this scan, so a caller can
+    /// tell which of them have been carried further and which are still waiting.
+    pub registered_asset_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -156,6 +159,7 @@ pub fn inspect_inbox_pdf_assets_v2(
                     }
                     Ok(_) if read_asset_v2(&repository_root, &id).is_ok() => {
                         result.registered_count += 1;
+                        result.registered_asset_ids.push(id);
                     }
                     Ok(_) => {
                         result.blocked_count += 1;
