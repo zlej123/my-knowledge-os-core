@@ -82,9 +82,13 @@ idea in the next section.
    stores feedback and stops; replacement needs the current revision, and
    the queue only says "수정본 생성" without naming the regeneration flow.
    Fix direction: one guided path from feedback to replacement revision.
-3. **Flaky test.** `registry_scan_limit` failed once in a full-workspace run
-   and passed in isolation — likely load/timing sensitivity. Track before
-   trusting full-suite green on slow machines.
+3. **Flaky test (resolved 2026-08-03).** `registry_scan_limit` failed once in a
+   full-workspace run and passed in isolation. Confirmed on 2026-08-03: the same
+   commit failed on a Windows CI runner and passed on re-run. The cause was
+   `LOCK_SCAN_TIME_LIMIT`, a 100ms wall-clock deadline on scanning the lock
+   directory, which turned machine slowness into the typed, unactionable
+   `registry_scan_limit` failure. The entry count is the real bound on work; the
+   time bound now only guards I/O that never returns.
 
 ## Owner usability review — 2026-08-03 (live 0.3.2 run)
 
