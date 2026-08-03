@@ -139,13 +139,16 @@ is unfinished but not whether it needs a re-run, a new copy, or a repair. That
 per-Asset processing state is the design question to settle before building the
 per-item recovery UI.
 
-**P1 — `doctor` misdiagnoses a current v3 KB.** A real schema-v2 KB that bare
+**P1 — `doctor` misdiagnoses a current v3 KB (resolved 2026-08-03).** A real schema-v2 KB that bare
 `mko` opens fine reports `repository_incompatible` / `next_action: configure`
 through `mko doctor --format json-v1`, because doctor still reads only the v1
 `KnowledgeConfig` (`rust/mko-core/src/doctor.rs`). `--format json-v2` is
 accepted but emits a human line with exit 0 instead of JSON
 (`rust/mko-cli/src/cli.rs`). The tool that should guide recovery instead tells
-the owner to redo setup.
+the owner to redo setup. Fixed: diagnosis reads either generation's
+configuration, and `--format json-v2` now answers a typed doctor envelope whose
+per-check hints and overall next action use the same v2 vocabulary as every
+other machine surface.
 
 **P1 (found in the same run) — real PDFs fail extraction with no way
 forward (resolved 2026-08-03).** Both documents already in the owner's Inbox failed

@@ -7,6 +7,7 @@ use std::{
 use crate::{
     clock::{Clock, SystemClock},
     config::KnowledgeConfig,
+    config_v2::KnowledgeConfigV2,
     context::{
         ContextSource, PlatformEnvironment, ResolveContextRequest, SelectedPersonalContext,
         SystemPlatformEnvironment, select_personal_context,
@@ -190,7 +191,8 @@ pub fn diagnose(request: DoctorRequest, environment: &dyn DoctorEnvironment) -> 
             repository_root,
             source,
         }) => match inspect_repository(&repository_root) {
-            Ok((repository_root, knowledge)) => {
+            Ok(inspected) => {
+                let repository_root = inspected.root;
                 checks.push(healthy(
                     DiagnosticArea::Repository,
                     "repository_access",
@@ -199,7 +201,7 @@ pub fn diagnose(request: DoctorRequest, environment: &dyn DoctorEnvironment) -> 
                 ));
                 provider = environment
                     .platform()
-                    .environment_value(OsStr::new(&knowledge.provider.root_env))
+                    .environment_value(OsStr::new(&inspected.provider_root_env))
                     .map(PathBuf::from);
                 if provider.is_none() {
                     checks.push(blocked(
@@ -226,7 +228,10 @@ pub fn diagnose(request: DoctorRequest, environment: &dyn DoctorEnvironment) -> 
         Ok(SelectedPersonalContext::Profile { profile, .. }) => {
             provider = Some(profile.provider_root);
             match inspect_repository(&profile.repository_root) {
-                Ok((repository_root, _)) => {
+                Ok(InspectedRepository {
+                    root: repository_root,
+                    ..
+                }) => {
                     checks.push(healthy(
                         DiagnosticArea::Repository,
                         "repository_access",
@@ -287,7 +292,9 @@ pub(crate) fn final_setup_checks(
     };
     let mut checks = Vec::new();
     match inspect_repository(repository) {
-        Ok((repository, _)) => checks.push(healthy(
+        Ok(InspectedRepository {
+            root: repository, ..
+        }) => checks.push(healthy(
             DiagnosticArea::Repository,
             "repository_access",
             "repository is compatible",
@@ -379,7 +386,17 @@ fn profile_check(platform: &dyn PlatformEnvironment) -> DoctorCheck {
     }
 }
 
-fn inspect_repository(path: &Path) -> Result<(PathBuf, KnowledgeConfig), MkoError> {
+/// What diagnosis needs from a knowledge repository, whichever generation it is.
+///
+/// Doctor is the tool an owner reaches for when something is wrong, so reading
+/// only the v0.1 configuration made it report a healthy current repository as
+/// incompatible and send them back to setup.
+struct InspectedRepository {
+    root: PathBuf,
+    provider_root_env: String,
+}
+
+fn inspect_repository(path: &Path) -> Result<InspectedRepository, MkoError> {
     let metadata = fs::metadata(path)
         .map_err(|error| MkoError::new("repository_incompatible", error.to_string()))?;
     if !metadata.is_dir() {
@@ -390,9 +407,26 @@ fn inspect_repository(path: &Path) -> Result<(PathBuf, KnowledgeConfig), MkoErro
     }
     let canonical = fs::canonicalize(path)
         .map_err(|error| MkoError::new("repository_incompatible", error.to_string()))?;
-    let knowledge = KnowledgeConfig::read(&canonical)
-        .map_err(|error| MkoError::new("repository_incompatible", error.to_string()))?;
-    Ok((canonical, knowledge))
+    let provider_root_env = match KnowledgeConfigV2::read(&canonical) {
+        Ok(configuration) => configuration.provider.root_env,
+        Err(v2_error) => match KnowledgeConfig::read(&canonical) {
+            Ok(configuration) => configuration.provider.root_env,
+            // Report the current generation's reason: a v0.3 repository with a
+            // damaged configuration is the case an owner needs explained.
+            Err(v1_error) => {
+                let error = if canonical.join("knowledge-os.yaml").exists() {
+                    v2_error
+                } else {
+                    v1_error
+                };
+                return Err(MkoError::new("repository_incompatible", error.message()));
+            }
+        },
+    };
+    Ok(InspectedRepository {
+        root: canonical,
+        provider_root_env,
+    })
 }
 
 fn provider_checks(provider: &Path, environment: &dyn DoctorEnvironment) -> Vec<DoctorCheck> {

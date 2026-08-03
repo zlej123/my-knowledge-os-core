@@ -386,6 +386,34 @@ pub struct ErrorDetailsV2 {}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct DoctorCheckDataV2 {
+    pub code: String,
+    pub status: DoctorCheckStatusV2,
+    pub message: String,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub path: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub next_action: Option<NextActionV2>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorCheckStatusV2 {
+    Healthy,
+    Warning,
+    Blocked,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DoctorDataV2 {
+    pub healthy: bool,
+    pub checks: Vec<DoctorCheckDataV2>,
+    pub next_action: NextActionV2,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct JsonV2Error {
     pub code: String,
     pub message: String,
@@ -496,6 +524,13 @@ pub enum JsonV2Success {
         result: JsonV2SuccessResult,
         data: DashboardDataV2,
     },
+    #[serde(rename = "doctor")]
+    Doctor {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: DoctorDataV2,
+    },
 }
 
 impl JsonV2Success {
@@ -605,6 +640,14 @@ impl JsonV2Success {
 
     pub fn dashboard(data: DashboardDataV2) -> Self {
         Self::Dashboard {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
+    pub fn doctor(data: DoctorDataV2) -> Self {
+        Self::Doctor {
             schema_version: 2,
             result: JsonV2SuccessResult::Ok,
             data,

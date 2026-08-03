@@ -32,18 +32,18 @@ use mko_core::{
     inbox::{InboxScanRequest, InboxScanResult, scan_inbox},
     json_v1::{
         AddData, AddPayload, CheckData, ConceptMatchData, DiagnosticData, DoctorCheckData,
-        DoctorData, DraftOutcome, JsonV1Command, JsonV1Success, KnowledgeConceptSummary,
-        KnowledgeListData, KnowledgePendingItemData, KnowledgeReviewData, KnowledgeReviewDecision,
-        KnowledgeReviewItemData, KnowledgeReviewStatusData, KnowledgeSearchData, KnowledgeShowData,
-        KnowledgeWriteData, KnowledgeWriteOutcome, NextAction, PrepareData, Recovery,
-        SuccessResult, UserState, WriteDraftData,
+        DoctorCheckStatus, DoctorData, DraftOutcome, JsonV1Command, JsonV1Success,
+        KnowledgeConceptSummary, KnowledgeListData, KnowledgePendingItemData, KnowledgeReviewData,
+        KnowledgeReviewDecision, KnowledgeReviewItemData, KnowledgeReviewStatusData,
+        KnowledgeSearchData, KnowledgeShowData, KnowledgeWriteData, KnowledgeWriteOutcome,
+        NextAction, PrepareData, Recovery, RecoveryKind, SuccessResult, UserState, WriteDraftData,
     },
     json_v2::{
         AddBatchDataV2, AddBatchItemErrorV2, AddBatchItemV2, AddBatchWarningV2, AddDataV2,
         AddOutcomeV2, AddSingleDataV2, DashboardCanonicalStateDataV2, DashboardDataV2,
         DashboardFileDataV2, DashboardFileKindDataV2, DashboardFileStateDataV2,
-        DashboardProjectionStateDataV2, HandshakeDataV2, JsonV2Command, JsonV2Success,
-        NextActionV2, SetupApplyDataV2,
+        DashboardProjectionStateDataV2, DoctorCheckDataV2, DoctorCheckStatusV2, DoctorDataV2,
+        HandshakeDataV2, JsonV2Command, JsonV2Success, NextActionV2, SetupApplyDataV2,
     },
     knowledge::{
         ConceptKind, ConceptMatch, KnowledgeSearchQuery, WriteKnowledgeRequest, approve_knowledge,
@@ -2053,6 +2053,33 @@ fn clear_stale_lock(repo: Option<PathBuf>) -> Result<(), MkoError> {
     Ok(())
 }
 
+// A check's recovery hint and the report's overall next step both have to
+// arrive as the same typed vocabulary the rest of the v2 surface uses.
+fn recovery_next_action_v2(kind: RecoveryKind) -> NextActionV2 {
+    match kind {
+        RecoveryKind::Configure => NextActionV2::Configure,
+        RecoveryKind::Hydrate => NextActionV2::Hydrate,
+        RecoveryKind::VerifyBackup => NextActionV2::Add,
+        RecoveryKind::FixPermissions | RecoveryKind::ResolveHookConflict => NextActionV2::Repair,
+        RecoveryKind::Retry => NextActionV2::Retry,
+        RecoveryKind::Repair => NextActionV2::Repair,
+    }
+}
+
+fn doctor_next_action_v2(next_action: &NextAction) -> NextActionV2 {
+    match next_action {
+        NextAction::None => NextActionV2::None,
+        NextAction::Configure => NextActionV2::Configure,
+        NextAction::Hydrate => NextActionV2::Hydrate,
+        NextAction::Add => NextActionV2::Add,
+        NextAction::Prepare => NextActionV2::Prepare,
+        NextAction::WriteDraft => NextActionV2::WriteSource,
+        NextAction::Review => NextActionV2::Review,
+        NextAction::Repair => NextActionV2::Repair,
+        NextAction::Retry => NextActionV2::Retry,
+    }
+}
+
 fn doctor(arguments: DoctorArgs) -> Result<(), MkoError> {
     if arguments.clear_stale_lock {
         return clear_stale_lock(arguments.repo);
@@ -2063,6 +2090,27 @@ fn doctor(arguments: DoctorArgs) -> Result<(), MkoError> {
     };
     let environment = SystemDoctorEnvironment::default();
     let report = diagnose(request, &environment);
+    if arguments.format == OutputFormat::JsonV2 {
+        return emit_json_v2(JsonV2Success::doctor(DoctorDataV2 {
+            healthy: report.healthy,
+            checks: report
+                .checks
+                .into_iter()
+                .map(|check| DoctorCheckDataV2 {
+                    code: check.code,
+                    status: match check.status {
+                        DoctorCheckStatus::Healthy => DoctorCheckStatusV2::Healthy,
+                        DoctorCheckStatus::Warning => DoctorCheckStatusV2::Warning,
+                        DoctorCheckStatus::Blocked => DoctorCheckStatusV2::Blocked,
+                    },
+                    message: check.message,
+                    path: check.path.map(|path| path.display().to_string()),
+                    next_action: check.recovery.map(recovery_next_action_v2),
+                })
+                .collect(),
+            next_action: doctor_next_action_v2(&report.next_action),
+        }));
+    }
     if arguments.format == OutputFormat::JsonV1 {
         emit_json_v1(JsonV1Success::Doctor {
             schema_version: 1,
@@ -3200,6 +3248,10 @@ fn json_v2_command(cli: &Cli) -> Option<JsonV2Command> {
             format: OutputFormat::JsonV2,
             ..
         }) => Some(JsonV2Command::Handshake),
+        Command::Doctor(DoctorArgs {
+            format: OutputFormat::JsonV2,
+            ..
+        }) => Some(JsonV2Command::Doctor),
         Command::Schema {
             command:
                 SchemaCommand::List(SchemaListArgs {
@@ -3396,6 +3448,7 @@ fn json_v2_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option
         args.get(2).and_then(|argument| argument.to_str()),
     ) {
         ("handshake", _) => Some(JsonV2Command::Handshake),
+        ("doctor", _) => Some(JsonV2Command::Doctor),
         ("schema", Some("list")) => Some(JsonV2Command::SchemaList),
         ("schema", Some("show")) => Some(JsonV2Command::SchemaShow),
         ("setup", Some("plan")) => Some(JsonV2Command::SetupPlan),
