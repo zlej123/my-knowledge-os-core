@@ -171,6 +171,7 @@ fn machine_envelope_goldens_validate_and_round_trip() {
         include_bytes!("../../../tests/fixtures/json-v2/review-open-success.json").as_slice(),
         include_bytes!("../../../tests/fixtures/json-v2/review-feedback-success.json").as_slice(),
         include_bytes!("../../../tests/fixtures/json-v2/dashboard-success.json").as_slice(),
+        include_bytes!("../../../tests/fixtures/json-v2/doctor-success.json").as_slice(),
     ] {
         let value: Value = serde_json::from_slice(bytes).unwrap();
         assert!(validator.is_valid(&value));

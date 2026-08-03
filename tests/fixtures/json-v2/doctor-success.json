@@ -1,0 +1,25 @@
+{
+  "schema_version": 2,
+  "command": "doctor",
+  "result": "ok",
+  "data": {
+    "healthy": false,
+    "checks": [
+      {
+        "code": "product_version",
+        "status": "healthy",
+        "message": "0.3.2",
+        "path": null,
+        "next_action": null
+      },
+      {
+        "code": "stale_lock",
+        "status": "warning",
+        "message": "a stale operation lock needs explicit recovery",
+        "path": "/repository/.knowledge-os/runtime/locks/repository-mutation.lock",
+        "next_action": "repair"
+      }
+    ],
+    "next_action": "repair"
+  }
+}

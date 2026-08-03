@@ -310,3 +310,83 @@ fn git(repository: &Path, arguments: &[&str]) {
         .unwrap();
     assert!(status.success());
 }
+
+// Doctor is the tool an owner reaches for when something is wrong. Reading only
+// the v0.1 configuration made it call a healthy current repository incompatible
+// and send them back to setup — the opposite of recovery.
+#[test]
+#[allow(deprecated)]
+fn a_current_generation_repository_is_diagnosed_as_compatible() {
+    let root = tempfile::tempdir().unwrap();
+    let repository = root.path().join("kb");
+    mko_core::scaffold_v2::scaffold_personal_kb_v2(&repository).unwrap();
+
+    let output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["doctor", "--repo"])
+        .arg(&repository)
+        .args(["--format", "json-v1"])
+        .assert()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let repository_check = report["data"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| {
+            check["code"] == "repository_access" || check["code"] == "repository_incompatible"
+        })
+        .expect("doctor must report on the repository");
+    assert_eq!(
+        repository_check["code"], "repository_access",
+        "a scaffolded current-generation KB must not be reported incompatible"
+    );
+    assert_eq!(repository_check["status"], "healthy");
+}
+
+// Accepting the flag and answering with a human line at exit 0 left an agent
+// parsing prose or, worse, treating a diagnosis as success.
+#[test]
+#[allow(deprecated)]
+fn doctor_answers_json_v2_with_a_typed_envelope() {
+    let root = tempfile::tempdir().unwrap();
+    let repository = root.path().join("kb");
+    mko_core::scaffold_v2::scaffold_personal_kb_v2(&repository).unwrap();
+
+    let output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["doctor", "--repo"])
+        .arg(&repository)
+        .args(["--format", "json-v2"])
+        .assert()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output)
+        .expect("json-v2 doctor output must be JSON, not a human line");
+    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["command"], "doctor");
+    assert_eq!(report["result"], "ok");
+    assert!(report["data"]["healthy"].is_boolean());
+    let checks = report["data"]["checks"].as_array().unwrap();
+    assert!(!checks.is_empty());
+    for check in checks {
+        assert!(check["code"].is_string());
+        assert!(["healthy", "warning", "blocked"].contains(&check["status"].as_str().unwrap()));
+        assert!(check.get("path").is_some(), "path must be present or null");
+        assert!(
+            check.get("next_action").is_some(),
+            "next_action must be present or null"
+        );
+    }
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../../schemas/v2/machine-output.schema.json"
+    ))
+    .unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(validator.is_valid(&report));
+}

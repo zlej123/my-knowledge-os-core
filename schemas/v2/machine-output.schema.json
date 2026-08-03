@@ -17,6 +17,7 @@
     { "$ref": "#/$defs/review_open_success" },
     { "$ref": "#/$defs/review_feedback_success" },
     { "$ref": "#/$defs/dashboard_success" },
+    { "$ref": "#/$defs/doctor_success" },
     { "$ref": "#/$defs/failure" }
   ],
   "$defs": {
@@ -218,7 +219,47 @@
         "outcome": {
           "anyOf": [{ "enum": ["created", "existing"] }, { "type": "null" }]
         },
-        "error": {
+        "doctor_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "status", "message", "path", "next_action"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "status": { "enum": ["healthy", "warning", "blocked"] },
+        "message": { "type": "string", "maxLength": 4096 },
+        "path": { "type": ["string", "null"], "maxLength": 4096 },
+        "next_action": {
+          "anyOf": [{ "$ref": "#/$defs/next_action" }, { "type": "null" }]
+        }
+      }
+    },
+    "doctor_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["healthy", "checks", "next_action"],
+      "properties": {
+        "healthy": { "type": "boolean" },
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/doctor_check" }
+        },
+        "next_action": { "$ref": "#/$defs/next_action" }
+      }
+    },
+    "doctor_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "doctor" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/doctor_data" }
+      }
+    },
+    "error": {
           "anyOf": [{ "$ref": "#/$defs/add_batch_item_error" }, { "type": "null" }]
         }
       },
@@ -671,6 +712,46 @@
         "command": { "const": "dashboard" },
         "result": { "const": "ok" },
         "data": { "$ref": "#/$defs/dashboard_data" }
+      }
+    },
+    "doctor_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "status", "message", "path", "next_action"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "status": { "enum": ["healthy", "warning", "blocked"] },
+        "message": { "type": "string", "maxLength": 4096 },
+        "path": { "type": ["string", "null"], "maxLength": 4096 },
+        "next_action": {
+          "anyOf": [{ "$ref": "#/$defs/next_action" }, { "type": "null" }]
+        }
+      }
+    },
+    "doctor_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["healthy", "checks", "next_action"],
+      "properties": {
+        "healthy": { "type": "boolean" },
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/doctor_check" }
+        },
+        "next_action": { "$ref": "#/$defs/next_action" }
+      }
+    },
+    "doctor_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "command", "result", "data"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "command": { "const": "doctor" },
+        "result": { "const": "ok" },
+        "data": { "$ref": "#/$defs/doctor_data" }
       }
     },
     "failure": {
