@@ -42,6 +42,7 @@ const MAX_REVIEW_EVENT_BYTES: u64 = 1024 * 1024;
 const MAX_CURRENT_POINTER_BYTES: u64 = 64 * 1024;
 const MAX_REVISION_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_FEEDBACK_BYTES: usize = 256 * 1024;
+const TTY_FEEDBACK_BYTE_LIMIT: u64 = 4096;
 const REVIEW_SCAN_DEADLINE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -261,48 +262,109 @@ fn pending_targets_from_request(
     Ok(targets)
 }
 
-pub fn publish_tty_approval_review_v2(
+pub fn publish_tty_review_v2(
     repository_root: &Path,
     stable_id: &str,
     clock: &dyn Clock,
-) -> Result<TtyApprovalOutcomeV2, MkoError> {
+) -> Result<TtyReviewOutcomeV2, MkoError> {
     let mut terminal = ProcessTty;
-    publish_tty_approval_with_terminal(repository_root, stable_id, clock, &mut terminal)
+    publish_tty_review_with_terminal(repository_root, stable_id, clock, &mut terminal)
 }
 
 #[derive(Debug)]
-pub enum TtyApprovalOutcomeV2 {
+pub enum TtyReviewOutcomeV2 {
     Approved(Box<ReviewPublicationV2>),
+    ChangesRequested(Box<ReviewPublicationV2>),
+    Deferred(Box<ReviewPublicationV2>),
     /// The owner declined at the prompt, or the prompt ended without one.
     /// Nothing was written.
     Cancelled,
 }
 
-fn publish_tty_approval_with_terminal(
+/// What the owner chose in front of the card.
+///
+/// Approving publishes knowledge and cannot be taken back, so it alone keeps
+/// the exact digest phrase. Requesting changes and deferring leave the item in
+/// the queue, so they are a single keystroke — the weight of the confirmation
+/// matches the weight of the act.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TtyReviewChoiceV2 {
+    Approve,
+    RequestChanges,
+    Defer,
+    Cancel,
+}
+
+fn publish_tty_review_with_terminal(
     repository_root: &Path,
     stable_id: &str,
     clock: &dyn Clock,
     terminal: &mut dyn TtyInteraction,
-) -> Result<TtyApprovalOutcomeV2, MkoError> {
-    // Display and confirmation deliberately run without the repository mutation
-    // lock: the owner may read for as long as they like, cancel, or be
+) -> Result<TtyReviewOutcomeV2, MkoError> {
+    // Display and the owner's decision deliberately run without the repository
+    // mutation lock: they may read for as long as they like, cancel, or be
     // interrupted, and a lock held across that wait strands the whole
     // repository. Correctness does not depend on holding it here, because the
-    // confirmed card is re-validated byte for byte under the lock below and any
-    // concurrent change is rejected as a stale snapshot.
+    // card the decision was made on is re-validated byte for byte under the
+    // lock below and any concurrent change is rejected as a stale snapshot.
     let effect = prepare_tty_approval_snapshot(repository_root, stable_id)?;
-    let Some(confirmed) = confirm_tty_approval(effect, terminal)? else {
-        return Ok(TtyApprovalOutcomeV2::Cancelled);
+    let choice = read_tty_review_choice(&effect, terminal)?;
+    let decision = match choice {
+        TtyReviewChoiceV2::Cancel => return Ok(TtyReviewOutcomeV2::Cancelled),
+        TtyReviewChoiceV2::Approve => {
+            let Some(confirmed) = confirm_tty_approval(effect, terminal)? else {
+                return Ok(TtyReviewOutcomeV2::Cancelled);
+            };
+            let _lock = RepositoryMutationLock::acquire(
+                repository_root,
+                "v2 TTY review approval",
+                clock,
+                StaleRepositoryLockPolicy::Preserve,
+            )?;
+            validate_confirmed_tty_approval_locked(repository_root, &confirmed)?;
+            return publish_confirmed_tty_approval_locked(repository_root, confirmed, clock)
+                .map(|publication| TtyReviewOutcomeV2::Approved(Box::new(publication)));
+        }
+        TtyReviewChoiceV2::RequestChanges => {
+            let Some(feedback) = read_tty_feedback(terminal)? else {
+                return Ok(TtyReviewOutcomeV2::Cancelled);
+            };
+            (NonTtyReviewDecisionV2::RequestChanges, Some(feedback))
+        }
+        TtyReviewChoiceV2::Defer => (NonTtyReviewDecisionV2::Defer, None),
     };
+
+    let request = NonTtyReviewRequestV2 {
+        targets: effect
+            .targets
+            .iter()
+            .map(|snapshot| NonTtyReviewTargetV2 {
+                record_type: snapshot.record_type.clone(),
+                record_id: snapshot.record_id.clone(),
+                displayed_revision: snapshot.displayed_revision.clone(),
+                expected_review_head_id: snapshot.expected_review_head_id.clone(),
+                decision: decision.0.clone(),
+                feedback: decision.1.clone(),
+            })
+            .collect(),
+    };
+    let confirmed = ConfirmedTtyApprovalV2(effect);
     let _lock = RepositoryMutationLock::acquire(
         repository_root,
-        "v2 TTY review approval",
+        "v2 TTY review decision",
         clock,
         StaleRepositoryLockPolicy::Preserve,
     )?;
+    // The same guarantee approval gets: the record must still be exactly what
+    // the owner was looking at when they decided.
     validate_confirmed_tty_approval_locked(repository_root, &confirmed)?;
-    publish_confirmed_tty_approval_locked(repository_root, confirmed, clock)
-        .map(|publication| TtyApprovalOutcomeV2::Approved(Box::new(publication)))
+    let publication = publish_non_tty_review_locked_v2(repository_root, request, clock)?;
+    Ok(match decision.0 {
+        NonTtyReviewDecisionV2::RequestChanges => {
+            TtyReviewOutcomeV2::ChangesRequested(Box::new(publication))
+        }
+        NonTtyReviewDecisionV2::Defer => TtyReviewOutcomeV2::Deferred(Box::new(publication)),
+    })
 }
 
 pub fn publish_review_resolution_v2(
@@ -601,6 +663,75 @@ impl TtyInteraction for ProcessTty {
     }
 }
 
+/// The decision screen: what the record says, then four choices.
+///
+/// Digests and the exact approval phrase are deliberately absent here. They
+/// verify a decision that has already been made; putting them in front of the
+/// owner turns a judgement about their own knowledge into an exercise in
+/// reading hashes.
+fn read_tty_review_choice(
+    effect: &TtyApprovalEffectV2,
+    terminal: &mut dyn TtyInteraction,
+) -> Result<TtyReviewChoiceV2, MkoError> {
+    let mut display = Vec::with_capacity(effect.card.card_bytes.len() + 1024);
+    display.extend_from_slice("\n검토\n\n".as_bytes());
+    display.extend_from_slice(&effect.card.card_bytes);
+    display.extend_from_slice("\n이 결정이 적용되는 대상\n\n".as_bytes());
+    for target in &effect.targets {
+        writeln!(
+            display,
+            "- {} (표시된 판: {})",
+            target.record_id, target.displayed_revision
+        )
+        .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
+    }
+    if !effect.domain_confirmations.is_empty() {
+        display.extend_from_slice(
+            "\n이 지식은 별도 확인이 필요한 분류입니다. 승인을 고르면 분류를 함께 확인합니다.\n"
+                .as_bytes(),
+        );
+    }
+    display.extend_from_slice("\n[a] 승인   [c] 수정 요청   [d] 나중에   [q] 취소\n> ".as_bytes());
+    terminal
+        .display(&display)
+        .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
+    if !terminal.is_real_tty() {
+        return Err(MkoError::new(
+            "review_tty_required",
+            "final approval requires Core-owned display and confirmation on a real TTY",
+        ));
+    }
+    let input = terminal
+        .read_confirmation(64)
+        .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
+    match input.trim() {
+        "a" | "A" => Ok(TtyReviewChoiceV2::Approve),
+        "c" | "C" => Ok(TtyReviewChoiceV2::RequestChanges),
+        "d" | "D" => Ok(TtyReviewChoiceV2::Defer),
+        "" | "q" | "Q" => Ok(TtyReviewChoiceV2::Cancel),
+        _ => Err(MkoError::new(
+            "review_choice_invalid",
+            "a, c, d 중 하나를 고르거나 q로 취소하세요",
+        )),
+    }
+}
+
+/// Requesting changes without saying what to change leaves the next draft
+/// guessing, so Core requires the text before it will publish the decision.
+fn read_tty_feedback(terminal: &mut dyn TtyInteraction) -> Result<Option<String>, MkoError> {
+    terminal
+        .display("\n무엇을 고쳐야 하는지 한 줄로 적어 주세요 (빈 줄이면 취소).\n> ".as_bytes())
+        .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
+    let input = terminal
+        .read_confirmation(TTY_FEEDBACK_BYTE_LIMIT)
+        .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
+    let feedback = input.trim();
+    if feedback.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(feedback.to_owned()))
+}
+
 fn confirm_tty_approval(
     effect: TtyApprovalEffectV2,
     terminal: &mut dyn TtyInteraction,
@@ -619,9 +750,8 @@ fn confirm_tty_approval(
         )
         .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
     }
-    let mut display = Vec::with_capacity(effect.card.card_bytes.len() + 2048);
-    display.extend_from_slice(b"\nMy Knowledge OS final approval\n\n");
-    display.extend_from_slice(&effect.card.card_bytes);
+    let mut display = Vec::with_capacity(2048);
+    display.extend_from_slice(b"\nMy Knowledge OS final approval\n");
     display.extend_from_slice(b"\n## Exact approval effect\n\n");
     match &effect.selection {
         TtyApprovalSelectionV2::All => {
@@ -1731,10 +1861,10 @@ mod tests {
     };
     use tempfile::tempdir;
 
-    fn approved(outcome: TtyApprovalOutcomeV2) -> ReviewPublicationV2 {
+    fn approved(outcome: TtyReviewOutcomeV2) -> ReviewPublicationV2 {
         match outcome {
-            TtyApprovalOutcomeV2::Approved(publication) => *publication,
-            TtyApprovalOutcomeV2::Cancelled => panic!("expected an approval, not a cancellation"),
+            TtyReviewOutcomeV2::Approved(publication) => *publication,
+            other => panic!("expected an approval, got {other:?}"),
         }
     }
 
@@ -1777,15 +1907,16 @@ mod tests {
         }
 
         fn read_confirmation(&mut self, _byte_limit: u64) -> std::io::Result<String> {
-            if let Some(mutation) = self.mutation.take() {
-                mutation();
-            }
             let displayed = std::str::from_utf8(&self.displayed).unwrap();
-            let phrase = displayed
-                .split("Type exactly:\n")
-                .nth(1)
-                .and_then(|remaining| remaining.lines().next())
-                .unwrap();
+            let Some(remaining) = displayed.split("Type exactly:\n").nth(1) else {
+                // The decision screen: choose approval and let the mutation land
+                // between deciding and confirming.
+                if let Some(mutation) = self.mutation.take() {
+                    mutation();
+                }
+                return Ok("a\n".into());
+            };
+            let phrase = remaining.lines().next().unwrap();
             Ok(format!("{phrase}\n"))
         }
     }
@@ -1796,6 +1927,27 @@ mod tests {
     impl Clock for FixedClock {
         fn now_utc(&self) -> DateTime<Utc> {
             self.0
+        }
+    }
+
+    /// Answers the decision screen, then any follow-up prompt in order.
+    struct ScriptedTty {
+        answers: Vec<String>,
+        displayed: Vec<u8>,
+    }
+
+    impl TtyInteraction for ScriptedTty {
+        fn is_real_tty(&self) -> bool {
+            true
+        }
+
+        fn display(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            self.displayed.extend_from_slice(bytes);
+            Ok(())
+        }
+
+        fn read_confirmation(&mut self, _byte_limit: u64) -> std::io::Result<String> {
+            Ok(self.answers.remove(0))
         }
     }
 
@@ -1840,7 +1992,7 @@ mod tests {
         }
 
         let mut terminal = AssertsUnlockedTty(repository.to_path_buf());
-        let outcome = publish_tty_approval_with_terminal(
+        let outcome = publish_tty_review_with_terminal(
             repository,
             &environment.source.record_id,
             &environment.clock,
@@ -1848,7 +2000,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(outcome, TtyApprovalOutcomeV2::Cancelled));
+        assert!(matches!(outcome, TtyReviewOutcomeV2::Cancelled));
         assert_eq!(
             fs::read_dir(repository.join("reviews")).unwrap().count(),
             0,
@@ -1877,7 +2029,7 @@ mod tests {
         )
         .unwrap();
         // Approving is what needs the lock; cancelling now returns before it.
-        let contended = publish_tty_approval_with_terminal(
+        let contended = publish_tty_review_with_terminal(
             repository,
             &environment.source.record_id,
             &environment.clock,
@@ -1908,7 +2060,7 @@ mod tests {
         });
         fs::write(&path, serde_json::to_vec(&abandoned).unwrap()).unwrap();
 
-        let stranded = publish_tty_approval_with_terminal(
+        let stranded = publish_tty_review_with_terminal(
             repository,
             &environment.source.record_id,
             &environment.clock,
@@ -1958,13 +2110,201 @@ mod tests {
             .expect("the exact phrase approves");
 
         let displayed = String::from_utf8(terminal.displayed).unwrap();
-        assert!(displayed.contains(std::str::from_utf8(&card_bytes).unwrap()));
+        assert!(!displayed.contains(std::str::from_utf8(&card_bytes).unwrap()));
         assert!(displayed.contains(&record_id));
         assert!(displayed.contains(&revision));
         assert!(displayed.contains(&card_digest));
         assert!(displayed.contains(&digest));
         assert!(displayed.contains(&phrase));
         assert_eq!(terminal.reads, 1);
+    }
+
+    // The owner in front of a card could only ever say yes. Saying "fix this"
+    // or "not now" existed solely on the agent's non-TTY path, so the screen
+    // that told them to request changes offered no way to do it.
+    #[test]
+    fn requesting_changes_at_the_terminal_publishes_the_feedback() {
+        let environment = combined_environment();
+        let feedback = "핵심 주장 근거를 수치가 있는 블록으로 교체해줘";
+        let mut terminal = ScriptedTty {
+            answers: vec!["c\n".into(), format!("{feedback}\n")],
+            displayed: Vec::new(),
+        };
+
+        let outcome = publish_tty_review_with_terminal(
+            environment.root.path(),
+            &environment.source.record_id,
+            &environment.clock,
+            &mut terminal,
+        )
+        .unwrap();
+
+        let TtyReviewOutcomeV2::ChangesRequested(publication) = outcome else {
+            panic!("expected a published request for changes");
+        };
+        assert_eq!(publication.record.targets.len(), 1);
+        let target = &publication.record.targets[0];
+        assert_eq!(target.record_id, environment.source.record_id);
+        assert_eq!(target.decision, ReviewDecisionV2::RequestChanges);
+        assert_eq!(target.feedback.as_deref(), Some(feedback));
+        assert_eq!(target.displayed_revision, environment.source.revision);
+
+        let state = derive_review_state_v2(
+            environment.root.path(),
+            ReviewTargetTypeV2::Source,
+            &environment.source.record_id,
+        )
+        .unwrap();
+        assert_eq!(state.state, ReviewDerivedStateV2::ChangesRequested);
+    }
+
+    #[test]
+    fn deferring_at_the_terminal_publishes_without_asking_for_text() {
+        let environment = combined_environment();
+        let mut terminal = ScriptedTty {
+            answers: vec!["d\n".into()],
+            displayed: Vec::new(),
+        };
+
+        let outcome = publish_tty_review_with_terminal(
+            environment.root.path(),
+            &environment.source.record_id,
+            &environment.clock,
+            &mut terminal,
+        )
+        .unwrap();
+
+        let TtyReviewOutcomeV2::Deferred(publication) = outcome else {
+            panic!("expected a published deferral");
+        };
+        assert_eq!(
+            publication.record.targets[0].decision,
+            ReviewDecisionV2::Defer
+        );
+        assert_eq!(publication.record.targets[0].feedback, None);
+        assert!(terminal.answers.is_empty());
+    }
+
+    #[test]
+    fn abandoning_the_feedback_prompt_publishes_nothing() {
+        let environment = combined_environment();
+        let mut terminal = ScriptedTty {
+            answers: vec!["c\n".into(), "\n".into()],
+            displayed: Vec::new(),
+        };
+
+        let outcome = publish_tty_review_with_terminal(
+            environment.root.path(),
+            &environment.source.record_id,
+            &environment.clock,
+            &mut terminal,
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, TtyReviewOutcomeV2::Cancelled));
+        assert_eq!(
+            fs::read_dir(environment.root.path().join("reviews"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn the_decision_screen_shows_the_record_and_the_choices_without_digests() {
+        let digest = format!("sha256:{}", "e".repeat(64));
+        let effect = test_effect(digest.clone(), ReviewTargetTypeV2::Source);
+        let card_bytes = effect.card.card_bytes.clone();
+        let card_digest = effect.card.card_digest.clone();
+        let record_id = effect.targets[0].record_id.clone();
+        let mut terminal = FakeTty {
+            real: true,
+            input: "a\n".into(),
+            displayed: Vec::new(),
+            reads: 0,
+        };
+
+        let choice = read_tty_review_choice(&effect, &mut terminal).unwrap();
+
+        assert_eq!(choice, TtyReviewChoiceV2::Approve);
+        let displayed = String::from_utf8(terminal.displayed).unwrap();
+        assert!(displayed.contains(std::str::from_utf8(&card_bytes).unwrap()));
+        assert!(displayed.contains(&record_id));
+        assert!(displayed.contains("[a] 승인"));
+        assert!(displayed.contains("[c] 수정 요청"));
+        assert!(displayed.contains("[d] 나중에"));
+        assert!(displayed.contains("[q] 취소"));
+        assert!(
+            !displayed.contains(&card_digest) && !displayed.contains(&digest),
+            "digests verify a decision already made and belong after it: {displayed}"
+        );
+        assert!(!displayed.contains("Type exactly:"));
+    }
+
+    #[test]
+    fn every_decision_key_is_understood_and_an_unknown_one_is_refused() {
+        for (input, expected) in [
+            ("a\n", TtyReviewChoiceV2::Approve),
+            ("c\n", TtyReviewChoiceV2::RequestChanges),
+            ("d\n", TtyReviewChoiceV2::Defer),
+            ("q\n", TtyReviewChoiceV2::Cancel),
+            ("\n", TtyReviewChoiceV2::Cancel),
+        ] {
+            let effect = test_effect(
+                format!("sha256:{}", "e".repeat(64)),
+                ReviewTargetTypeV2::Source,
+            );
+            let mut terminal = FakeTty {
+                real: true,
+                input: input.into(),
+                displayed: Vec::new(),
+                reads: 0,
+            };
+            assert_eq!(
+                read_tty_review_choice(&effect, &mut terminal).unwrap(),
+                expected,
+                "input {input:?}"
+            );
+        }
+
+        let effect = test_effect(
+            format!("sha256:{}", "e".repeat(64)),
+            ReviewTargetTypeV2::Source,
+        );
+        let mut terminal = FakeTty {
+            real: true,
+            input: "approve\n".into(),
+            displayed: Vec::new(),
+            reads: 0,
+        };
+        assert_eq!(
+            read_tty_review_choice(&effect, &mut terminal)
+                .unwrap_err()
+                .code(),
+            "review_choice_invalid"
+        );
+    }
+
+    #[test]
+    fn requesting_changes_without_saying_what_is_a_cancellation() {
+        let mut empty = FakeTty {
+            real: true,
+            input: "   \n".into(),
+            displayed: Vec::new(),
+            reads: 0,
+        };
+        assert!(read_tty_feedback(&mut empty).unwrap().is_none());
+
+        let mut given = FakeTty {
+            real: true,
+            input: "근거를 수치가 있는 블록으로 교체해줘\n".into(),
+            displayed: Vec::new(),
+            reads: 0,
+        };
+        assert_eq!(
+            read_tty_feedback(&mut given).unwrap().as_deref(),
+            Some("근거를 수치가 있는 블록으로 교체해줘")
+        );
     }
 
     #[test]
@@ -2029,7 +2369,7 @@ mod tests {
         assert!(
             String::from_utf8(non_tty.displayed)
                 .unwrap()
-                .contains("# Review card")
+                .contains("Exact approval effect")
         );
         assert_eq!(non_tty.reads, 0);
     }
@@ -2075,7 +2415,7 @@ mod tests {
         };
 
         let publication = approved(
-            publish_tty_approval_with_terminal(
+            publish_tty_review_with_terminal(
                 environment.root.path(),
                 &environment.source.record_id,
                 &environment.clock,
@@ -2123,7 +2463,7 @@ mod tests {
         };
 
         let publication = approved(
-            publish_tty_approval_with_terminal(
+            publish_tty_review_with_terminal(
                 environment.root.path(),
                 &environment.knowledge.record_id,
                 &environment.clock,
@@ -2175,7 +2515,7 @@ mod tests {
         };
 
         let publication = approved(
-            publish_tty_approval_with_terminal(
+            publish_tty_review_with_terminal(
                 environment.root.path(),
                 &item_id,
                 &environment.clock,
@@ -2214,7 +2554,7 @@ mod tests {
             reads: 0,
         };
 
-        let error = publish_tty_approval_with_terminal(
+        let error = publish_tty_review_with_terminal(
             environment.root.path(),
             &format!("personal-source-{}", "0".repeat(64)),
             &environment.clock,
@@ -2291,7 +2631,7 @@ mod tests {
             }),
         };
 
-        let error = publish_tty_approval_with_terminal(
+        let error = publish_tty_review_with_terminal(
             root.path(),
             &knowledge.record_id,
             &clock,
@@ -2310,7 +2650,7 @@ mod tests {
             mutation: Some(|| {}),
         };
         let publication = approved(
-            publish_tty_approval_with_terminal(
+            publish_tty_review_with_terminal(
                 root.path(),
                 &knowledge.record_id,
                 &clock,

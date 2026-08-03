@@ -190,7 +190,7 @@ unhealthy with a repair there was nothing to repair. A knowledge base that does
 not use Git now reports `hook_not_applicable` as healthy; a Git repository whose
 hook really cannot be read still reports `hook_unreadable`.
 
-**P2 — 검토 계속 is a machine-contract screen.** Choosing review drops the
+**P2 — 검토 계속 is a machine-contract screen (resolved 2026-08-03).** Choosing review drops the
 owner straight into long internal IDs and SHA-256 digests, raw Source/Knowledge
 JSON, the full previous revision, English contract vocabulary, and a long
 approval phrase — and although it says "잘못되면 수정 요청", the screen offers no
@@ -199,6 +199,15 @@ approval function). Direction: a Korean human summary, evidence / LLM analysis /
 uncertainty separated, what changed since the previous version, then
 `[a] 승인 · [c] 수정 요청 · [d] 나중에 · [q] 취소`, with digest-bound confirmation
 kept but shown only after the owner chooses approve.
+
+Fixed: the terminal now asks what the owner wants before asking them to
+verify it. The card is displayed with `[a] 승인 · [c] 수정 요청 · [d] 나중에 ·
+[q] 취소`; requesting changes takes their wording in place and publishes a
+request_changes review, deferring publishes a deferral, and cancelling writes
+nothing. Approval alone keeps the exact digest phrase, and digests appear only
+after the owner has chosen to approve — the weight of the confirmation now
+matches the weight of the act. The decision is re-validated against the exact
+displayed card under the lock, so every choice binds to what was on screen.
 
 **P2 — Obsidian is not yet a reading surface.** Generated record projections
 carry only title, internal record link, asset link, and revision hash; the
