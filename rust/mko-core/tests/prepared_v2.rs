@@ -191,6 +191,41 @@ fn a_failed_preparation_is_recorded_against_the_asset() {
     assert_eq!(latest.code, None);
 }
 
+// The feature is worthless on the knowledge bases that already exist if it
+// needs a migration first — and it fails silently there, because the write is
+// deliberately allowed to fail without masking the real error.
+#[test]
+fn an_attempt_records_in_a_knowledge_base_that_predates_attempts() {
+    use mko_core::attempt_v2::{
+        PreparationOutcomeV2, latest_preparation_attempt_v2, record_preparation_attempt_v2,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let repository = root.path().join("kb");
+    mko_core::scaffold_v2::scaffold_personal_kb_v2(&repository).unwrap();
+    // Exactly the shape of a KB created before this existed.
+    std::fs::remove_dir_all(repository.join("assets/attempts")).unwrap();
+
+    let asset_id = format!("personal-asset-{}", "d".repeat(64));
+    record_preparation_attempt_v2(
+        &repository,
+        &asset_id,
+        PreparationOutcomeV2::Failed,
+        Some("pdf_text_unreadable"),
+        &FixedClock("2026-08-04T00:00:00Z".parse().unwrap()),
+    )
+    .expect("an append-only log must not need a migration to start");
+
+    assert_eq!(
+        latest_preparation_attempt_v2(&repository, &asset_id)
+            .unwrap()
+            .expect("the attempt is on file")
+            .code
+            .as_deref(),
+        Some("pdf_text_unreadable")
+    );
+}
+
 #[derive(Clone, Copy)]
 struct FixedClock(chrono::DateTime<chrono::Utc>);
 

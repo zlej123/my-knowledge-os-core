@@ -90,9 +90,25 @@ pub fn record_preparation_attempt_v2(
     let digest = canonical_json_sha256(&attempt)?;
     attempt.id = format!("personal-attempt-{}", digest.replace(':', "-"));
     let bytes = canonical_json_bytes(&attempt)?;
-    let path = repository_root
-        .join("assets/attempts")
-        .join(format!("{}.json", attempt.id));
+    // Knowledge bases scaffolded before attempts existed have no such
+    // directory, and an append-only log should not need a migration to start:
+    // create it on first write, refusing anything that is not a real directory.
+    let directory = repository_root.join("assets/attempts");
+    match std::fs::create_dir(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(&directory)
+                .map_err(|error| MkoError::new("attempt_write_failed", error.to_string()))?;
+            if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+                return Err(MkoError::new(
+                    "attempt_destination_invalid",
+                    "assets/attempts must be a real directory",
+                ));
+            }
+        }
+        Err(error) => return Err(MkoError::new("attempt_write_failed", error.to_string())),
+    }
+    let path = directory.join(format!("{}.json", attempt.id));
     write_new(&path, &bytes, |_| Ok(()))?;
     Ok(attempt)
 }
