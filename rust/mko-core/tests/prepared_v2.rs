@@ -84,17 +84,45 @@ fn bundle_identity_is_bound_to_the_exact_asset() {
     );
 }
 
+// Real extractions carry a scattering of stray control bytes from font and
+// encoding quirks. What has to hold is that canonical text contains none of
+// them, and normalizing away a few dozen meaningless bytes keeps hundreds of
+// readable pages that rejecting the document would have thrown away.
 #[test]
-fn unsupported_control_characters_are_rejected() {
-    let error = build_pdf_prepared_content_v2(
+fn stray_control_characters_are_normalized_away_instead_of_failing_the_document() {
+    let bundle = build_pdf_prepared_content_v2(
         &asset(),
-        &["safe\u{0000}unsafe".into()],
+        &[
+            "safe\u{0000}text\u{0001}here".into(),
+            "second\u{0010}page".into(),
+        ],
         PreparedMetadataV2 {
-            title: None,
-            authors: Vec::new(),
+            title: Some("Title\u{0001}with noise".into()),
+            authors: vec!["Author\u{0011}Name".into()],
             created_at: None,
         },
     )
-    .unwrap_err();
-    assert_eq!(error.code(), "prepared_text_invalid");
+    .expect("stray control bytes must not fail an otherwise readable document");
+
+    let text = bundle
+        .content_blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlockV2::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    assert!(text.contains("safetexthere"));
+    assert!(text.contains("secondpage"));
+    assert_eq!(bundle.metadata.title.as_deref(), Some("Titlewith noise"));
+    assert_eq!(bundle.metadata.authors, vec!["AuthorName".to_owned()]);
+    for character in text
+        .chars()
+        .chain(bundle.metadata.title.iter().flat_map(|title| title.chars()))
+    {
+        assert!(
+            !character.is_control() || matches!(character, '\n' | '\r' | '\t' | '\u{000c}'),
+            "canonical text must still carry no ambiguous control characters"
+        );
+    }
 }
