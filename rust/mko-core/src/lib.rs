@@ -5,6 +5,7 @@ pub mod approve;
 pub mod asset_v2;
 pub mod asset_validation;
 pub mod atomic;
+pub mod attempt_v2;
 pub mod canonical_source;
 pub mod catalog;
 pub mod check;

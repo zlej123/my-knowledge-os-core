@@ -34,6 +34,7 @@ const INBOX_COMPONENTS: [&str; 3] = ["My-Knowledge-OS-Assets", "personal", "inbo
 const MANAGED_DIRECTORIES: &[&str] = &[
     "assets",
     "assets/registry",
+    "assets/attempts",
     "sources",
     "knowledge",
     "reviews",

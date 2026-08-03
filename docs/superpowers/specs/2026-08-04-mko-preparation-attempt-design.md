@@ -1,7 +1,8 @@
 # My Knowledge OS — Why Material Stopped
 
 Date: 2026-08-04
-Status: Proposed; §5 is the one decision worth taking before implementation
+Status: Implemented 2026-08-04 with the recommended answer to §5 — attempts are
+knowledge-base content, under `assets/attempts/`
 Applies to: `mko` after 0.3.6
 Responds to: the open half of usability item 3 — per-item next actions for
 material that stopped (다시 추출 / 지원되지 않는 PDF / 복구 방법 보기)

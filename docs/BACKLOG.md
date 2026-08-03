@@ -136,12 +136,15 @@ waiting. Home needs a 정리 중 / 문제 count and per-item next actions (다�
 지원되지 않는 PDF, 복구 방법 보기). Fixed for the count: `inspect_home` now
 distinguishes registered Assets that have become a record from those that have
 not, home shows 정리 중, recommends 멈춘 자료 계속 정리 when nothing else is
-pending, and the 자료 정리 action says how much is waiting. **Still open:**
-per-item next actions need Core to remember *why* an Asset stopped — a
-preparation failure is not recorded anywhere today, so a listing can say an item
-is unfinished but not whether it needs a re-run, a new copy, or a repair. That
-per-Asset processing state is the design question to settle before building the
-per-item recovery UI.
+pending, and the 자료 정리 action says how much is waiting. **Resolved 2026-08-03/04.** Per-item next actions needed Core to remember *why*
+an Asset stopped, which nothing recorded. Settled in
+`docs/superpowers/specs/2026-08-04-mko-preparation-attempt-design.md`: an Asset's
+identity is its content, so "these exact bytes could not be extracted" is an
+immutable observation rather than the mutable status v0.3 deliberately removed
+from asset records. Preparation now appends a content-addressed attempt on both
+outcomes, home resolves the latest one to a reason and the single action that
+would move the item, and an Asset with no attempt on file reads as untouched
+material rather than as an invented failure.
 
 **P1 — `doctor` misdiagnoses a current v3 KB (resolved 2026-08-03).** A real schema-v2 KB that bare
 `mko` opens fine reports `repository_incompatible` / `next_action: configure`

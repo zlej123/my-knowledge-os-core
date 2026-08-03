@@ -126,3 +126,76 @@ fn stray_control_characters_are_normalized_away_instead_of_failing_the_document(
         );
     }
 }
+
+// The failure that stranded material used to be reported once, to whoever ran
+// the command, and then discarded. It has to survive the session that saw it.
+#[test]
+fn a_failed_preparation_is_recorded_against_the_asset() {
+    use mko_core::attempt_v2::{
+        PreparationOutcomeV2, latest_preparation_attempt_v2, record_preparation_attempt_v2,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let repository = root.path().join("kb");
+    mko_core::scaffold_v2::scaffold_personal_kb_v2(&repository).unwrap();
+    let asset_id = format!("personal-asset-{}", "c".repeat(64));
+
+    assert!(
+        latest_preparation_attempt_v2(&repository, &asset_id)
+            .unwrap()
+            .is_none()
+    );
+
+    let first = record_preparation_attempt_v2(
+        &repository,
+        &asset_id,
+        PreparationOutcomeV2::Failed,
+        Some("pdf_text_unreadable"),
+        &FixedClock("2026-08-04T00:00:00Z".parse().unwrap()),
+    )
+    .unwrap();
+    assert_eq!(first.outcome, PreparationOutcomeV2::Failed);
+    assert_eq!(first.code.as_deref(), Some("pdf_text_unreadable"));
+
+    // The same failure at the same moment is the same fact: content addressing
+    // collapses it, so a retry loop cannot grow the directory.
+    let repeated = record_preparation_attempt_v2(
+        &repository,
+        &asset_id,
+        PreparationOutcomeV2::Failed,
+        Some("pdf_text_unreadable"),
+        &FixedClock("2026-08-04T00:00:00Z".parse().unwrap()),
+    )
+    .unwrap();
+    assert_eq!(repeated.id, first.id);
+    assert_eq!(
+        std::fs::read_dir(repository.join("assets/attempts"))
+            .unwrap()
+            .count(),
+        1
+    );
+
+    let later = record_preparation_attempt_v2(
+        &repository,
+        &asset_id,
+        PreparationOutcomeV2::Prepared,
+        None,
+        &FixedClock("2026-08-04T01:00:00Z".parse().unwrap()),
+    )
+    .unwrap();
+    let latest = latest_preparation_attempt_v2(&repository, &asset_id)
+        .unwrap()
+        .expect("an attempt is on file");
+    assert_eq!(latest.id, later.id);
+    assert_eq!(latest.outcome, PreparationOutcomeV2::Prepared);
+    assert_eq!(latest.code, None);
+}
+
+#[derive(Clone, Copy)]
+struct FixedClock(chrono::DateTime<chrono::Utc>);
+
+impl mko_core::clock::Clock for FixedClock {
+    fn now_utc(&self) -> chrono::DateTime<chrono::Utc> {
+        self.0
+    }
+}

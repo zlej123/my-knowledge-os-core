@@ -93,7 +93,58 @@ mod macos {
             screen.contains("정리하다 멈춘 자료 1"),
             "the action must say how much is waiting: {screen}"
         );
+        assert!(
+            screen.contains("아직 정리하지 않았습니다"),
+            "registered but untouched is not a failure: {screen}"
+        );
         assert_eq!(snapshot(&repository), before);
+    }
+
+    // A count leaves the owner guessing. When a failure is on file, home has to
+    // name it and the one action that would move the item.
+    #[test]
+    #[allow(deprecated)]
+    fn home_says_why_material_stopped_when_a_failure_is_on_file() {
+        let root = tempdir().unwrap();
+        let repository = root.path().join("v3-kb");
+        let provider = root.path().join("provider");
+        scaffold_personal_kb_v2(&repository).unwrap();
+        fs::create_dir(&provider).unwrap();
+        fs::write(provider.join("stuck.pdf"), b"%PDF-1.7\nfixture").unwrap();
+        let asset =
+            mko_core::asset_v2::register_pdf_asset_v2(mko_core::asset_v2::RegisterAssetRequestV2 {
+                repository_root: &repository,
+                provider_root: &provider,
+                logical_locator: "stuck.pdf",
+                hydration_confirmation: mko_core::asset_v2::HydrationConfirmationV2::NotConfirmed,
+            })
+            .unwrap()
+            .asset;
+        mko_core::attempt_v2::record_preparation_attempt_v2(
+            &repository,
+            &asset.id,
+            mko_core::attempt_v2::PreparationOutcomeV2::Failed,
+            Some("pdf_text_unreadable"),
+            &mko_core::clock::SystemClock,
+        )
+        .unwrap();
+
+        let output = run_home_and_quit(&repository, &provider, root.path());
+
+        assert!(output.status.success());
+        let screen = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            screen.contains("이 PDF의 텍스트를 읽을 수 없습니다"),
+            "the reason must be named: {screen}"
+        );
+        assert!(
+            screen.contains("새 사본을 Inbox에 넣고 등록"),
+            "retrying would fail the same way, so say what would not: {screen}"
+        );
+        assert!(
+            !screen.contains("아직 정리하지 않았습니다"),
+            "a recorded failure must not read as untouched material: {screen}"
+        );
     }
 
     #[test]

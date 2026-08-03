@@ -93,6 +93,12 @@ fn all_v2_artifact_goldens_validate_and_round_trip() {
         include_str!("../../../schemas/v2/review-resolution.schema.json"),
     )
     .assert_valid_round_trip();
+    fixture::<mko_core::attempt_v2::PreparationAttemptV2>(
+        "preparation-attempt",
+        include_bytes!("../../../tests/fixtures/json-v2/preparation-attempt.json"),
+        include_str!("../../../schemas/v2/preparation-attempt.schema.json"),
+    )
+    .assert_valid_round_trip();
     fixture::<ReviewSessionDecisionInputV2>(
         "review-feedback-input",
         include_bytes!("../../../tests/fixtures/json-v2/review-feedback-input.json"),

@@ -9,6 +9,7 @@ use crate::{
 const OWNED_DIRECTORIES: &[&str] = &[
     "assets",
     "assets/registry",
+    "assets/attempts",
     "sources",
     "knowledge",
     "notes",

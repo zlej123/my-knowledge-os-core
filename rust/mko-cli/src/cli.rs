@@ -11,6 +11,7 @@ use mko_core::{
         AssetRegistrationOutcomeV2, HydrationConfirmationV2, RegisterAssetRequestV2,
         RegisterInboxAssetsRequestV2, register_inbox_pdf_assets_v2, register_pdf_asset_v2,
     },
+    attempt_v2::StuckReasonV2,
     check::{CheckReport, CheckRequest, check_repository},
     clock::{Clock, SystemClock},
     config_v2::PerspectiveV2,
@@ -842,6 +843,17 @@ enum Exit {
     ValidationFailed,
 }
 
+fn stuck_reason_label(reason: StuckReasonV2) -> &'static str {
+    match reason {
+        StuckReasonV2::NotAttempted => "아직 정리하지 않았습니다 (정리 계속)",
+        StuckReasonV2::TextUnreadable => {
+            "이 PDF의 텍스트를 읽을 수 없습니다 (내보내거나 스캔한 새 사본을 Inbox에 넣고 등록)"
+        }
+        StuckReasonV2::DownloadRequired => "원본을 내려받아야 합니다 (내려받고 계속)",
+        StuckReasonV2::Retryable => "정리하다 멈췄습니다 (다시 시도)",
+    }
+}
+
 fn home() -> Result<(), MkoError> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err(MkoError::new(
@@ -970,6 +982,12 @@ fn render_home(report: &HomeReport) {
                     "[1] 자료 정리 (새 자료 {} · 정리하다 멈춘 자료 {})",
                     report.new_material, report.in_progress
                 );
+                // Say why each item stopped and what would move it. A count
+                // alone leaves the owner to guess, and guessing wrong sends
+                // them around a loop that will fail the same way again.
+                for item in &report.stuck {
+                    println!("    · {} — {}", item.title, stuck_reason_label(item.reason));
+                }
             } else {
                 println!("[1] 새 자료 정리");
             }
