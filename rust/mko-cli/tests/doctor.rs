@@ -390,3 +390,37 @@ fn doctor_answers_json_v2_with_a_typed_envelope() {
     let validator = jsonschema::validator_for(&schema).unwrap();
     assert!(validator.is_valid(&report));
 }
+
+// Setup completes a local KB without Git on purpose — a remote is offered
+// afterwards and never required. Diagnosing that supported shape as a broken
+// hook made the owner's healthy repository report unhealthy, with a repair
+// there was nothing to repair.
+#[test]
+#[allow(deprecated)]
+fn a_knowledge_base_without_git_is_not_reported_as_damaged() {
+    let root = tempfile::tempdir().unwrap();
+    let repository = root.path().join("kb");
+    mko_core::scaffold_v2::scaffold_personal_kb_v2(&repository).unwrap();
+    assert!(!repository.join(".git").exists());
+
+    let output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["doctor", "--repo"])
+        .arg(&repository)
+        .args(["--format", "json-v2"])
+        .assert()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let hook = report["data"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["code"].as_str().unwrap().starts_with("hook_"))
+        .expect("doctor must say something about hooks");
+    assert_eq!(hook["code"], "hook_not_applicable");
+    assert_eq!(hook["status"], "healthy");
+    assert_eq!(hook["next_action"], Value::Null);
+}

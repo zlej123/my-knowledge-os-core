@@ -181,6 +181,15 @@ making that document itself readable needs an upstream fix or a different
 extractor, which is a dependency decision rather than a bug in this repository —
 the pinned `pdf-extract` 0.12.0 is the current constraint.
 
+**P1 (found verifying 0.3.4 on the real KB, resolved 2026-08-03) — a KB
+without Git was reported as damaged.** Setup deliberately leaves Git optional —
+a private remote is offered after local setup and never required — yet
+`hook_check` mapped `git_repository_required` onto `hook_unreadable`, blocked,
+`next_action: repair`. The owner's own healthy repository therefore reported
+unhealthy with a repair there was nothing to repair. A knowledge base that does
+not use Git now reports `hook_not_applicable` as healthy; a Git repository whose
+hook really cannot be read still reports `hook_unreadable`.
+
 **P2 — 검토 계속 is a machine-contract screen.** Choosing review drops the
 owner straight into long internal IDs and SHA-256 digests, raw Source/Knowledge
 JSON, the full previous revision, English contract vocabulary, and a long
