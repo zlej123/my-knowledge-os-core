@@ -501,6 +501,13 @@ impl<'a> CapabilityPublicationLock<'a> {
                         continue;
                     }
                 }
+                if error.code() == "registry_scan_timeout" {
+                    if Instant::now() < deadline {
+                        thread::sleep(LOCK_RETRY);
+                        continue;
+                    }
+                    return Err(publication_locked_error());
+                }
                 if error.code() == "registry_scan_limit" && saw_lock_contention {
                     return Err(publication_locked_error());
                 }
@@ -537,6 +544,13 @@ impl<'a> CapabilityPublicationLock<'a> {
                                 thread::sleep(LOCK_RETRY);
                                 continue;
                             }
+                        }
+                        if error.code() == "registry_scan_timeout" {
+                            if Instant::now() < deadline {
+                                thread::sleep(LOCK_RETRY);
+                                continue;
+                            }
+                            return Err(publication_locked_error());
                         }
                         if error.code() == "registry_scan_limit" && saw_lock_contention {
                             return Err(publication_locked_error());
@@ -783,7 +797,7 @@ fn publication_scan_deadline(acquire_deadline: Instant) -> Instant {
 
 fn check_publication_deadline(deadline: Instant) -> Result<(), MkoError> {
     if Instant::now() >= deadline {
-        Err(registry_scan_limit_error())
+        Err(registry_scan_timeout_error())
     } else {
         Ok(())
     }
@@ -824,7 +838,7 @@ fn scan_publication_quarantines(
     let mut matching_candidates = 0;
     for entry in entries {
         if Instant::now() >= deadline {
-            return Err(registry_scan_limit_error());
+            return Err(registry_scan_timeout_error());
         }
         let entry =
             entry.map_err(|error| MkoError::new("registry_write_failed", error.to_string()))?;
@@ -842,7 +856,14 @@ fn scan_publication_quarantines(
         let (record, identity) =
             match read_publication_record_with_hook(directory, &name, deadline, || {}) {
                 Ok((record, identity)) => (record, Some(identity)),
-                Err(error) if error.code() == "registry_scan_limit" => return Err(error),
+                Err(error)
+                    if matches!(
+                        error.code(),
+                        "registry_scan_limit" | "registry_scan_timeout"
+                    ) =>
+                {
+                    return Err(error);
+                }
                 Err(error) if error.code() == "registry_quarantine_invalid" => return Err(error),
                 Err(_) => {
                     check_publication_deadline(deadline)?;
@@ -994,6 +1015,17 @@ fn registry_scan_limit_error() -> MkoError {
     )
 }
 
+/// A scan that ran out of its slice of the acquire budget.
+///
+/// Unlike the work limit this says nothing about the repository — only that the
+/// machine was slow just then — so it must never reach a caller as an answer.
+fn registry_scan_timeout_error() -> MkoError {
+    MkoError::new(
+        "registry_scan_timeout",
+        "publication lock scan did not finish within its time slice",
+    )
+}
+
 fn registry_quarantine_invalid_error() -> MkoError {
     MkoError::new(
         "registry_quarantine_invalid",
@@ -1111,9 +1143,14 @@ impl PublicationLock {
             if let Err(error) =
                 resolve_publication_quarantines(&directory, &lock_filename, scan_deadline)
             {
-                if error.code() == "registry_locked" && Instant::now() < deadline {
+                if matches!(error.code(), "registry_locked" | "registry_scan_timeout")
+                    && Instant::now() < deadline
+                {
                     thread::sleep(LOCK_RETRY);
                     continue;
+                }
+                if error.code() == "registry_scan_timeout" {
+                    return Err(publication_locked_error());
                 }
                 return Err(error);
             }
@@ -1142,9 +1179,14 @@ impl PublicationLock {
                             identity,
                             Some(&expected_contents),
                         );
-                        if error.code() == "registry_locked" && Instant::now() < deadline {
+                        if matches!(error.code(), "registry_locked" | "registry_scan_timeout")
+                            && Instant::now() < deadline
+                        {
                             thread::sleep(LOCK_RETRY);
                             continue;
+                        }
+                        if error.code() == "registry_scan_timeout" {
+                            return Err(publication_locked_error());
                         }
                         return Err(error);
                     }

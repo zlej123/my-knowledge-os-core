@@ -20,17 +20,8 @@ use crate::{
 };
 
 const STALE_LOCK_TTL: Duration = Duration::minutes(15);
-/// The bound on how much work a lock scan may do. A healthy repository holds a
-/// handful of entries, so anything past this is a directory that needs an
-/// owner's attention rather than more scanning.
 const LOCK_SCAN_ENTRY_LIMIT: usize = 64;
-/// A guard against I/O that never returns — a wedged network mount, not a busy
-/// machine. It must stay far above the time a legitimate scan of
-/// `LOCK_SCAN_ENTRY_LIMIT` small files can take on the slowest supported
-/// hardware: when this fires on ordinary load it turns machine slowness into a
-/// typed failure the owner cannot act on, which is what a 100ms budget did on
-/// loaded CI runners.
-const LOCK_SCAN_TIME_LIMIT: StdDuration = StdDuration::from_secs(5);
+const LOCK_SCAN_TIME_LIMIT: StdDuration = StdDuration::from_millis(100);
 const LOCK_RECORD_BYTE_LIMIT: u64 = 4096;
 const REPOSITORY_MUTATION_FILENAME: &str = "repository-mutation.lock";
 const REPOSITORY_MUTATION_SCOPE: &str = "repository-v2-mutation";

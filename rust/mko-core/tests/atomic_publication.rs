@@ -188,3 +188,30 @@ fn publication_lock_cleanup_never_removes_a_copied_owner_replacement() {
     let replacement: serde_json::Value = serde_json::from_slice(&fs::read(lock).unwrap()).unwrap();
     assert!(replacement["owner_token"].as_str().is_some());
 }
+
+// A held publication lock must be reported as a held lock. The scan that looks
+// for abandoned quarantines gets only a slice of the acquire budget, and on a
+// slow machine that slice can expire before the scan finishes — which says
+// nothing about the repository and must not become the caller's answer.
+#[test]
+fn a_held_publication_lock_is_reported_as_held_whatever_the_machine_speed() {
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("record.md");
+    fs::write(&destination, b"published bytes").unwrap();
+    fs::write(
+        root.path().join(".record.md.publish.lock"),
+        b"interrupted before atomic rename",
+    )
+    .unwrap();
+
+    // Enough unrelated entries that every attempt walks a directory listing.
+    for index in 0..200 {
+        fs::write(root.path().join(format!("unrelated-{index:04}.md")), b"x").unwrap();
+    }
+
+    let error = mko_core::atomic::write_replace(&destination, b"replacement bytes")
+        .expect_err("a held publication lock must block the write");
+
+    assert_eq!(error.code(), "registry_locked");
+    assert_eq!(fs::read(&destination).unwrap(), b"published bytes");
+}

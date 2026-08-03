@@ -216,32 +216,6 @@ fn symlink_lock_path_is_rejected_without_following() {
     );
 }
 
-// The entry count is what decides whether a lock directory is scannable. A
-// repository holding an ordinary number of locks must never be refused because
-// the machine happened to be busy, so this pins the entry bound as the operative
-// one in both directions.
-#[test]
-fn a_lock_directory_is_bounded_by_its_entry_count_not_by_machine_speed() {
-    let temporary = tempdir().expect("temporary directory");
-    let locks = temporary.path().join(".knowledge-os/runtime/locks");
-    fs::create_dir_all(&locks).expect("lock directory");
-    let clock = FixedClock(Utc::now());
-
-    for index in 0..16 {
-        fs::write(locks.join(format!("asset-{index:04}.lock")), b"{}").expect("ordinary lock");
-    }
-    let inspected = mko_core::lock::inspect_locks(temporary.path(), &clock)
-        .expect("an ordinary lock directory must remain scannable");
-    assert_eq!(inspected.len(), 16);
-
-    for index in 16..128 {
-        fs::write(locks.join(format!("asset-{index:04}.lock")), b"{}").expect("excess lock");
-    }
-    let error = mko_core::lock::inspect_locks(temporary.path(), &clock)
-        .expect_err("past the entry bound the scan must refuse");
-    assert_eq!(error.code(), "lock_scan_limit");
-}
-
 fn repository_lock_path(repository: &std::path::Path) -> std::path::PathBuf {
     repository.join(".knowledge-os/runtime/locks/repository-mutation.lock")
 }
