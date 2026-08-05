@@ -322,3 +322,45 @@ Depends on the request_changes→new-draft→diff→re-review loop: a delivered
 document invites "fix this here", which dead-ends without it. That loop was
 closed on 2026-08-02 (`docs/superpowers/specs/2026-08-02-mko-revision-loop-design.md`),
 so this item is now unblocked and waits only on its own scheduling.
+
+## Approval ceremony cost — resolved 2026-08-05 (joint with Thesis)
+
+**Owner's report.** After summarizing one PDF end to end, the verdict was that
+the product is uncomfortable to use, and that Thesis had hit the same wall.
+
+**What the ceremony was.** Approving a record required typing back a phrase
+containing two SHA-256 digests, per item. Reading had just been fixed —
+projections carry the document, the re-review card carries the diff and the
+feedback it addresses, search leads to the document — but the confirmation
+ritual still asked the owner to verify hashes.
+
+**What the phrase actually defended.** Nothing that was not already defended,
+and better:
+
+- the prompt is unreachable unless stdin is a real TTY (`review_tty_required`);
+- no flag approves non-interactively — there is none, and the machine feedback
+  surface cannot even encode `approve`, which a contract test pins;
+- the confirmed card is re-validated byte for byte under the lock, so a record
+  that changed after display is rejected as a stale snapshot.
+
+Core prints the phrase and an agent can recompute its digests, so it never
+stopped a determined automation; it charged the owner and cost automation
+nothing. Thesis reached the same conclusion from their friction log
+(2026-07-29, "owner workload": 8+ decision points per cycle had turned "the
+human judges" into "the human fills out forms") and had already replaced the
+phrase with a channel lock plus one keystroke.
+
+**What changed.** Approving is now the `[a]` keystroke on the decision screen.
+Knowledge additionally asks the owner to type its classification back, because
+that is a judgement rather than a checksum — the one thing the phrase carried
+that a keystroke cannot. Digests are no longer displayed at all: verifying them
+is the machine's job.
+
+**Deliberately not done: batch approval.** Thesis argued against it on quality
+rather than safety — an "approve all" control becomes the default, and evidence
+that weakens the owner's own position passes uncritically. That reasoning
+applies here too. If per-item cost becomes the bottleneck again, the answer is
+triage at intake so that depth is spent on fewer items, not a bulk switch.
+Thesis records that shape in their `docs/REVIEW_SCALING.md`, together with a
+rule worth borrowing: friction is recorded when it happens and earns
+implementation only on the third occurrence, blockers excepted.

@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    fmt::Write as _,
     fs::{self, OpenOptions},
     hash::{Hash, Hasher},
     io::{BufRead, BufReader, IsTerminal, Read, Write},
@@ -747,80 +746,49 @@ fn read_tty_feedback(terminal: &mut dyn TtyInteraction) -> Result<Option<String>
     Ok(Some(feedback.to_owned()))
 }
 
+/// The step after the owner has chosen to approve.
+///
+/// This used to require typing two SHA-256 digests back. Every defense that
+/// phrase was thought to carry is already held elsewhere, and held better: the
+/// prompt is unreachable unless stdin is a real TTY, no flag approves
+/// non-interactively, the machine feedback surface cannot even encode an
+/// approval, and the confirmed card is re-validated byte for byte under the
+/// lock, so a record that changed after display is rejected rather than
+/// approved. A phrase that Core prints and an agent can recompute charges the
+/// owner and costs an automation nothing — the defense was billed to the wrong
+/// side.
+///
+/// What a keystroke cannot carry is the acknowledgement of a domain
+/// classification, which is a judgement rather than a checksum. That part
+/// stays, in the words that mean something: the owner types the classification
+/// back.
 fn confirm_tty_approval(
     effect: TtyApprovalEffectV2,
     terminal: &mut dyn TtyInteraction,
 ) -> Result<Option<ConfirmedTtyApprovalV2>, MkoError> {
-    let mut phrase = format!(
-        "approve {} {}",
-        effect.card.card_digest, effect.effect_digest
-    );
+    if effect.domain_confirmations.is_empty() {
+        return Ok(Some(ConfirmedTtyApprovalV2(effect)));
+    }
+    let expected = effect
+        .domain_confirmations
+        .iter()
+        .map(|confirmation| domain_policy_name(&confirmation.domain_policy))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut display = Vec::with_capacity(1024);
+    display.extend_from_slice("\n확인이 필요한 분류\n\n".as_bytes());
     for confirmation in &effect.domain_confirmations {
-        write!(
-            phrase,
-            " confirm-domain {} {} {}",
+        writeln!(
+            display,
+            "- {} 은(는) `{}` 로 분류되어 있습니다",
             confirmation.record_id,
-            confirmation.displayed_revision,
             domain_policy_name(&confirmation.domain_policy)
         )
         .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
     }
-    let mut display = Vec::with_capacity(2048);
-    display.extend_from_slice(b"\nMy Knowledge OS final approval\n");
-    display.extend_from_slice(b"\n## Exact approval effect\n\n");
-    match &effect.selection {
-        TtyApprovalSelectionV2::All => {
-            display.extend_from_slice(b"Approval selection: all actionable displayed targets\n");
-        }
-        TtyApprovalSelectionV2::Record(record_id) => {
-            writeln!(
-                display,
-                "Approval selection: selected record only (`{record_id}`)"
-            )
-            .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
-        }
-    }
-    for target in &effect.targets {
-        let selected_effects = effect
-            .selected_effects
-            .iter()
-            .find(|selected| selected.record_id == target.record_id)
-            .map(|selected| selected.effects.join(", "))
-            .unwrap_or_else(|| "none".into());
-        writeln!(
-            display,
-            "- {:?} `{}` at revision `{}` (review head: `{}`; effects: `{}`)",
-            target.record_type,
-            target.record_id,
-            target.displayed_revision,
-            target.expected_review_head_id.as_deref().unwrap_or("none"),
-            selected_effects,
-        )
-        .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
-    }
-    if !effect.domain_confirmations.is_empty() {
-        display.extend_from_slice(b"\n## Required per-document domain confirmation\n\n");
-        for confirmation in &effect.domain_confirmations {
-            writeln!(
-                display,
-                "- Knowledge `{}` at revision `{}` is classified `{}`",
-                confirmation.record_id,
-                confirmation.displayed_revision,
-                domain_policy_name(&confirmation.domain_policy)
-            )
-            .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
-        }
-        display.extend_from_slice(
-            b"The final phrase explicitly confirms each classification. Request changes instead if any classification is wrong.\n",
-        );
-    }
     write!(
         display,
-        "\nEffect: approve every exact target listed above\nCard digest: {}\nDisplayed effect digest: {}\nApproval effect digest: {}\n\nType exactly:\n{}\n\n승인하지 않으려면 q 또는 빈 줄을 입력하세요 (아무것도 바뀌지 않습니다).\n> ",
-        effect.card.card_digest,
-        effect.card.effect_digest,
-        effect.effect_digest,
-        phrase
+        "\n분류가 맞으면 그대로 입력해 확인하세요. 틀렸다면 수정을 요청하세요.\n입력할 값: {expected}\n> "
     )
     .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
     terminal
@@ -844,10 +812,10 @@ fn confirm_tty_approval(
     if matches!(input.trim(), "" | "q" | "Q") {
         return Ok(None);
     }
-    if input != phrase.as_str() {
+    if input.trim() != expected {
         return Err(MkoError::new(
             "review_confirmation_mismatch",
-            "the exact Core-rendered approval phrase was not entered",
+            "the exact classification was not entered",
         ));
     }
     Ok(Some(ConfirmedTtyApprovalV2(effect)))
@@ -1923,7 +1891,7 @@ mod tests {
 
         fn read_confirmation(&mut self, _byte_limit: u64) -> std::io::Result<String> {
             let displayed = std::str::from_utf8(&self.displayed).unwrap();
-            let Some(remaining) = displayed.split("Type exactly:\n").nth(1) else {
+            let Some(remaining) = displayed.split("입력할 값: ").nth(1) else {
                 // The decision screen: choose approval and let the mutation land
                 // between deciding and confirming.
                 if let Some(mutation) = self.mutation.take() {
@@ -1931,8 +1899,8 @@ mod tests {
                 }
                 return Ok("a\n".into());
             };
-            let phrase = remaining.lines().next().unwrap();
-            Ok(format!("{phrase}\n"))
+            let classification = remaining.lines().next().unwrap();
+            Ok(format!("{classification}\n"))
         }
     }
 
@@ -2101,37 +2069,31 @@ mod tests {
         );
     }
 
+    // Nothing about a Source needs a second answer: the owner has read the card
+    // and chosen to approve, and every digest that used to be typed back is
+    // checked by Core under the lock anyway.
     #[test]
-    fn tty_confirmation_renders_the_full_card_and_binds_both_digests() {
+    fn approving_a_record_without_a_classification_needs_no_second_answer() {
         let digest = format!("sha256:{}", "a".repeat(64));
         let effect = test_effect(digest.clone(), ReviewTargetTypeV2::Source);
-        let phrase = format!(
-            "approve {} {}",
-            effect.card.card_digest, effect.effect_digest
-        );
+        let card_digest = effect.card.card_digest.clone();
         let mut terminal = FakeTty {
             real: true,
-            input: format!("{phrase}\n"),
+            input: "unused\n".into(),
             displayed: Vec::new(),
             reads: 0,
         };
-        let record_id = effect.targets[0].record_id.clone();
-        let revision = effect.targets[0].displayed_revision.clone();
-        let card_bytes = effect.card.card_bytes.clone();
-        let card_digest = effect.card.card_digest.clone();
 
         confirm_tty_approval(effect, &mut terminal)
             .unwrap()
-            .expect("the exact phrase approves");
+            .expect("choosing approve is the whole act");
 
+        assert_eq!(terminal.reads, 0, "the owner was asked nothing further");
         let displayed = String::from_utf8(terminal.displayed).unwrap();
-        assert!(!displayed.contains(std::str::from_utf8(&card_bytes).unwrap()));
-        assert!(displayed.contains(&record_id));
-        assert!(displayed.contains(&revision));
-        assert!(displayed.contains(&card_digest));
-        assert!(displayed.contains(&digest));
-        assert!(displayed.contains(&phrase));
-        assert_eq!(terminal.reads, 1);
+        assert!(
+            !displayed.contains(&card_digest) && !displayed.contains(&digest),
+            "verifying a digest is the machine's job: {displayed}"
+        );
     }
 
     // The owner in front of a card could only ever say yes. Saying "fix this"
@@ -2334,12 +2296,14 @@ mod tests {
         );
     }
 
+    // Backing out at the classification step is still an ordinary answer:
+    // nothing has been written, so it is a "no", not a failure.
     #[test]
     fn declining_at_the_prompt_is_an_ordinary_answer_not_a_failure() {
         for declined in ["", "\n", "q\n", "Q\n", "  \n"] {
             let effect = test_effect(
                 format!("sha256:{}", "b".repeat(64)),
-                ReviewTargetTypeV2::Source,
+                ReviewTargetTypeV2::Knowledge,
             );
             let mut terminal = FakeTty {
                 real: true,
@@ -2355,7 +2319,7 @@ mod tests {
             assert!(
                 String::from_utf8(terminal.displayed)
                     .unwrap()
-                    .contains("승인하지 않으려면")
+                    .contains("확인이 필요한 분류")
             );
         }
     }
@@ -2396,7 +2360,7 @@ mod tests {
         assert!(
             String::from_utf8(non_tty.displayed)
                 .unwrap()
-                .contains("Exact approval effect")
+                .contains("확인이 필요한 분류")
         );
         assert_eq!(non_tty.reads, 0);
     }
@@ -2407,29 +2371,23 @@ mod tests {
             format!("sha256:{}", "d".repeat(64)),
             ReviewTargetTypeV2::Knowledge,
         );
-        let confirmation = &effect.domain_confirmations[0];
-        let phrase = format!(
-            "approve {} {} confirm-domain {} {} standard",
-            effect.card.card_digest,
-            effect.effect_digest,
-            confirmation.record_id,
-            confirmation.displayed_revision,
-        );
+        let record_id = effect.domain_confirmations[0].record_id.clone();
         let mut terminal = FakeTty {
             real: true,
-            input: format!("{phrase}\n"),
+            input: "standard\n".into(),
             displayed: Vec::new(),
             reads: 0,
         };
 
         confirm_tty_approval(effect, &mut terminal)
             .unwrap()
-            .expect("the exact phrase approves");
+            .expect("acknowledging the classification approves");
 
         let displayed = String::from_utf8(terminal.displayed).unwrap();
-        assert!(displayed.contains("Required per-document domain confirmation"));
-        assert!(displayed.contains("classified `standard`"));
-        assert!(displayed.contains(&phrase));
+        assert!(displayed.contains("확인이 필요한 분류"));
+        assert!(displayed.contains(&record_id));
+        assert!(displayed.contains("`standard`"));
+        assert!(displayed.contains("입력할 값: standard"));
         assert_eq!(terminal.reads, 1);
     }
 
@@ -2458,7 +2416,9 @@ mod tests {
         );
         let displayed = String::from_utf8(terminal.displayed).unwrap();
         assert!(displayed.contains(&environment.knowledge.record_id));
-        assert!(displayed.contains("Approval selection: selected record only"));
+        // What the decision covers is named before anything is decided; that it
+        // covered only the Source is asserted on the published record above.
+        assert!(displayed.contains("이 결정이 적용되는 대상"));
         assert_eq!(
             derive_review_state_v2(
                 environment.root.path(),
@@ -2506,8 +2466,10 @@ mod tests {
         );
         let displayed = String::from_utf8(terminal.displayed).unwrap();
         assert!(displayed.contains(&environment.source.record_id));
-        assert!(displayed.contains("Required per-document domain confirmation"));
-        assert!(displayed.contains("Approval selection: selected record only"));
+        // Knowledge still costs the owner an explicit acknowledgement of how it
+        // is classified — the judgement the digest phrase was carrying.
+        assert!(displayed.contains("확인이 필요한 분류"));
+        assert!(displayed.contains("이 결정이 적용되는 대상"));
         assert_eq!(
             derive_review_state_v2(
                 environment.root.path(),
@@ -2567,7 +2529,7 @@ mod tests {
         assert!(
             String::from_utf8(terminal.displayed)
                 .unwrap()
-                .contains("Approval selection: all actionable displayed targets")
+                .contains("이 결정이 적용되는 대상")
         );
     }
 
