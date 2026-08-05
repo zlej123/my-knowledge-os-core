@@ -684,6 +684,21 @@ fn read_tty_review_choice(
             target.record_id, target.displayed_revision
         )
         .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
+        // The same revision is already rendered as a document a person can
+        // read. Deciding in a terminal should not mean the terminal is the only
+        // place the draft can be read.
+        writeln!(
+            display,
+            "  문서로 읽기: {}",
+            crate::projection_v2::record_projection_relative_path_v2(
+                match target.record_type {
+                    ReviewTargetTypeV2::Source => ProjectionRecordTypeV2::Source,
+                    ReviewTargetTypeV2::Knowledge => ProjectionRecordTypeV2::Knowledge,
+                },
+                &target.record_id,
+            )
+        )
+        .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
     }
     if !effect.domain_confirmations.is_empty() {
         display.extend_from_slice(
@@ -2230,6 +2245,18 @@ mod tests {
         let displayed = String::from_utf8(terminal.displayed).unwrap();
         assert!(displayed.contains(std::str::from_utf8(&card_bytes).unwrap()));
         assert!(displayed.contains(&record_id));
+        // Deciding in a terminal must not make the terminal the only place the
+        // draft can be read: the same revision is already a readable document.
+        assert!(
+            displayed.contains(&format!(
+                "문서로 읽기: {}",
+                crate::projection_v2::record_projection_relative_path_v2(
+                    ProjectionRecordTypeV2::Source,
+                    &record_id,
+                )
+            )),
+            "the decision screen must name the document: {displayed}"
+        );
         assert!(displayed.contains("[a] 승인"));
         assert!(displayed.contains("[c] 수정 요청"));
         assert!(displayed.contains("[d] 나중에"));
