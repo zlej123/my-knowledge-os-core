@@ -554,6 +554,7 @@ fn self_consistent_projection_with_noncanonical_semantics_blocks_the_queue() {
             domain: "uncategorized".into(),
             perspectives: Vec::new(),
             tags: environment.source.tags.clone(),
+            summary: String::new(),
             body_markdown: String::new(),
             record_link: format!("sources/{}/current.yaml", source.record_id),
             asset_link: format!("assets/registry/{}.json", environment.asset.id),
@@ -646,6 +647,16 @@ fn sync_projection(
                 record.record_id
             ),
             asset_link: format!("assets/registry/{}.json", environment.asset.id),
+            summary: if is_source {
+                mko_core::projection_v2::source_projection_summary_v2(&environment.source)
+            } else {
+                mko_core::projection_v2::knowledge_projection_summary_v2(
+                    knowledge
+                        .as_ref()
+                        .map(|knowledge| &knowledge.revision.response)
+                        .unwrap_or(&environment.knowledge),
+                )
+            },
             body_markdown: if is_source {
                 mko_core::projection_v2::source_projection_body_v2(
                     &environment.source,
