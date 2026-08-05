@@ -266,6 +266,38 @@ binary installation and promoting `feat/revision-loop` to `main`.
 
 The product's strongest property today is that it prevents a wrong approval.
 The next thing to earn is that an owner who stopped safely can start again.
+## Legacy transition concierge — not justified (checked 2026-08-05)
+
+Phase C of `docs/superpowers/specs/2026-07-31-mko-daily-home-ux-design.md` lists
+a transition inventory and plan/apply contract for carrying a v0.1 knowledge
+base forward. Checked against the owner's actual legacy KB before building it,
+because this backlog only earns design work from something that hurt in
+practice.
+
+What the legacy KB holds: two registered Assets and **one approved Source**
+("Signals and Systems", 2026-07-21). What the transition would carry:
+
+- the Asset for that Source is **already registered in the v0.3 KB under the
+  same identifier** — asset ids derive from content, so the same file produced
+  the same id in both;
+- its original PDF is still in the Inbox and still matches;
+- preparation of that exact Asset in the v0.3 KB now succeeds, verified
+  2026-08-05 (it is the 728-page book that only became preparable once stray
+  control bytes stopped rejecting whole documents);
+- the old *semantic* content cannot be carried anyway: it is v1-shaped, and the
+  transition rule already says recreated records become pending drafts because
+  old approval never carries.
+
+So the material is not stranded — it is already present, and re-drafting it from
+the same bytes is the same work the transition would have orchestrated, with no
+new mutation surface and no second path to maintain. Building the concierge now
+would be anticipation.
+
+**Revisit when** a legacy KB actually holds records whose originals are gone or
+changed, which is the case the plan's "requiring owner review" row exists for.
+Recording that occurrence is the trigger; the design section stays valid as
+written.
+
 ## Rendered-document review (owner-proposed, 2026-08-01)
 
 **Idea.** When material arrives, the LLM's draft is delivered to the owner
