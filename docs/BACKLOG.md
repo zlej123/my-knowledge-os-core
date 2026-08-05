@@ -179,10 +179,17 @@ is upstream: the extraction worker panics inside `adobe-cmap-parser` 0.4.1
 why it died in under a second. Running the extractor in its own process already
 kept the CLI alive; the failure is now reported as `pdf_text_unreadable` with
 `next_action: add` and tells the owner to export or scan a new copy and register
-that, instead of `pdf_extraction_failed` with nothing to do. **Still open:**
-making that document itself readable needs an upstream fix or a different
-extractor, which is a dependency decision rather than a bug in this repository —
-the pinned `pdf-extract` 0.12.0 is the current constraint.
+that, instead of `pdf_extraction_failed` with nothing to do. **Still open, and investigated 2026-08-05: there is no upstream fix to take.**
+`pdf-extract` 0.12.0 and `adobe-cmap-parser` 0.4.1 are both the latest published
+versions, so no upgrade helps. The panic is a hard `panic!("bad length of
+hexstring")` in a catch-all arm of the CMap bfrange parser: it handles
+destination hexstrings of one or two bytes and gives up on anything longer,
+which is a legitimate construct (a ligature mapping to several code points).
+The remaining choices are therefore to fork or vendor the parser and carry the
+patch, to contribute the fix upstream and wait, or to accept the current
+handling — the document is reported as `pdf_text_unreadable` with a next action
+the owner can take. Accepting is the default until this document, or one like
+it, matters enough to justify carrying a fork.
 
 **P1 (found verifying 0.3.4 on the real KB, resolved 2026-08-03) — a KB
 without Git was reported as damaged.** Setup deliberately leaves Git optional —
