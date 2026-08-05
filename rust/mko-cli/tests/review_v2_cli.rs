@@ -229,13 +229,17 @@ fn valid_v1_repository_keeps_the_frozen_legacy_review_route() {
 fn real_tty_review_approves_only_the_exact_displayed_revision() {
     let environment = environment();
     let card = show_review_card_v2(environment.root.path(), &environment.source_id).unwrap();
-    let (confirmation, effect_digest) = approval_confirmation(&card, &environment.source_id);
+    let confirmation = approval_confirmation(&card, &environment.source_id);
+    // A Source carries no classification, so choosing approve is the whole act.
+    assert!(confirmation.is_empty());
     let transcript = run_tty_review(&environment, &environment.source_id, &confirmation);
     assert!(transcript.contains("# Review card"));
     assert!(transcript.contains(&environment.source_id));
     assert!(transcript.contains(&environment.knowledge_id));
-    assert!(transcript.contains("Approval selection: selected record only"));
-    assert!(transcript.contains(&effect_digest));
+    assert!(
+        !transcript.contains("Type exactly:") && !transcript.contains(&card.card_digest),
+        "verifying a digest is the machine's job, not the owner's: {transcript}"
+    );
     assert!(transcript.contains("approved personal-review-"));
     assert_eq!(
         fs::read_dir(environment.root.path().join("reviews"))
@@ -265,15 +269,17 @@ fn real_tty_review_approves_only_the_exact_displayed_revision() {
 fn real_tty_knowledge_selection_approves_only_knowledge_with_domain_confirmation() {
     let environment = environment();
     let card = show_review_card_v2(environment.root.path(), &environment.knowledge_id).unwrap();
-    let (confirmation, effect_digest) = approval_confirmation(&card, &environment.knowledge_id);
+    let confirmation = approval_confirmation(&card, &environment.knowledge_id);
+    // Knowledge carries a classification, and acknowledging it is a judgement
+    // the owner still has to make in their own words.
+    assert_eq!(confirmation, "standard\n");
 
     let transcript = run_tty_review(&environment, &environment.knowledge_id, &confirmation);
 
     assert!(transcript.contains(&environment.source_id));
     assert!(transcript.contains(&environment.knowledge_id));
-    assert!(transcript.contains("Approval selection: selected record only"));
-    assert!(transcript.contains("Required per-document domain confirmation"));
-    assert!(transcript.contains(&effect_digest));
+    assert!(transcript.contains("확인이 필요한 분류"));
+    assert!(transcript.contains("입력할 값: standard"));
     assert_eq!(
         derive_review_state_v2(
             environment.root.path(),
@@ -303,13 +309,14 @@ fn real_tty_queue_item_selection_approves_all_targets_in_one_event() {
     let environment = environment();
     let card = show_review_card_v2(environment.root.path(), &environment.source_id).unwrap();
     let item_id = card.item_id.clone();
-    let (confirmation, effect_digest) = approval_confirmation(&card, &item_id);
+    let confirmation = approval_confirmation(&card, &item_id);
 
     let transcript = run_tty_review(&environment, &item_id, &confirmation);
 
-    assert!(transcript.contains("Approval selection: all actionable displayed targets"));
-    assert!(transcript.contains("Required per-document domain confirmation"));
-    assert!(transcript.contains(&effect_digest));
+    // Both targets are named on the decision screen before anything is decided.
+    assert!(transcript.contains(&environment.source_id));
+    assert!(transcript.contains(&environment.knowledge_id));
+    assert!(transcript.contains("확인이 필요한 분류"));
     assert_eq!(
         derive_review_state_v2(
             environment.root.path(),
@@ -360,69 +367,24 @@ fn review_rejects_a_well_formed_target_id_outside_the_displayed_group() {
 }
 
 #[cfg(target_os = "macos")]
-fn approval_confirmation(card: &RenderedReviewCardV2, selected_id: &str) -> (String, String) {
-    let selected = card
+/// What the owner still has to type after choosing to approve: the
+/// classification of each selected Knowledge target, and nothing else. A
+/// selection with no classification to acknowledge needs no second answer.
+fn approval_confirmation(card: &RenderedReviewCardV2, selected_id: &str) -> String {
+    let classifications = card
         .targets
         .iter()
         .filter(|target| selected_id == card.item_id || target.snapshot.record_id == selected_id)
-        .collect::<Vec<_>>();
-    let targets = selected
-        .iter()
-        .map(|target| target.snapshot.clone())
-        .collect::<Vec<_>>();
-    let selected_effects = selected
-        .iter()
-        .map(|target| {
-            serde_json::json!({
-                "record_id": target.snapshot.record_id,
-                "displayed_revision": target.snapshot.displayed_revision,
-                "effects": ["approve_current_revision_via_tty"],
-            })
+        .filter_map(|target| target.domain_policy.as_ref())
+        .map(|domain_policy| match domain_policy {
+            DomainPolicyV2::Standard => "standard",
+            DomainPolicyV2::HighRisk => "high_risk",
         })
         .collect::<Vec<_>>();
-    let domain_confirmations = selected
-        .iter()
-        .filter_map(|target| {
-            target.domain_policy.as_ref().map(|domain_policy| {
-                serde_json::json!({
-                    "record_id": target.snapshot.record_id,
-                    "displayed_revision": target.snapshot.displayed_revision,
-                    "domain_policy": domain_policy,
-                })
-            })
-        })
-        .collect::<Vec<_>>();
-    let selection = if selected_id == card.item_id {
-        serde_json::json!("all")
-    } else {
-        serde_json::json!({"record": selected_id})
-    };
-    let effect_digest = canonical_json_sha256(&serde_json::json!({
-        "schema_version": 2,
-        "operation": "approve",
-        "card_digest": card.card_digest,
-        "displayed_effect_digest": card.effect_digest,
-        "selection": selection,
-        "targets": targets,
-        "selected_effects": selected_effects,
-        "domain_confirmations": domain_confirmations,
-    }))
-    .unwrap();
-    let mut confirmation = format!("approve {} {effect_digest}", card.card_digest);
-    for target in selected {
-        if let Some(domain_policy) = &target.domain_policy {
-            let policy = match domain_policy {
-                DomainPolicyV2::Standard => "standard",
-                DomainPolicyV2::HighRisk => "high_risk",
-            };
-            confirmation.push_str(&format!(
-                " confirm-domain {} {} {}",
-                target.snapshot.record_id, target.snapshot.displayed_revision, policy
-            ));
-        }
+    if classifications.is_empty() {
+        return String::new();
     }
-    confirmation.push('\n');
-    (confirmation, effect_digest)
+    format!("{}\n", classifications.join(" "))
 }
 
 #[cfg(target_os = "macos")]
