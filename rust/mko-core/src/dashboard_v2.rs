@@ -48,16 +48,21 @@ generated_by: my-knowledge-os
   and:
     - file.inFolder("views/records")
     - 'derived_state != "approved"'
+properties:
+  summary:
+    displayName: 한 줄 요약
+  derived_state:
+    displayName: 상태
 views:
   - type: table
     name: Review Queue
     order:
       - title
-      - record_type
+      - summary
       - derived_state
+      - record_type
       - domain
       - perspectives
-      - current_revision
 "#,
     ),
     (

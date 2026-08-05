@@ -20,8 +20,9 @@ use crate::{
     },
     projection_v2::{
         ProjectionInputV2, ProjectionRecordTypeV2, ProjectionStateV2, ProjectionWriteOutcomeV2,
-        ProjectionWriteResultV2, knowledge_projection_body_v2, projection_relative_path_v2,
-        render_projection_v2, source_projection_body_v2, write_projection_locked,
+        ProjectionWriteResultV2, knowledge_projection_body_v2, knowledge_projection_summary_v2,
+        projection_relative_path_v2, render_projection_v2, source_projection_body_v2,
+        source_projection_summary_v2, write_projection_locked,
     },
     review_v2::{ReviewDerivedStateV2, derive_review_histories_v2},
     revision_v2::{
@@ -243,6 +244,7 @@ pub fn write_source_record_v2(
             request.response,
             Some(request.asset.provider.logical_locator.clone()),
         ),
+        source_projection_summary_v2(request.response),
         clock,
     )
 }
@@ -296,6 +298,7 @@ pub fn write_knowledge_record_v2(
             request.response,
             Some(request.asset.provider.logical_locator.clone()),
         ),
+        knowledge_projection_summary_v2(request.response),
         clock,
     )
 }
@@ -409,6 +412,7 @@ pub(crate) fn replace_knowledge_perspectives_v2(
         perspectives.clone(),
         asset.id,
         body,
+        knowledge_projection_summary_v2(&revision.response),
         clock,
     )
 }
@@ -736,6 +740,7 @@ fn publish_record_and_projection(
     perspectives: Vec<PerspectiveV2>,
     asset_id: String,
     body: String,
+    summary: String,
     clock: &dyn Clock,
 ) -> Result<RecordWriteResultV2, MkoError> {
     let candidate_revision = sha256_digest(bytes);
@@ -759,6 +764,7 @@ fn publish_record_and_projection(
             perspectives,
             asset_id,
             body,
+            summary,
         },
     )?;
     // Rendering is deliberately completed before canonical publication. This
@@ -898,6 +904,7 @@ struct ProjectionMetadataV2 {
     /// Derived by the same functions drift detection uses, so a freshly written
     /// projection and the expected one are identical.
     body: String,
+    summary: String,
 }
 
 fn expected_projection_input(
@@ -950,6 +957,7 @@ fn expected_projection_input(
         domain: metadata.domain,
         perspectives: metadata.perspectives,
         tags: metadata.tags,
+        summary: metadata.summary,
         body_markdown: metadata.body,
         record_link: format!("{collection}/{record_id}/current.yaml"),
         asset_link: format!("assets/registry/{}.json", metadata.asset_id),

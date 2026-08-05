@@ -641,6 +641,14 @@ fn canonical_projection_input(target: &ScannedTarget) -> Result<ProjectionInputV
             Some(target.asset.provider.logical_locator.clone()),
         ),
     };
+    let summary = match &target.revision {
+        RevisionV2::Source(revision) => {
+            crate::projection_v2::source_projection_summary_v2(&revision.response)
+        }
+        RevisionV2::Knowledge(revision) => {
+            crate::projection_v2::knowledge_projection_summary_v2(&revision.response)
+        }
+    };
     Ok(ProjectionInputV2 {
         record_type,
         id: target.record_id.clone(),
@@ -651,6 +659,7 @@ fn canonical_projection_input(target: &ScannedTarget) -> Result<ProjectionInputV
         domain: primary_perspective(&perspectives),
         perspectives,
         tags,
+        summary,
         body_markdown: body,
         record_link: format!("{collection}/{}/current.yaml", target.record_id),
         asset_link: format!("assets/registry/{}.json", target.asset.id),

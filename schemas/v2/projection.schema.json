@@ -106,6 +106,10 @@
     "body_markdown": {
       "type": "string",
       "maxLength": 1048576
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 4096
     }
   },
   "allOf": [

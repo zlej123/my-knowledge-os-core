@@ -89,6 +89,12 @@ pub struct ProjectionInputV2 {
     pub tags: Vec<String>,
     pub record_link: String,
     pub asset_link: String,
+    /// The record's own one sentence, carried in frontmatter so the vault can
+    /// list what is waiting without opening every file. A queue that shows a
+    /// revision hash where the summary belongs asks the owner to recognize a
+    /// record by its checksum.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub summary: String,
     /// The readable part of the page, already rendered.
     ///
     /// It travels in the input so the digest binds it, and it is written
@@ -140,6 +146,8 @@ struct ProjectionInputWireV2 {
     record_type: ProjectionRecordTypeV2,
     id: String,
     title: String,
+    #[serde(default)]
+    summary: String,
     current_revision: String,
     #[serde(deserialize_with = "deserialize_required_option")]
     review_head_id: Option<String>,
@@ -164,6 +172,7 @@ impl<'de> Deserialize<'de> for ProjectionInputV2 {
             record_type: wire.record_type,
             id: wire.id,
             title: wire.title,
+            summary: wire.summary,
             current_revision: wire.current_revision,
             review_head_id: wire.review_head_id,
             derived_state: wire.derived_state,
@@ -225,6 +234,8 @@ struct StoredProjectionMetadataV2 {
     record_type: ProjectionRecordTypeV2,
     record_id: String,
     title: String,
+    #[serde(default)]
+    summary: String,
     current_revision: String,
     #[serde(deserialize_with = "deserialize_required_option")]
     review_head_id: Option<String>,
@@ -310,6 +321,7 @@ pub(crate) fn read_current_projection_input_v2(
         record_type: metadata.record_type,
         id: metadata.record_id,
         title: metadata.title,
+        summary: metadata.summary,
         current_revision: metadata.current_revision,
         review_head_id: metadata.review_head_id,
         derived_state: metadata.derived_state,
@@ -495,6 +507,17 @@ pub fn record_projection_relative_path_v2(
 ///
 /// Both the write path and drift detection call this, so a projection that was
 /// generated and one that is merely expected agree byte for byte.
+/// The record's own one sentence, for callers that put it in frontmatter so a
+/// listing can show it. Derived here so the write path and drift detection
+/// cannot disagree about it.
+pub fn source_projection_summary_v2(response: &crate::model_v2::SourceResponseV2) -> String {
+    response.one_sentence_summary.trim().to_owned()
+}
+
+pub fn knowledge_projection_summary_v2(response: &crate::model_v2::KnowledgeResponseV2) -> String {
+    response.synthesis.trim().to_owned()
+}
+
 pub fn source_projection_body_v2(
     response: &crate::model_v2::SourceResponseV2,
     document_locator: Option<String>,
@@ -654,12 +677,19 @@ fn render_projection_unchecked(
         .unwrap_or_else(|| "null".into());
     let tags = serde_json::to_string(&tags)
         .map_err(|error| MkoError::new("projection_invalid", error.to_string()))?;
+    let summary = normalize(&input.summary);
+    let summary_line = if summary.is_empty() {
+        String::new()
+    } else {
+        format!("summary: {}\n", json_string(&summary)?)
+    };
     let heading = title.replace('\n', " ");
     let text = format!(
-        "---\nprojection_schema_version: 2\nrecord_type: {}\nrecord_id: {}\ntitle: {}\ncurrent_revision: {}\nreview_head_id: {}\nderived_state: {}\ndomain: {}\n{}tags: {}\nrecord_link: {}\nasset_link: {}\nprojection_digest: {}\n---\n\n# {}\n\n- Record: [[{}]]\n- Asset: [[{}]]\n- Current revision: `{}`\n",
+        "---\nprojection_schema_version: 2\nrecord_type: {}\nrecord_id: {}\ntitle: {}\n{}current_revision: {}\nreview_head_id: {}\nderived_state: {}\ndomain: {}\n{}tags: {}\nrecord_link: {}\nasset_link: {}\nprojection_digest: {}\n---\n\n# {}\n\n- Record: [[{}]]\n- Asset: [[{}]]\n- Current revision: `{}`\n",
         input.record_type.as_str(),
         json_string(&input.id)?,
         json_string(&title)?,
+        summary_line,
         json_string(&input.current_revision)?,
         review_head,
         input.derived_state.as_str(),
