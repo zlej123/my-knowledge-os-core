@@ -448,6 +448,53 @@ mod macos {
         assert!(report["data"]["scan_complete"].is_boolean());
     }
 
+    // The waiting list was derived from the Inbox scan, which can only see
+    // provider files. A page the agent read has no Inbox file, so a snapshot
+    // would have been registered, waiting, and invisible — the exact failure
+    // this command exists to remove.
+    #[test]
+    #[allow(deprecated)]
+    fn a_registered_snapshot_is_waiting_to_be_drafted() {
+        let root = tempdir().unwrap();
+        let repository = root.path().join("v3-kb");
+        let provider = root.path().join("provider");
+        scaffold_personal_kb_v2(&repository).unwrap();
+        fs::create_dir(&provider).unwrap();
+        let snapshot = mko_core::snapshot_v2::register_web_snapshot_v2(
+            mko_core::snapshot_v2::RegisterSnapshotRequestV2 {
+                repository_root: &repository,
+                url: "https://example.com/page",
+                title: "읽은 페이지",
+                text: "The page said this.",
+                fetched_at: chrono::Utc::now(),
+            },
+        )
+        .unwrap()
+        .asset;
+
+        let output = Command::new(assert_cmd::cargo::cargo_bin("mko"))
+            .args(["queue", "--pending-drafts", "--format", "json-v2"])
+            .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+            .env("HOME", root.path())
+            .current_dir(&repository)
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let waiting = report["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["asset_id"] == snapshot.id)
+            .unwrap_or_else(|| panic!("a registered snapshot must be waiting: {report}"));
+        assert_eq!(waiting["title"], "읽은 페이지");
+        assert_eq!(
+            waiting["next_action"], "prepare",
+            "nothing stopped it, so the next action is to draft it: {report}"
+        );
+    }
+
     // `mko setup` records where the material lives, so nobody exports a
     // variable afterwards. Reading that record only when the caller is
     // somewhere else made every command that needs material fail inside the

@@ -391,6 +391,34 @@ pub(crate) fn write_asset_registry_record_v2(
     })
 }
 
+/// Every Asset the registry holds, whatever it was made from.
+///
+/// The Inbox scan can only see material that is still a file in the provider,
+/// so it cannot answer this for a web snapshot — which has no provider file at
+/// all, and would otherwise be registered, waiting, and invisible.
+pub fn registered_asset_ids_v2(repository_root: &Path) -> Result<Vec<String>, MkoError> {
+    let directory = repository_root.join("assets/registry");
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(MkoError::new("asset_registry_invalid", error.to_string())),
+    };
+    let mut ids = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_suffix(".json"))
+                .filter(|id| validate_asset_id(id).is_ok())
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
 pub fn read_asset_v2(repository_root: &Path, asset_id: &str) -> Result<AssetRecordV2, MkoError> {
     KnowledgeConfigV2::read(repository_root)?;
     validate_asset_id(asset_id)?;
