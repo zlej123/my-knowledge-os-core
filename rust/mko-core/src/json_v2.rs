@@ -49,6 +49,8 @@ pub enum JsonV2Command {
     Status,
     #[serde(rename = "queue")]
     Queue,
+    #[serde(rename = "queue.drafts")]
+    QueueDrafts,
     #[serde(rename = "show")]
     Show,
     #[serde(rename = "review.open")]
@@ -121,6 +123,36 @@ pub struct QueueDataV2 {
     pub remaining: u64,
     #[serde(deserialize_with = "deserialize_required_option")]
     pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingDraftReasonV2 {
+    NotAttempted,
+    TextUnreadable,
+    DownloadRequired,
+    Retryable,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingDraftV2 {
+    pub asset_id: String,
+    pub title: String,
+    pub reason: PendingDraftReasonV2,
+    pub next_action: NextActionV2,
+}
+
+/// Material that is registered and has no record yet — the work an agent is
+/// asked to do when the owner opens a session and says "summarize what has
+/// piled up". Home has derived this since counts appeared there; without it in
+/// a typed envelope an agent had to guess from a re-scan, which cannot tell
+/// already-drafted material from material still waiting.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueueDraftsDataV2 {
+    pub items: Vec<PendingDraftV2>,
+    pub scan_complete: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -503,6 +535,13 @@ pub enum JsonV2Success {
         result: JsonV2SuccessResult,
         data: QueueDataV2,
     },
+    #[serde(rename = "queue.drafts")]
+    QueueDrafts {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: QueueDraftsDataV2,
+    },
     #[serde(rename = "show")]
     Show {
         #[serde(deserialize_with = "deserialize_schema_version")]
@@ -615,6 +654,14 @@ impl JsonV2Success {
 
     pub fn queue(data: QueueDataV2) -> Self {
         Self::Queue {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
+    pub fn queue_drafts(data: QueueDraftsDataV2) -> Self {
+        Self::QueueDrafts {
             schema_version: 2,
             result: JsonV2SuccessResult::Ok,
             data,

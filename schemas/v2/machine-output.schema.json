@@ -34,6 +34,9 @@
       "$ref": "#/$defs/queue_success"
     },
     {
+      "$ref": "#/$defs/queue_drafts_success"
+    },
+    {
       "$ref": "#/$defs/show_success"
     },
     {
@@ -67,6 +70,7 @@
         "check",
         "status",
         "queue",
+        "queue.drafts",
         "show",
         "review.open",
         "review.feedback",
@@ -1487,6 +1491,81 @@
         },
         "error": {
           "$ref": "#/$defs/error"
+        }
+      }
+    },
+    "pending_draft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset_id",
+        "title",
+        "reason",
+        "next_action"
+      ],
+      "properties": {
+        "asset_id": {
+          "type": "string",
+          "pattern": "^personal-asset-[0-9a-f]{64}$"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "reason": {
+          "enum": [
+            "not_attempted",
+            "text_unreadable",
+            "download_required",
+            "retryable"
+          ]
+        },
+        "next_action": {
+          "$ref": "#/$defs/next_action"
+        }
+      }
+    },
+    "queue_drafts_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "scan_complete"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/pending_draft"
+          }
+        },
+        "scan_complete": {
+          "type": "boolean"
+        }
+      }
+    },
+    "queue_drafts_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "queue.drafts"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/queue_drafts_data"
         }
       }
     }

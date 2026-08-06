@@ -50,7 +50,7 @@ This Skill is written for exactly one Core version. Before the first `mko` comma
 (after installation checks), verify the contract:
 
 ```bash
-mko handshake --skill-version "0.3.9" --format json-v2
+mko handshake --skill-version "0.3.10" --format json-v2
 ```
 
 Pass the pinned version string above exactly; never substitute the CLI's own reported version.
@@ -156,6 +156,20 @@ Do not parse human prose. Do not continue from a read-only request into registra
 Questions or explanations such as `이 PDF에 어떤 공식이 있어?` do not authorize a Knowledge
 write. Knowledge mutation requires an explicit original request or the user's yes to the exact
 post-summary question below.
+
+When the owner asks to work through what has piled up — `쌓인 것 정리해줘`, `밀린 자료 정리해줘` —
+ask Core what is waiting instead of inferring it from a rescan:
+
+```bash
+mko queue --pending-drafts --format json-v2
+```
+
+Each item is registered material with no record yet, carrying why it stopped and its typed
+`next_action`. Work only the items whose next action is `prepare`, starting at step 2 of the
+selected-PDF workflow. Report the rest without acting on them: `add` means the document's text
+cannot be read and needs a new copy, `hydrate` means the original must be downloaded first, and
+`retry` means it is worth attempting again. Preserve `scan_complete`; when it is false, never claim
+the pile is fully processed.
 
 For `Inbox 정리해줘`, let Core discover and register one bounded deterministic batch. Do not list
 the provider yourself and do not copy a document-derived locator into shell syntax:

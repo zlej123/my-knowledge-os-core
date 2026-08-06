@@ -417,4 +417,34 @@ mod macos {
             "do not send the owner elsewhere while something is stuck: {screen}"
         );
     }
+    // Opening a session and asking for the pile to be summarized needs Core to
+    // answer "what is waiting". Home derived it as a count for the owner; an
+    // agent had to re-scan and could not tell already-drafted material from
+    // material still waiting.
+    #[test]
+    #[allow(deprecated)]
+    fn core_can_be_asked_what_is_waiting_to_be_drafted() {
+        let root = tempdir().unwrap();
+        let repository = root.path().join("v3-kb");
+        let provider = root.path().join("provider");
+        scaffold_personal_kb_v2(&repository).unwrap();
+        fs::create_dir(&provider).unwrap();
+        seed_blocked_record(&repository);
+
+        let empty = Command::new(assert_cmd::cargo::cargo_bin("mko"))
+            .args(["queue", "--pending-drafts", "--format", "json-v2"])
+            .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+            .env("HOME", root.path())
+            .current_dir(&repository)
+            .output()
+            .unwrap();
+        assert!(empty.status.success());
+        let report: serde_json::Value = serde_json::from_slice(&empty.stdout).unwrap();
+        assert_eq!(report["command"], "queue.drafts");
+        assert_eq!(report["schema_version"], 2);
+        // The seeded record lives outside the provider, so nothing is waiting
+        // there — and an empty answer still has to be a typed one.
+        assert!(report["data"]["items"].is_array());
+        assert!(report["data"]["scan_complete"].is_boolean());
+    }
 }
