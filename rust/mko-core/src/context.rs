@@ -190,16 +190,71 @@ fn resolve_unprofiled_context(
 ) -> Result<ResolvedPersonalContext, MkoError> {
     let repository_root = canonical_directory(selected_repository, "repository_root_invalid")?;
     let knowledge = validated_personal_knowledge(&repository_root)?;
-    let provider_root = provider_root_from_environment(&knowledge, platform)?;
+
+    // Selecting a repository directly — by `--repo`, or by working inside it —
+    // says nothing about where its material lives. The environment answers that
+    // when it is set, and otherwise a machine profile that names this very
+    // repository already holds the answer: refusing it would tell the owner to
+    // configure what they have configured.
+    let (profile_name, provider_root) = match provider_root_from_environment(&knowledge, platform)?
+    {
+        Some(provider_root) => (UNPROFILED_CONTEXT_NAME.to_owned(), provider_root),
+        None => profile_for_repository(&repository_root, platform)?.ok_or_else(|| {
+            MkoError::new(
+                "provider_root_missing",
+                format!(
+                    "set {} or select a machine profile for this repository",
+                    knowledge.root_env
+                ),
+            )
+        })?,
+    };
 
     Ok(ResolvedPersonalContext {
         repository_root,
         provider_root,
         provider_type: knowledge.provider_type,
-        profile_name: UNPROFILED_CONTEXT_NAME.into(),
+        profile_name,
         scope: Scope::Personal,
         source,
     })
+}
+
+/// The provider root a configured profile holds for exactly this repository.
+///
+/// The default profile wins when it matches, so a machine with one profile
+/// behaves the same however the repository was selected; otherwise the profiles
+/// are considered in name order, which is stable across runs.
+fn profile_for_repository(
+    repository_root: &Path,
+    platform: &dyn PlatformEnvironment,
+) -> Result<Option<(String, PathBuf)>, MkoError> {
+    let Some(profiles) = ProfileStore::from_platform(platform)?.read()? else {
+        return Ok(None);
+    };
+    let default_first = profiles
+        .profiles
+        .get_key_value(&profiles.default_profile)
+        .into_iter()
+        .chain(
+            profiles
+                .profiles
+                .iter()
+                .filter(|(name, _)| **name != profiles.default_profile),
+        );
+    for (name, profile) in default_first {
+        // A profile pointing at a directory that is gone must not fail
+        // resolution for the repository actually in use.
+        let Ok(candidate) =
+            canonical_directory(&profile.repository_root, "repository_root_invalid")
+        else {
+            continue;
+        };
+        if candidate == repository_root {
+            return Ok(Some((name.clone(), profile_provider_root(profile)?)));
+        }
+    }
+    Ok(None)
 }
 
 fn resolve_profile_context(
@@ -273,22 +328,16 @@ fn profile_provider_root(profile: &PersonalProfile) -> Result<PathBuf, MkoError>
     canonical_directory(&profile.provider_root, "provider_root_invalid")
 }
 
+/// `None` when the variable is unset, so a caller can look elsewhere. A variable
+/// that is set but unusable stays an error: the owner asked for that path.
 fn provider_root_from_environment(
     knowledge: &PersonalKnowledgeDescriptor,
     platform: &dyn PlatformEnvironment,
-) -> Result<PathBuf, MkoError> {
-    let value = platform
-        .environment_value(OsStr::new(&knowledge.root_env))
-        .ok_or_else(|| {
-            MkoError::new(
-                "provider_root_missing",
-                format!(
-                    "set {} or select a machine profile for this repository",
-                    knowledge.root_env
-                ),
-            )
-        })?;
-    canonical_directory(Path::new(&value), "provider_root_invalid")
+) -> Result<Option<PathBuf>, MkoError> {
+    let Some(value) = platform.environment_value(OsStr::new(&knowledge.root_env)) else {
+        return Ok(None);
+    };
+    canonical_directory(Path::new(&value), "provider_root_invalid").map(Some)
 }
 
 #[cfg(target_os = "windows")]

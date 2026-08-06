@@ -447,4 +447,67 @@ mod macos {
         assert!(report["data"]["items"].is_array());
         assert!(report["data"]["scan_complete"].is_boolean());
     }
+
+    // `mko setup` records where the material lives, so nobody exports a
+    // variable afterwards. Reading that record only when the caller is
+    // somewhere else made every command that needs material fail inside the
+    // knowledge base itself — the one place the owner is most likely to run it.
+    #[test]
+    #[allow(deprecated)]
+    fn a_configured_machine_needs_no_environment_variable_inside_its_own_repository() {
+        let root = tempdir().unwrap();
+        let repository = root.path().join("v3-kb");
+        let provider = root.path().join("provider");
+        let home = root.path().join("home");
+        scaffold_personal_kb_v2(&repository).unwrap();
+        fs::create_dir(&provider).unwrap();
+        fs::create_dir(&home).unwrap();
+        write_machine_profile(&home, &repository, &provider);
+
+        for arguments in [
+            vec!["queue", "--pending-drafts", "--format", "json-v2"],
+            vec!["doctor", "--format", "json-v2"],
+        ] {
+            let output = Command::new(assert_cmd::cargo::cargo_bin("mko"))
+                .args(&arguments)
+                .env_remove("MKO_PERSONAL_PROVIDER_ROOT")
+                .env("HOME", &home)
+                .current_dir(&repository)
+                .output()
+                .unwrap();
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "{arguments:?} must work where the owner runs it: {stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                !stdout.contains("provider_root_missing"),
+                "the machine profile already answers this: {stdout}"
+            );
+        }
+    }
+
+    fn write_machine_profile(home: &Path, repository: &Path, provider: &Path) {
+        use mko_core::{
+            context::Scope,
+            profile::{MachineProfileFile, PersonalProfile, ProfileStore},
+        };
+
+        ProfileStore::at(home.join("Library/Application Support/mko/profiles.yaml"))
+            .write(&MachineProfileFile {
+                schema_version: 1,
+                default_profile: "personal".into(),
+                profiles: BTreeMap::from([(
+                    "personal".into(),
+                    PersonalProfile {
+                        repository_root: repository.to_path_buf(),
+                        provider_root: provider.to_path_buf(),
+                        scope: Scope::Personal,
+                    },
+                )]),
+            })
+            .unwrap();
+    }
 }
