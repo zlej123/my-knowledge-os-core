@@ -139,6 +139,22 @@ understand, and no note contains it. At roughly 100 bytes per question, that is
 Registration path: fetch → extract text → store content-addressed inside the
 knowledge base → register an Asset.
 
+**The agent fetches; Core receives the text.** The workspace has no network
+dependency and pins every crate exactly; the Core is offline and deterministic
+by construction. Putting an HTTP client inside it would pull a large transitive
+tree, make `mko` a tool that egresses, and force Core's tests to mock a network.
+The agent already holds web tools, and this is the same boundary the semantic
+path already uses: the agent produces, Core validates and records.
+
+Core therefore takes extracted text plus metadata and does the deterministic
+part — hash, store, register. Every property below is unaffected, because they
+all follow from the content hash rather than from who performed the request.
+
+The honest cost: Core cannot verify that the text came from the URL claimed. An
+agent could lie — as it could about any semantic content, which is why grounding
+rules and human approval exist. What must hold is that a note's claim is
+checkable against the text actually recorded, and that is unchanged.
+
 **Identity is the hash of the extracted text, not the URL.** The URL, fetch
 time, HTTP status, and content type are metadata. Consequences, all wanted:
 
@@ -228,7 +244,7 @@ log is for continuity; `open_question` is for knowledge.
 
 | Situation | Behaviour |
 |---|---|
-| Fetch fails or page unreadable | Attempt record with a new reason; surfaces in `queue --pending-drafts` with `next_action` |
+| Fetch fails or page unreadable | The agent reports the failure to Core, which records an attempt with a new reason; surfaces in `queue --pending-drafts` with `next_action`. Core never decides a fetch failed — it records what it was told, exactly as it records a PDF that would not parse |
 | Snapshot exceeds the size limit | Refused and recorded as an attempt, not silently truncated |
 | `model_knowledge` proposed on a grounded kind | Rejected by Core; the new rule is narrower than the existing grounding rule, so a bypass would already have failed |
 | Record changed since the session started | Existing stale-revision rejection; the session re-reads and re-proposes |
@@ -289,6 +305,7 @@ because the answer depends on what the implementation finds:
 - The wire names for the new kind and basis (`background` / `model_knowledge`
   are the working names).
 - Where snapshots live on disk, and whether they share the `prepared` layout.
-- The snapshot size limit.
+- The snapshot size limit, and whether Core enforces it on the text it receives
+  (it can, and should — the limit is about what the knowledge base stores).
 - Whether the question log is exposed as its own command or folded into the
   existing `show` envelope.
