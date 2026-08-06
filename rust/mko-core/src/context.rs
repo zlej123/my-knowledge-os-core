@@ -225,7 +225,7 @@ fn resolve_unprofiled_context(
 /// The default profile wins when it matches, so a machine with one profile
 /// behaves the same however the repository was selected; otherwise the profiles
 /// are considered in name order, which is stable across runs.
-fn profile_for_repository(
+pub(crate) fn profile_for_repository(
     repository_root: &Path,
     platform: &dyn PlatformEnvironment,
 ) -> Result<Option<(String, PathBuf)>, MkoError> {

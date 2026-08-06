@@ -457,10 +457,12 @@ mod macos {
     fn a_configured_machine_needs_no_environment_variable_inside_its_own_repository() {
         let root = tempdir().unwrap();
         let repository = root.path().join("v3-kb");
-        let provider = root.path().join("provider");
+        // doctor holds the provider root to the exact Personal Inbox, so the
+        // fixture has to be the real shape or it fails for an unrelated reason.
+        let provider = root.path().join("My-Knowledge-OS-Assets/personal/inbox");
         let home = root.path().join("home");
         scaffold_personal_kb_v2(&repository).unwrap();
-        fs::create_dir(&provider).unwrap();
+        fs::create_dir_all(&provider).unwrap();
         fs::create_dir(&home).unwrap();
         write_machine_profile(&home, &repository, &provider);
 
@@ -487,6 +489,31 @@ mod macos {
                 "the machine profile already answers this: {stdout}"
             );
         }
+
+        // doctor reports trouble as a healthy exit carrying a blocked check, so
+        // exiting zero proves nothing about what it decided. Its verdict is the
+        // assertion: a configured machine is configured, wherever it is asked.
+        let verdict = |directory: &Path| -> serde_json::Value {
+            let output = Command::new(assert_cmd::cargo::cargo_bin("mko"))
+                .args(["doctor", "--format", "json-v2"])
+                .env_remove("MKO_PERSONAL_PROVIDER_ROOT")
+                .env("HOME", &home)
+                .current_dir(directory)
+                .output()
+                .unwrap();
+            serde_json::from_slice(&output.stdout).unwrap()
+        };
+
+        let inside = verdict(&repository);
+        let outside = verdict(root.path());
+        assert_eq!(
+            inside["data"]["healthy"], outside["data"]["healthy"],
+            "the same machine cannot be healthy from one directory and broken from another:\n{inside}\n{outside}"
+        );
+        assert_eq!(
+            inside["data"]["healthy"], true,
+            "a configured machine must diagnose as configured: {inside}"
+        );
     }
 
     fn write_machine_profile(home: &Path, repository: &Path, provider: &Path) {

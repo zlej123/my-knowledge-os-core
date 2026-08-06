@@ -404,3 +404,26 @@ actually in use.
 **Rule this leaves.** A test that exports the provider root is testing the
 environment override, not the configured machine. Coverage for anything needing
 material must include the profile-only path.
+
+## doctor kept its own copy of the resolution — fixed 2026-08-06
+
+The fix above was verified by installing 0.3.11 and running it inside the
+knowledge base with the variable removed. `mko queue --pending-drafts` worked.
+`mko doctor` still said `설정이 필요합니다`.
+
+The CLI regression test had passed anyway, because doctor reports trouble as a
+*successful* run carrying a blocked check: asserting on the exit code proved
+nothing about what it decided.
+
+Doctor does not resolve a context — it inspects one, and for a directly
+selected repository it read the provider root from the environment itself,
+duplicating the branch that had just been fixed one layer down. So the same
+machine diagnosed as configured from outside and unconfigured from inside.
+
+Doctor now asks the same question resolution asks: environment first, then the
+profile naming this repository. The test asserts the verdict rather than the
+exit status, and that the verdict does not depend on which directory it was
+asked from.
+
+**Rule this leaves.** For a command that reports problems without failing,
+assert on the report. An exit-code assertion is a test of the exit code.
