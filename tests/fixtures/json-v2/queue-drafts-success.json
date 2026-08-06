@@ -1,0 +1,22 @@
+{
+  "schema_version": 2,
+  "command": "queue.drafts",
+  "result": "ok",
+  "data": {
+    "items": [
+      {
+        "asset_id": "personal-asset-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "title": "Signals and Systems",
+        "reason": "not_attempted",
+        "next_action": "prepare"
+      },
+      {
+        "asset_id": "personal-asset-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "title": "Radar Baseband User Guide",
+        "reason": "text_unreadable",
+        "next_action": "add"
+      }
+    ],
+    "scan_complete": true
+  }
+}

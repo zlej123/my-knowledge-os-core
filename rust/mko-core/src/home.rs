@@ -53,6 +53,9 @@ pub struct V3HomeReport {
     pub changes_requested: u64,
     pub approved_knowledge: u64,
     pub blocked: u64,
+    /// False when provider discovery was incomplete, so a caller can say "this
+    /// is what I could see" rather than "this is everything".
+    pub scan_complete: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -183,6 +186,7 @@ pub fn inspect_home(
                 changes_requested: queue.changes_requested,
                 approved_knowledge: queue.approved_knowledge,
                 blocked: inbox.blocked_count.saturating_add(queue.blocked),
+                scan_complete: inbox.scan_complete,
             }))
         }
     }

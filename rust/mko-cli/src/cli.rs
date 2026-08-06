@@ -44,7 +44,8 @@ use mko_core::{
         AddOutcomeV2, AddSingleDataV2, DashboardCanonicalStateDataV2, DashboardDataV2,
         DashboardFileDataV2, DashboardFileKindDataV2, DashboardFileStateDataV2,
         DashboardProjectionStateDataV2, DoctorCheckDataV2, DoctorCheckStatusV2, DoctorDataV2,
-        HandshakeDataV2, JsonV2Command, JsonV2Success, NextActionV2, SetupApplyDataV2,
+        HandshakeDataV2, JsonV2Command, JsonV2Success, NextActionV2, PendingDraftReasonV2,
+        PendingDraftV2, QueueDraftsDataV2, SetupApplyDataV2,
     },
     knowledge::{
         ConceptKind, ConceptMatch, KnowledgeSearchQuery, WriteKnowledgeRequest, approve_knowledge,
@@ -574,6 +575,10 @@ struct StatusArgs {
 struct QueueArgs {
     #[arg(long)]
     repo: Option<PathBuf>,
+    /// List material that is registered and still has no record, instead of
+    /// records waiting to be reviewed.
+    #[arg(long)]
+    pending_drafts: bool,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
 }
@@ -2243,14 +2248,84 @@ fn review(arguments: ReviewArgs) -> Result<(), MkoError> {
 
 fn queue_v2(arguments: QueueArgs) -> Result<(), MkoError> {
     let repository = setup_repository(arguments.repo)?;
-    match arguments.format {
-        OutputFormat::Human => crate::cli_v2::queue(&repository),
-        OutputFormat::JsonV2 => crate::cli_v2::queue_json_v2(&repository),
-        OutputFormat::JsonV1 => Err(MkoError::new(
+    if arguments.format == OutputFormat::JsonV1 {
+        return Err(MkoError::new(
             "format_unsupported",
             "mko queue supports human or json-v2 output",
-        )),
+        ));
     }
+    if arguments.pending_drafts {
+        let context = resolve_context(Some(repository))?;
+        let drafts = pending_drafts(&context)?;
+        return match arguments.format {
+            OutputFormat::JsonV2 => emit_json_v2(JsonV2Success::queue_drafts(drafts)),
+            _ => {
+                if drafts.items.is_empty() {
+                    println!("정리할 자료가 없습니다.");
+                } else {
+                    for item in &drafts.items {
+                        println!("{} — {}", item.title, pending_draft_label(&item.reason));
+                        println!("   {}", item.asset_id);
+                    }
+                }
+                if !drafts.scan_complete {
+                    println!("주의: 자료 검색이 완전하지 않습니다.");
+                }
+                Ok(())
+            }
+        };
+    }
+    match arguments.format {
+        OutputFormat::Human => crate::cli_v2::queue(&repository),
+        _ => crate::cli_v2::queue_json_v2(&repository),
+    }
+}
+
+fn pending_draft_label(reason: &PendingDraftReasonV2) -> &'static str {
+    match reason {
+        PendingDraftReasonV2::NotAttempted => "아직 정리하지 않았습니다",
+        PendingDraftReasonV2::TextUnreadable => "이 PDF의 텍스트를 읽을 수 없습니다",
+        PendingDraftReasonV2::DownloadRequired => "원본을 내려받아야 합니다",
+        PendingDraftReasonV2::Retryable => "정리하다 멈췄습니다",
+    }
+}
+
+/// The same derivation home shows as counts, in the shape an agent can act on.
+fn pending_drafts(context: &ResolvedPersonalContext) -> Result<QueueDraftsDataV2, MkoError> {
+    let report = inspect_home(
+        &context.repository_root,
+        &context.provider_root,
+        &MonotonicElapsedClock::start(),
+    )?;
+    let HomeReport::V3(report) = report else {
+        return Err(MkoError::new(
+            "kb_schema_unsupported",
+            "mko queue --pending-drafts requires a v0.3 Personal KB",
+        ));
+    };
+    Ok(QueueDraftsDataV2 {
+        items: report
+            .stuck
+            .into_iter()
+            .map(|material| PendingDraftV2 {
+                asset_id: material.asset_id,
+                title: material.title,
+                next_action: match material.reason {
+                    StuckReasonV2::NotAttempted => NextActionV2::Prepare,
+                    StuckReasonV2::TextUnreadable => NextActionV2::Add,
+                    StuckReasonV2::DownloadRequired => NextActionV2::Hydrate,
+                    StuckReasonV2::Retryable => NextActionV2::Retry,
+                },
+                reason: match material.reason {
+                    StuckReasonV2::NotAttempted => PendingDraftReasonV2::NotAttempted,
+                    StuckReasonV2::TextUnreadable => PendingDraftReasonV2::TextUnreadable,
+                    StuckReasonV2::DownloadRequired => PendingDraftReasonV2::DownloadRequired,
+                    StuckReasonV2::Retryable => PendingDraftReasonV2::Retryable,
+                },
+            })
+            .collect(),
+        scan_complete: report.scan_complete,
+    })
 }
 
 fn show_v2(arguments: ShowArgs) -> Result<(), MkoError> {
@@ -3340,6 +3415,11 @@ fn json_v2_command(cli: &Cli) -> Option<JsonV2Command> {
             ..
         }) => Some(JsonV2Command::Add),
         Command::Queue(QueueArgs {
+            pending_drafts: true,
+            format: OutputFormat::JsonV2,
+            ..
+        }) => Some(JsonV2Command::QueueDrafts),
+        Command::Queue(QueueArgs {
             format: OutputFormat::JsonV2,
             ..
         }) => Some(JsonV2Command::Queue),
@@ -3508,7 +3588,13 @@ fn json_v2_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option
         ("setup", Some("plan")) => Some(JsonV2Command::SetupPlan),
         ("setup", Some("apply")) => Some(JsonV2Command::SetupApply),
         ("add", _) => Some(JsonV2Command::Add),
-        ("queue", _) => Some(JsonV2Command::Queue),
+        ("queue", _) => Some(
+            if args.iter().any(|argument| argument == "--pending-drafts") {
+                JsonV2Command::QueueDrafts
+            } else {
+                JsonV2Command::Queue
+            },
+        ),
         ("show", _) => Some(JsonV2Command::Show),
         ("review-open", _) => Some(JsonV2Command::ReviewOpen),
         ("review-feedback", _) => Some(JsonV2Command::ReviewFeedback),
