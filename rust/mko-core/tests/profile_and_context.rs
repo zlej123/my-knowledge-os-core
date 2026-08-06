@@ -348,6 +348,87 @@ fn ancestor_knowledge_base_wins_over_the_default_profile() {
 }
 
 #[test]
+fn working_inside_a_profiled_repository_finds_its_material_without_the_environment() {
+    let fixture = Fixture::new();
+    let repository = fixture.repository("profiled repository");
+    let provider = fixture.provider("profiled provider");
+    fixture
+        .store()
+        .write(&fixture.profile(&repository, &provider))
+        .unwrap();
+    let current_dir = repository.join("nested/working");
+    fs::create_dir_all(&current_dir).unwrap();
+    let mut platform = fixture.platform.clone();
+    platform.current_dir = current_dir;
+
+    let from_inside = resolve_personal_context(ResolveContextRequest::new(), &platform).unwrap();
+    let from_flag = resolve_personal_context(
+        ResolveContextRequest::new().with_explicit_repository(&repository),
+        &platform,
+    )
+    .unwrap();
+
+    for (result, source) in [
+        (from_inside, ContextSource::Ancestor),
+        (from_flag, ContextSource::Explicit),
+    ] {
+        assert_eq!(result.source, source);
+        assert_eq!(result.profile_name, "personal");
+        assert_eq!(result.repository_root, repository.canonicalize().unwrap());
+        assert_eq!(result.provider_root, provider.canonicalize().unwrap());
+    }
+}
+
+#[test]
+fn the_environment_still_overrides_a_profile_naming_the_same_repository() {
+    let fixture = Fixture::new();
+    let repository = fixture.repository("profiled repository");
+    let profile_provider = fixture.provider("profile provider");
+    let requested_provider = fixture.provider("requested provider");
+    fixture
+        .store()
+        .write(&fixture.profile(&repository, &profile_provider))
+        .unwrap();
+    let current_dir = repository.join("nested/working");
+    fs::create_dir_all(&current_dir).unwrap();
+    let mut platform = fixture.platform.clone();
+    platform.current_dir = current_dir;
+    platform.environment.insert(
+        OsString::from("MKO_PERSONAL_PROVIDER_ROOT"),
+        requested_provider.as_os_str().to_owned(),
+    );
+
+    let result = resolve_personal_context(ResolveContextRequest::new(), &platform).unwrap();
+
+    assert_eq!(result.source, ContextSource::Ancestor);
+    assert_eq!(result.profile_name, "unprofiled");
+    assert_eq!(
+        result.provider_root,
+        requested_provider.canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn a_repository_no_profile_names_still_asks_for_its_material() {
+    let fixture = Fixture::new();
+    let unprofiled_repository = fixture.repository("unprofiled repository");
+    let profiled_repository = fixture.repository("profiled repository");
+    let provider = fixture.provider("profiled provider");
+    fixture
+        .store()
+        .write(&fixture.profile(&profiled_repository, &provider))
+        .unwrap();
+    let current_dir = unprofiled_repository.join("nested/working");
+    fs::create_dir_all(&current_dir).unwrap();
+    let mut platform = fixture.platform.clone();
+    platform.current_dir = current_dir;
+
+    let error = resolve_personal_context(ResolveContextRequest::new(), &platform).unwrap_err();
+
+    assert_eq!(error.code(), "provider_root_missing");
+}
+
+#[test]
 fn ancestor_context_ignores_an_unrelated_malformed_profile() {
     let fixture = Fixture::new();
     let repository = fixture.repository("ancestor repository");

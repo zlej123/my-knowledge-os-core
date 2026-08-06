@@ -2247,7 +2247,7 @@ fn review(arguments: ReviewArgs) -> Result<(), MkoError> {
 }
 
 fn queue_v2(arguments: QueueArgs) -> Result<(), MkoError> {
-    let repository = setup_repository(arguments.repo)?;
+    let repository = setup_repository(arguments.repo.clone())?;
     if arguments.format == OutputFormat::JsonV1 {
         return Err(MkoError::new(
             "format_unsupported",
@@ -2255,7 +2255,10 @@ fn queue_v2(arguments: QueueArgs) -> Result<(), MkoError> {
         ));
     }
     if arguments.pending_drafts {
-        let context = resolve_context(Some(repository))?;
+        // Resolve from what the caller actually gave us: handing back a
+        // discovered repository as an explicit one would drop the machine
+        // profile that knows where the material lives.
+        let context = resolve_context(arguments.repo)?;
         let drafts = pending_drafts(&context)?;
         return match arguments.format {
             OutputFormat::JsonV2 => emit_json_v2(JsonV2Success::queue_drafts(drafts)),

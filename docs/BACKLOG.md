@@ -364,3 +364,43 @@ triage at intake so that depth is spent on fewer items, not a bulk switch.
 Thesis records that shape in their `docs/REVIEW_SCALING.md`, together with a
 rule worth borrowing: friction is recorded when it happens and earns
 implementation only on the third occurrence, blockers excepted.
+
+## Configured machines asked to be configured — fixed 2026-08-06
+
+**How it surfaced.** `mko queue --pending-drafts` shipped in 0.3.10, was
+installed, and then failed on the owner's own machine with
+`provider_root_missing: set MKO_PERSONAL_PROVIDER_ROOT or select a machine
+profile for this repository` — while `~/Library/Application Support/mko/profiles.yaml`
+held exactly that profile, naming that repository and its Inbox.
+
+**Two causes, one symptom.**
+
+1. Context resolution consulted the machine profile only when the caller was
+   *outside* a knowledge base. Selecting a repository directly — by `--repo`, or
+   by working inside it — took a branch that read the provider root from the
+   environment and nowhere else. `mko setup` exists so nobody exports that
+   variable, so the branch could only fail.
+2. `queue_v2` resolved the repository first and handed it back as an *explicit*
+   repository, which forced that same branch even from outside. The new command
+   therefore failed everywhere, not just inside the repository.
+
+**Why it went unnoticed.** Every CLI test that needed material set
+`MKO_PERSONAL_PROVIDER_ROOT`, including the one written for the new command.
+The suite described a machine nobody has.
+
+**What it cost elsewhere.** `mko doctor` — the command whose entire job is to
+say whether the setup is sound — reported `설정이 필요합니다` inside the
+knowledge base and `설정과 연결 상태가 정상입니다` from one directory up, same
+machine, same second. It was diagnosing its own resolution, not the setup.
+
+**Fix.** The environment still wins when set, and a variable that is set but
+unusable is still an error. When it is unset, a profile naming this very
+repository supplies the provider root, and the context reports that profile's
+name. The default profile is preferred so a single-profile machine behaves
+identically however the repository was selected; a profile whose directory has
+since disappeared is skipped rather than failing resolution for the repository
+actually in use.
+
+**Rule this leaves.** A test that exports the provider root is testing the
+environment override, not the configured machine. Coverage for anything needing
+material must include the profile-only path.
