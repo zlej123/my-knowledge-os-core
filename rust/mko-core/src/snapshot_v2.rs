@@ -44,6 +44,19 @@ pub struct RegisterSnapshotRequestV2<'a> {
     pub fetched_at: DateTime<Utc>,
 }
 
+/// Reads the moment a page was fetched, defaulting to now.
+///
+/// Parsing lives here rather than in the caller so that what a snapshot's
+/// timestamp may be is decided in one place, beside the rest of its contract.
+pub fn parse_fetched_at_v2(value: Option<&str>) -> Result<DateTime<Utc>, MkoError> {
+    match value {
+        Some(value) => DateTime::parse_from_rfc3339(value)
+            .map(|parsed| parsed.with_timezone(&Utc))
+            .map_err(|error| MkoError::new("snapshot_timestamp_invalid", error.to_string())),
+        None => Ok(Utc::now()),
+    }
+}
+
 pub fn register_web_snapshot_v2(
     request: RegisterSnapshotRequestV2<'_>,
 ) -> Result<AssetRegistrationResultV2, MkoError> {

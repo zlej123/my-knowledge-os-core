@@ -5,7 +5,7 @@
   "data": {
     "healthy": true,
     "checks": [
-      {"code":"product_version","status":"healthy","message":"0.3.12","path":null,"recovery":null},
+      {"code":"product_version","status":"healthy","message":"0.3.13","path":null,"recovery":null},
       {"code":"contract_version","status":"healthy","message":"0.1.0","path":null,"recovery":null},
       {"code":"profile_valid","status":"healthy","message":"machine profile schema is valid","path":"<PROFILE>","recovery":null},
       {"code":"repository_access","status":"healthy","message":"repository is compatible","path":"<REPOSITORY>","recovery":null},

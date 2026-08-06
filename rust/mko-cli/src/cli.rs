@@ -76,6 +76,7 @@ use mko_core::{
     },
     setup_plan_v2::{apply_setup_plan_v2_tty, create_setup_plan_v2},
     setup_v2::{SetupPersonalV2Request, setup_personal_v2},
+    snapshot_v2::{RegisterSnapshotRequestV2, parse_fetched_at_v2, register_web_snapshot_v2},
     source::{
         RepairSourceStateRequest, WriteSourceRequest, repair_source_state, write_source_draft,
     },
@@ -479,10 +480,26 @@ struct SetupApplyArgs {
 }
 #[derive(Args)]
 struct AddArgs {
-    #[arg(required_unless_present = "inbox", conflicts_with = "inbox")]
+    #[arg(
+        required_unless_present_any = ["inbox", "snapshot"],
+        conflicts_with_all = ["inbox", "snapshot"],
+    )]
     file: Option<PathBuf>,
     #[arg(long)]
     inbox: bool,
+    /// Path to a file holding text an agent read from the web. The text arrives
+    /// in a file, not an argument: a page body on a command line reaches
+    /// process listings and shell history.
+    #[arg(long, conflicts_with = "inbox")]
+    snapshot: Option<PathBuf>,
+    /// The address the text was read from.
+    #[arg(long, requires = "snapshot")]
+    url: Option<String>,
+    #[arg(long, requires = "snapshot")]
+    title: Option<String>,
+    /// RFC 3339. Defaults to now.
+    #[arg(long, requires = "snapshot")]
+    fetched_at: Option<String>,
     #[arg(long)]
     verified_backup: bool,
     #[arg(long)]
@@ -900,6 +917,10 @@ fn home() -> Result<(), MkoError> {
         (HomeReport::V3(_), "1") => add(AddArgs {
             file: None,
             inbox: true,
+            snapshot: None,
+            url: None,
+            title: None,
+            fetched_at: None,
             verified_backup: false,
             temporary_source: false,
             confirm_download: false,
@@ -1049,6 +1070,10 @@ fn legacy_home_action(
         return add(AddArgs {
             file: None,
             inbox: true,
+            snapshot: None,
+            url: None,
+            title: None,
+            fetched_at: None,
             verified_backup: false,
             temporary_source: false,
             confirm_download: false,
@@ -1837,6 +1862,9 @@ fn add_v2(arguments: AddArgs, context: &ResolvedPersonalContext) -> Result<(), M
             )),
         };
     }
+    if let Some(snapshot) = arguments.snapshot.as_deref() {
+        return add_snapshot_v2(&arguments, snapshot, context);
+    }
     if arguments.temporary_source || arguments.verified_backup {
         return Err(MkoError::new(
             "option_unsupported",
@@ -1877,6 +1905,57 @@ fn add_v2(arguments: AddArgs, context: &ResolvedPersonalContext) -> Result<(), M
                 },
                 registry_path: result.registry_path.display().to_string(),
                 logical_locator,
+            })))
+        }
+        OutputFormat::JsonV1 => Err(MkoError::new(
+            "format_unsupported",
+            "a v0.3 KB requires json-v2 output",
+        )),
+    }
+}
+
+/// Registers text an agent read from the web. The Core does not fetch — the
+/// agent performed the request and this records what it read.
+fn add_snapshot_v2(
+    arguments: &AddArgs,
+    snapshot: &Path,
+    context: &ResolvedPersonalContext,
+) -> Result<(), MkoError> {
+    let (Some(url), Some(title)) = (arguments.url.as_deref(), arguments.title.as_deref()) else {
+        return Err(MkoError::new(
+            "snapshot_arguments_incomplete",
+            "--snapshot needs --url and --title so the evidence can be traced and named",
+        ));
+    };
+    let text = std::fs::read_to_string(snapshot)
+        .map_err(|error| MkoError::new("snapshot_unreadable", error.to_string()))?;
+    let fetched_at = parse_fetched_at_v2(arguments.fetched_at.as_deref())?;
+    let result = register_web_snapshot_v2(RegisterSnapshotRequestV2 {
+        repository_root: &context.repository_root,
+        url,
+        title,
+        text: &text,
+        fetched_at,
+    })?;
+    match arguments.format {
+        OutputFormat::Human => {
+            let outcome = match result.outcome {
+                AssetRegistrationOutcomeV2::Created => "등록 완료",
+                AssetRegistrationOutcomeV2::Existing => "이미 등록됨",
+            };
+            println!("{outcome}: {}", result.asset.title_fallback);
+            println!("다음: 이 페이지를 정리해 달라고 요청하세요.");
+            Ok(())
+        }
+        OutputFormat::JsonV2 => {
+            crate::output::emit_json_v2(JsonV2Success::add(AddDataV2::Single(AddSingleDataV2 {
+                asset_id: result.asset.id,
+                outcome: match result.outcome {
+                    AssetRegistrationOutcomeV2::Created => AddOutcomeV2::Created,
+                    AssetRegistrationOutcomeV2::Existing => AddOutcomeV2::Existing,
+                },
+                registry_path: result.registry_path.display().to_string(),
+                logical_locator: result.asset.provider.logical_locator,
             })))
         }
         OutputFormat::JsonV1 => Err(MkoError::new(

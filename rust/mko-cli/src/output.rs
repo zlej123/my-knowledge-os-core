@@ -83,7 +83,17 @@ pub(crate) fn json_v2_next_action(code: &str) -> NextActionV2 {
         | "provider_not_hydrated"
         | "asset_not_hydrated"
         | "hydration_confirmation_required" => NextActionV2::Hydrate,
-        "asset_outside_inbox" | "asset_path_required" | "pdf_text_unreadable" => NextActionV2::Add,
+        // A page that produced no text, or more text than may be stored, is not
+        // retried by fetching it again the same way: the answer is to bring
+        // different material.
+        "asset_outside_inbox"
+        | "asset_path_required"
+        | "pdf_text_unreadable"
+        | "snapshot_text_empty"
+        | "snapshot_too_large"
+        | "snapshot_unreadable"
+        | "snapshot_arguments_incomplete"
+        | "snapshot_timestamp_invalid" => NextActionV2::Add,
         "projection_not_found"
         | "projection_snapshot_changed"
         | "projection_stale"
