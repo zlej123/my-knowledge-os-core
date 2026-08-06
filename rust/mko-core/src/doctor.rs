@@ -10,7 +10,7 @@ use crate::{
     config_v2::KnowledgeConfigV2,
     context::{
         ContextSource, PlatformEnvironment, ResolveContextRequest, SelectedPersonalContext,
-        SystemPlatformEnvironment, select_personal_context,
+        SystemPlatformEnvironment, profile_for_repository, select_personal_context,
     },
     error::MkoError,
     hooks::{HookState, inspect_hook},
@@ -203,6 +203,16 @@ pub fn diagnose(request: DoctorRequest, environment: &dyn DoctorEnvironment) -> 
                     .platform()
                     .environment_value(OsStr::new(&inspected.provider_root_env))
                     .map(PathBuf::from);
+                if provider.is_none() {
+                    // Resolution answers this from the machine profile when the
+                    // environment is silent. Asking a different question here
+                    // made doctor report a healthy machine as unconfigured
+                    // whenever it was run from inside the knowledge base.
+                    provider = profile_for_repository(&repository_root, environment.platform())
+                        .ok()
+                        .flatten()
+                        .map(|(_, provider_root)| provider_root);
+                }
                 if provider.is_none() {
                     checks.push(blocked(
                         DiagnosticArea::Provider,
