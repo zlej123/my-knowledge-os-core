@@ -2,7 +2,7 @@ use chrono::{TimeZone, Utc};
 use mko_core::{
     model_v2::{ContentBlockV2, PreparedMetadataV2},
     prepared_v2::build_pdf_prepared_content_v2,
-    records_v2::{AssetProviderBindingV2, AssetRecordTypeV2, AssetRecordV2},
+    records_v2::{AssetOriginV2, AssetProviderBindingV2, AssetRecordTypeV2, AssetRecordV2},
     revision_v2::canonical_json_bytes,
 };
 
@@ -11,6 +11,7 @@ fn asset() -> AssetRecordV2 {
         schema_version: 2,
         id: format!("personal-asset-{}", "b".repeat(64)),
         record_type: AssetRecordTypeV2::Asset,
+        origin: AssetOriginV2::ProviderPdf,
         fingerprint: format!("sha256:{}", "b".repeat(64)),
         title_fallback: "paper.pdf".into(),
         media_type: "application/pdf".into(),
