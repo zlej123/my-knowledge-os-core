@@ -52,6 +52,24 @@ pub enum AssetRecordTypeV2 {
     Asset,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetOriginV2 {
+    /// A PDF the owner already holds, fingerprinted from the provider file.
+    #[default]
+    ProviderPdf,
+    /// Text an agent read from the web, fingerprinted from the text itself.
+    /// There is no provider file to return to, so the stored text is the
+    /// evidence.
+    WebSnapshot,
+}
+
+impl AssetOriginV2 {
+    pub(crate) fn is_provider_pdf(&self) -> bool {
+        matches!(self, Self::ProviderPdf)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssetProviderBindingV2 {
@@ -77,6 +95,15 @@ pub struct AssetRecordV2 {
     pub schema_version: u32,
     pub id: String,
     pub record_type: AssetRecordTypeV2,
+    /// Where the bytes behind this Asset came from, which decides the identity
+    /// contract it is held to.
+    ///
+    /// Omitted from the wire when it is a provider PDF. A registry record is
+    /// accepted only if it re-serializes to the exact bytes on disk, so a field
+    /// that always serialized would invalidate every Asset registered before
+    /// this existed — they would parse and then be rejected as not canonical.
+    #[serde(default, skip_serializing_if = "AssetOriginV2::is_provider_pdf")]
+    pub origin: AssetOriginV2,
     pub fingerprint: String,
     pub title_fallback: String,
     pub media_type: String,

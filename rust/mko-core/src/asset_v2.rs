@@ -26,11 +26,14 @@ use crate::{
         DEFAULT_SCAN_LIMITS, ElapsedClock, ProviderCatalogEntry, ProviderCatalogScan,
         ProviderScanRequest, ProviderScanWarning, scan_provider_catalog,
     },
-    records_v2::{AssetProviderBindingV2, AssetRecordTypeV2, AssetRecordV2},
+    records_v2::{AssetOriginV2, AssetProviderBindingV2, AssetRecordTypeV2, AssetRecordV2},
     revision_v2::canonical_json_bytes,
 };
 
 const MAX_ASSET_RECORD_BYTES: u64 = 32 * 1024;
+/// Long enough for a real address, short enough that it cannot be used to
+/// smuggle a payload into the registry or the vault.
+const MAX_SNAPSHOT_LOCATOR_BYTES: usize = 2048;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HydrationConfirmationV2 {
@@ -306,6 +309,7 @@ pub fn register_pdf_asset_v2(
         schema_version: 2,
         id: id.clone(),
         record_type: AssetRecordTypeV2::Asset,
+        origin: AssetOriginV2::ProviderPdf,
         fingerprint: before.fingerprint.value.clone(),
         title_fallback: title_fallback(request.logical_locator)?,
         media_type: "application/pdf".into(),
@@ -332,10 +336,23 @@ pub fn register_pdf_asset_v2(
         StaleRepositoryLockPolicy::Preserve,
     )?;
     revalidate_provider_snapshot(&provider_root, request.logical_locator, &before)?;
+    write_asset_registry_record_v2(&repository_root, record, &bytes)
+}
+
+/// Writes one immutable Asset registry record. The caller holds the repository
+/// mutation lock and has already validated and serialized the record; both
+/// registration paths share this so a second writer cannot drift from the
+/// first.
+pub(crate) fn write_asset_registry_record_v2(
+    repository_root: &Path,
+    record: AssetRecordV2,
+    bytes: &[u8],
+) -> Result<AssetRegistrationResultV2, MkoError> {
+    let id = record.id.clone();
     let registry_directory = repository_root.join("assets/registry");
     require_real_directory(&registry_directory, "asset_registry_invalid")?;
     let registry_path = registry_directory.join(format!("{id}.json"));
-    let outcome = write_new(&registry_path, &bytes, |path| {
+    let outcome = write_new(&registry_path, bytes, |path| {
         let existing = read_bounded_nofollow(path, MAX_ASSET_RECORD_BYTES, "asset_registry")?;
         let existing_record: AssetRecordV2 = serde_json::from_slice(&existing).map_err(|_| {
             MkoError::new(
@@ -374,6 +391,34 @@ pub fn register_pdf_asset_v2(
     })
 }
 
+/// Every Asset the registry holds, whatever it was made from.
+///
+/// The Inbox scan can only see material that is still a file in the provider,
+/// so it cannot answer this for a web snapshot — which has no provider file at
+/// all, and would otherwise be registered, waiting, and invisible.
+pub fn registered_asset_ids_v2(repository_root: &Path) -> Result<Vec<String>, MkoError> {
+    let directory = repository_root.join("assets/registry");
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(MkoError::new("asset_registry_invalid", error.to_string())),
+    };
+    let mut ids = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_suffix(".json"))
+                .filter(|id| validate_asset_id(id).is_ok())
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
 pub fn read_asset_v2(repository_root: &Path, asset_id: &str) -> Result<AssetRecordV2, MkoError> {
     KnowledgeConfigV2::read(repository_root)?;
     validate_asset_id(asset_id)?;
@@ -405,22 +450,46 @@ pub(crate) fn validate_asset_record_v2(asset: &AssetRecordV2) -> Result<(), MkoE
         .fingerprint
         .strip_prefix("sha256:")
         .map(|hash| format!("personal-asset-{hash}"));
-    if asset.schema_version != 2
-        || asset.record_type != AssetRecordTypeV2::Asset
-        || expected.as_deref() != Some(asset.id.as_str())
-        || asset.title_fallback.is_empty()
-        || asset.title_fallback.len() > 4096
-        || asset.media_type != "application/pdf"
-        || asset.provider.provider_type != "google-drive-filesystem"
-        || asset.provider.size_bytes > MAX_ASSET_BYTES
-        || validate_portable_relative_path(&asset.provider.logical_locator).is_err()
-    {
+    let identity_ok = asset.schema_version == 2
+        && asset.record_type == AssetRecordTypeV2::Asset
+        && expected.as_deref() == Some(asset.id.as_str())
+        && !asset.title_fallback.is_empty()
+        && asset.title_fallback.len() <= 4096
+        && asset.provider.size_bytes <= MAX_ASSET_BYTES;
+    // Each origin answers "what is this Asset" differently, and neither answer
+    // may be loosened to accommodate the other.
+    let origin_ok = match asset.origin {
+        AssetOriginV2::ProviderPdf => {
+            asset.media_type == "application/pdf"
+                && asset.provider.provider_type == "google-drive-filesystem"
+                && validate_portable_relative_path(&asset.provider.logical_locator).is_ok()
+        }
+        AssetOriginV2::WebSnapshot => {
+            asset.media_type == "text/plain"
+                && asset.provider.provider_type == "web-snapshot"
+                && validate_snapshot_locator(&asset.provider.logical_locator)
+        }
+    };
+    if !(identity_ok && origin_ok) {
         return Err(MkoError::new(
             "asset_record_invalid",
-            "Asset registry record violates the schema-v2 PDF identity contract",
+            "Asset registry record violates its schema-v2 identity contract",
         ));
     }
     Ok(())
+}
+
+/// A snapshot's locator is the address it was read from, not a path inside a
+/// provider. It reaches owner-facing output and the vault, so it is bounded,
+/// plainly http(s), and carries no credentials or control characters.
+fn validate_snapshot_locator(locator: &str) -> bool {
+    !locator.is_empty()
+        && locator.len() <= MAX_SNAPSHOT_LOCATOR_BYTES
+        && (locator.starts_with("https://") || locator.starts_with("http://"))
+        && !locator.contains('@')
+        && !locator
+            .chars()
+            .any(|character| character.is_control() || character == ' ')
 }
 
 pub(crate) fn require_hydration_confirmation(

@@ -53,6 +53,7 @@ pub mod secret;
 pub mod setup;
 pub mod setup_plan_v2;
 pub mod setup_v2;
+pub mod snapshot_v2;
 pub mod source;
 pub mod state;
 pub mod status;

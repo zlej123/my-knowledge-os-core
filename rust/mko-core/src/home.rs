@@ -1,8 +1,7 @@
 use std::path::Path;
 
 use crate::{
-    asset_v2::inspect_inbox_pdf_assets_v2,
-    asset_v2::read_asset_v2,
+    asset_v2::{inspect_inbox_pdf_assets_v2, read_asset_v2, registered_asset_ids_v2},
     attempt_v2::{StuckReasonV2, latest_preparation_attempt_v2},
     config::KnowledgeConfig,
     config_v2::KnowledgeConfigV2,
@@ -148,8 +147,13 @@ pub fn inspect_home(
         RepositoryGeneration::V3 => {
             let inbox = inspect_inbox_pdf_assets_v2(repository_root, provider_root, elapsed_clock)?;
             let queue = summarize_home_queue_v2(repository_root)?;
-            let unfinished = inbox
-                .registered_asset_ids
+            // The Inbox scan sees provider files; the registry sees everything
+            // ever registered, including snapshots that never had a file.
+            let mut candidates = registered_asset_ids_v2(repository_root)?;
+            candidates.extend(inbox.registered_asset_ids.iter().cloned());
+            candidates.sort();
+            candidates.dedup();
+            let unfinished = candidates
                 .iter()
                 .filter(|id| !queue.recorded_asset_ids.contains(*id))
                 .collect::<Vec<_>>();
