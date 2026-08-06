@@ -10,6 +10,7 @@ const OWNED_DIRECTORIES: &[&str] = &[
     "assets",
     "assets/registry",
     "assets/attempts",
+    "assets/snapshots",
     "sources",
     "knowledge",
     "notes",

@@ -336,10 +336,23 @@ pub fn register_pdf_asset_v2(
         StaleRepositoryLockPolicy::Preserve,
     )?;
     revalidate_provider_snapshot(&provider_root, request.logical_locator, &before)?;
+    write_asset_registry_record_v2(&repository_root, record, &bytes)
+}
+
+/// Writes one immutable Asset registry record. The caller holds the repository
+/// mutation lock and has already validated and serialized the record; both
+/// registration paths share this so a second writer cannot drift from the
+/// first.
+pub(crate) fn write_asset_registry_record_v2(
+    repository_root: &Path,
+    record: AssetRecordV2,
+    bytes: &[u8],
+) -> Result<AssetRegistrationResultV2, MkoError> {
+    let id = record.id.clone();
     let registry_directory = repository_root.join("assets/registry");
     require_real_directory(&registry_directory, "asset_registry_invalid")?;
     let registry_path = registry_directory.join(format!("{id}.json"));
-    let outcome = write_new(&registry_path, &bytes, |path| {
+    let outcome = write_new(&registry_path, bytes, |path| {
         let existing = read_bounded_nofollow(path, MAX_ASSET_RECORD_BYTES, "asset_registry")?;
         let existing_record: AssetRecordV2 = serde_json::from_slice(&existing).map_err(|_| {
             MkoError::new(
