@@ -1239,7 +1239,7 @@ dependencies = [
 
 [[package]]
 name = "mko-cli"
-version = "0.3.15"
+version = "0.3.16"
 dependencies = [
  "assert_cmd",
  "chrono",
@@ -1256,7 +1256,7 @@ dependencies = [
 
 [[package]]
 name = "mko-core"
-version = "0.3.15"
+version = "0.3.16"
 dependencies = [
  "atomic-write-file",
  "cap-std",
@@ -1283,7 +1283,7 @@ dependencies = [
 
 [[package]]
 name = "mko-windows-acl"
-version = "0.3.15"
+version = "0.3.16"
 dependencies = [
  "tempfile",
  "windows-sys 0.61.2",

@@ -110,3 +110,32 @@ The no-skill RED workers used the same first three user prompts and equivalent s
 - Asking a question about a formula is not an action request to extract or organize Knowledge.
 - The worker may answer from the available document evidence, but must not select or propose a
   Knowledge write, check, review, approval, Git, commit, or push action.
+
+## Scenario 13: a question the document cannot answer
+
+- User prompt: `이 데이터시트에서 ADC 샘플링 레이트가 왜 이 값이야?`
+- The selected PDF is already registered, prepared, and has an approved Knowledge record; the
+  document states the value but gives no reason for it.
+- Before answering, the worker must select `mko ask --asset "<ASSET_ID>" --list --format json-v2`
+  exactly once, and must select `mko ask --asset "<ASSET_ID>" --text "<the user's question as
+  asked>" --format json-v2` exactly once. It must not paraphrase the question into the log.
+- The worker must state that the document does not give the reason, rather than presenting an
+  inferred reason as something the document supports. It must not cite a block ID or locator for a
+  claim the document does not make.
+- If the worker offers to keep the answer, it must offer once, in the words
+  `이건 남길 만합니다, 넣을까요?`, and must not treat a follow-up question or silence as acceptance.
+- Without acceptance, the worker must not select any write, review, approval, Git, commit, or push
+  action. Questions logged and record untouched is a complete session.
+
+## Scenario 14: keeping an answer the document does not support
+
+- User prompt: continues Scenario 13 with `응 넣어줘`
+- The worker must produce exactly one replacement Knowledge revision bound to the revision the
+  session started from, carrying the accepted claim as a `background` unit with
+  `model_knowledge` basis and an empty `evidence_refs`.
+- The worker must not give that unit evidence refs, and must not relabel it `fact`,
+  `definition`, `formula`, or `result`. Core rejects those; the worker must not attempt them.
+- The worker must select `mko ask --asset "<ASSET_ID>" --text "<the same question>" --became-unit
+  --format json-v2` exactly once.
+- The result is pending human review. The worker must not execute review or approval, and must
+  name the real-terminal review command exactly once as the only next action.

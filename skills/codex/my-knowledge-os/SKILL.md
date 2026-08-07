@@ -50,7 +50,7 @@ This Skill is written for exactly one Core version. Before the first `mko` comma
 (after installation checks), verify the contract:
 
 ```bash
-mko handshake --skill-version "0.3.15" --format json-v2
+mko handshake --skill-version "0.3.16" --format json-v2
 ```
 
 Pass the pinned version string above exactly; never substitute the CLI's own reported version.
@@ -294,6 +294,63 @@ mko knowledge write --asset-id "ASSET_ID" --bundle "BUNDLE_PATH" --response ".mk
 ```
 
 Report the grounded section and LLM-analysis section separately. State that the result is pending human review.
+
+## Studying by asking
+
+When the user asks a question about material that is already registered, the conversation is free
+and the record changes only when they say so. Asking five questions must not produce five review
+items.
+
+1. Before answering the first question of a session about this material, read what was asked
+   before, and say it back if anything comes:
+
+```bash
+mko ask --asset "ASSET_ID" --list --format json-v2
+```
+
+2. Record every question as it is asked:
+
+```bash
+mko ask --asset "ASSET_ID" --text "USER_QUESTION" --format json-v2
+```
+
+Record the user's question as they asked it. Do not paraphrase it into something tidier; what they
+were trying to understand is the thing being kept.
+
+3. Answer from the prepared document first, citing block IDs and locators as you would in a draft.
+   Where the document does not answer, **say that it does not** and then answer from what you know.
+   That answer is a `background` claim, never a `fact`. You may also search the web and snapshot a
+   page you cite, using the web page workflow above; a snapshotted page is real evidence, so a
+   claim resting on it is an ordinary grounded unit.
+
+4. Offer to keep a claim when **all three** hold:
+
+   - it is not in the document;
+   - it does not overlap the record's current units, which you read from the record display
+     command above rather than from memory of this conversation;
+   - it stands as one sentence.
+
+   Offer in these words, and only once for the same claim:
+
+   > 이건 남길 만합니다, 넣을까요?
+
+   Do not offer for a claim the user did not ask about, and do not treat silence or a follow-up
+   question as yes.
+
+5. Collect accepted claims and submit **exactly one** replacement revision at the end, bound to the
+   revision the session started from, using the regeneration flow below. A claim the document
+   supports is a `fact` with `evidence_refs`; a claim it does not is a `background` unit with
+   `model_knowledge` basis and no evidence. Never give a `background` unit evidence refs to make it
+   look stronger, and never label a grounded claim `background` to avoid citing it.
+
+6. For each question whose answer was kept, record that it was:
+
+```bash
+mko ask --asset "ASSET_ID" --text "USER_QUESTION" --became-unit --format json-v2
+```
+
+If the user asks a question and does not accept anything, that is a complete and successful
+session. The questions are kept; the record is untouched.
 
 ## Feedback and approval
 

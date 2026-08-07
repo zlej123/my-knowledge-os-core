@@ -427,3 +427,26 @@ asked from.
 
 **Rule this leaves.** For a command that reports problems without failing,
 assert on the report. An exit-code assertion is a test of the exit code.
+
+## Studying by asking — landed 2026-08-06
+
+The design and plan are in `docs/superpowers/specs/2026-08-06-mko-question-enrichment-design.md`
+and `docs/superpowers/plans/2026-08-06-question-enrichment.md`. Four components landed as four
+pull requests. What follows is what is *not* covered, so nobody reads the merge as more assurance
+than it is.
+
+**The offer rule is not machine-enforced.** Core cannot check that an agent offered once, in the
+right words, only for a claim the user asked about. Scenarios 13 and 14 in
+`tests/skill-forward/my-knowledge-os-scenarios.md` describe it, and those are run manually against
+`harness/` fixtures rather than by `cargo test`. What Core *does* enforce is the part that would
+corrupt the record: a `background` unit cannot carry evidence, and model knowledge cannot wear a
+grounded kind.
+
+**Core cannot verify a snapshot came from the URL claimed.** Recorded in the design as the cost of
+keeping the fetch outside the Core. During implementation this bit for real: a verification run put
+fabricated text into the owner's live knowledge base under a genuine `blog.rust-lang.org` address,
+and both files had to be removed by hand. Verify snapshot behaviour against a scratch knowledge
+base, or against a page actually fetched — never against invented text wearing a real address.
+
+**Not built, deliberately:** a web UI; unattended fetching or drafting; answer transcripts; batch
+approval (unchanged from the 2026-08-05 resolution).
