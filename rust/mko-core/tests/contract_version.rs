@@ -20,7 +20,7 @@ const SOURCE_FILE: &str = "2026-07-18-paper-efbd75ae8676.md";
 
 #[test]
 fn product_version_does_not_change_the_knowledge_contract() {
-    assert_eq!(mko_core::version::PRODUCT_VERSION, "0.3.16");
+    assert_eq!(mko_core::version::PRODUCT_VERSION, "0.3.17");
     assert_eq!(mko_core::version::KNOWLEDGE_CONTRACT_VERSION, "0.1.0");
     assert!(mko_core::version::supports_contract("0.1.0"));
     assert!(!mko_core::version::supports_contract("0.2.0"));

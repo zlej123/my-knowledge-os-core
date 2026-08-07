@@ -23,13 +23,15 @@ use mko_core::{
     },
     model_v2::{KnowledgeResponseV2, PreparedMetadataV2, SourceResponseV2},
     prepared_v2::{
-        PreparePdfAssetRequestV2, PreparedPersistenceOutcomeV2, cleanup_prepared_sessions_v2,
-        prepare_pdf_asset_v2, read_prepared_content_v2,
+        PreparePdfAssetRequestV2, PreparedPdfResultV2, PreparedPersistenceOutcomeV2,
+        cleanup_prepared_sessions_v2, prepare_pdf_asset_v2, prepare_snapshot_asset_v2,
+        read_prepared_content_v2,
     },
     queue_v2::{ReviewCardTargetStateV2, derive_queue_v2, show_review_card_v2},
     records_v2::{
-        RecordProjectionStatusV2, RecordWriteOutcomeV2, WriteKnowledgeRecordRequestV2,
-        WriteSourceRecordRequestV2, write_knowledge_record_v2, write_source_record_v2,
+        AssetOriginV2, RecordProjectionStatusV2, RecordWriteOutcomeV2,
+        WriteKnowledgeRecordRequestV2, WriteSourceRecordRequestV2, write_knowledge_record_v2,
+        write_source_record_v2,
     },
     review_session_v2::{
         ReviewSessionDecisionInputV2, apply_review_session_decision_v2, open_review_session_v2,
@@ -180,6 +182,19 @@ pub fn prepare_source_json_v2(
     confirm_download: bool,
     worker_executable: &Path,
 ) -> Result<(), MkoError> {
+    // A snapshot has no provider file to inspect, fingerprint, or extract from:
+    // its text is already in the knowledge base and its hash is its identity.
+    // Routing on the origin is what makes "give me this link" reach the same
+    // drafting flow as a PDF.
+    let metadata = PreparedMetadataV2 {
+        title: None,
+        authors: Vec::new(),
+        created_at: None,
+    };
+    if read_asset_v2(repository, asset_id)?.origin == AssetOriginV2::WebSnapshot {
+        let result = prepare_snapshot_asset_v2(repository, asset_id, metadata)?;
+        return emit_prepared_session_v2(result);
+    }
     let result = prepare_pdf_asset_v2(
         PreparePdfAssetRequestV2 {
             repository_root: repository,
@@ -198,6 +213,12 @@ pub fn prepare_source_json_v2(
         },
         worker_executable,
     )?;
+    emit_prepared_session_v2(result)
+}
+
+/// One envelope for both origins: what a caller does next with a prepared
+/// bundle does not depend on what it was prepared from.
+fn emit_prepared_session_v2(result: PreparedPdfResultV2) -> Result<(), MkoError> {
     emit_json_v2(JsonV2Success::source_prepare(SourcePrepareDataV2 {
         asset_id: result.bundle.asset_id,
         bundle_id: result.bundle.bundle_id,

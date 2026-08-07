@@ -32,8 +32,9 @@ use crate::{
     pdf::{
         EXTRACTOR_NAME, EXTRACTOR_VERSION, extract_pdf_pages_in_child, validate_extracted_pages,
     },
-    records_v2::AssetRecordV2,
-    revision_v2::{canonical_json_bytes, canonical_json_sha256},
+    records_v2::{AssetOriginV2, AssetRecordV2},
+    revision_v2::{canonical_json_bytes, canonical_json_sha256, sha256_digest},
+    snapshot_v2::read_snapshot_text_v2,
 };
 
 const MAX_BLOCK_TEXT_BYTES: usize = 240 * 1024;
@@ -232,6 +233,133 @@ where
     })
 }
 
+/// Prepares a web snapshot for drafting.
+///
+/// The PDF path exists to get trustworthy text out of a file the owner holds:
+/// it inspects the provider, re-fingerprints the bytes, snapshots them, and
+/// runs an extractor in a child process. A snapshot needs none of that. The
+/// text is already in the knowledge base, its hash *is* the Asset's identity,
+/// and there is no provider file that could have changed underneath.
+///
+/// What remains is the integrity check that matters: the stored text must still
+/// hash to the identity it was registered under, or the evidence a note would
+/// cite is not the evidence that was read.
+pub fn prepare_snapshot_asset_v2(
+    repository_root: &Path,
+    asset_id: &str,
+    metadata: PreparedMetadataV2,
+) -> Result<PreparedPdfResultV2, MkoError> {
+    prepare_snapshot_asset_v2_with_clock(repository_root, asset_id, metadata, &SystemClock)
+}
+
+pub fn prepare_snapshot_asset_v2_with_clock(
+    repository_root: &Path,
+    asset_id: &str,
+    metadata: PreparedMetadataV2,
+    clock: &dyn Clock,
+) -> Result<PreparedPdfResultV2, MkoError> {
+    let outcome = prepare_snapshot_inner(repository_root, asset_id, metadata, clock);
+    // Same observation the PDF path records, for the same reason: a failure
+    // that is reported once and discarded leaves material registered, stalled,
+    // and unexplained.
+    let _ = record_preparation_attempt_v2(
+        repository_root,
+        asset_id,
+        match &outcome {
+            Ok(_) => PreparationOutcomeV2::Prepared,
+            Err(_) => PreparationOutcomeV2::Failed,
+        },
+        outcome.as_ref().err().map(|error| error.code()),
+        clock,
+    );
+    outcome
+}
+
+fn prepare_snapshot_inner(
+    repository_root: &Path,
+    asset_id: &str,
+    metadata: PreparedMetadataV2,
+    clock: &dyn Clock,
+) -> Result<PreparedPdfResultV2, MkoError> {
+    let config = KnowledgeConfigV2::read(repository_root)?;
+    if config.derived_artifacts == DerivedArtifactsPolicyV2::Provider {
+        return Err(MkoError::new(
+            "derived_artifacts_policy_unsupported",
+            "v0.3.0 refuses provider persistence because prepared plaintext cannot be stored safely there",
+        ));
+    }
+    let asset = read_asset_v2(repository_root, asset_id)?;
+    if asset.origin != AssetOriginV2::WebSnapshot {
+        return Err(MkoError::new(
+            "asset_binding_invalid",
+            "this Asset is not a web snapshot",
+        ));
+    }
+    let text = read_snapshot_text_v2(repository_root, asset_id)?;
+    if sha256_digest(text.as_bytes()) != asset.fingerprint {
+        return Err(MkoError::new(
+            "registered_asset_changed",
+            "the stored snapshot no longer matches the identity it was registered under",
+        ));
+    }
+
+    let bundle = build_pdf_prepared_content_v2(&asset, std::slice::from_ref(&text), metadata)?;
+    let runtime = LocalRuntimeV2::open(repository_root)?;
+    let bundle_bytes = canonical_json_bytes(&bundle)?;
+    if bundle_bytes.len() as u64 > MAX_PREPARED_BUNDLE_BYTES {
+        return Err(MkoError::new(
+            "prepared_bundle_too_large",
+            "prepared-content-v2 exceeds its bounded local runtime representation",
+        ));
+    }
+
+    let _mutation_lock = RepositoryMutationLock::acquire(
+        repository_root,
+        "v2 snapshot prepare",
+        clock,
+        StaleRepositoryLockPolicy::Preserve,
+    )?;
+    cleanup_expired_sessions(&runtime.prepared, clock)?;
+    let filename = published_session_filename(&bundle)?;
+    let bundle_path = runtime.prepared_path.join(&filename);
+    let created_at = clock.now_utc();
+    let session = PreparedSessionArtifactV2 {
+        schema_version: 2,
+        artifact_type: PreparedSessionArtifactTypeV2::PreparedSession,
+        created_at,
+        expires_at: created_at + PREPARED_SESSION_TTL,
+        bundle: bundle.clone(),
+    };
+    let bytes = canonical_json_bytes(&session)?;
+    if bytes.len() as u64 > MAX_PREPARED_SESSION_BYTES {
+        return Err(MkoError::new(
+            "prepared_bundle_too_large",
+            "prepared-content-v2 exceeds its bounded local session representation",
+        ));
+    }
+    let outcome = write_session_immutable(
+        &runtime.prepared,
+        Path::new(&filename),
+        &session,
+        &bytes,
+        clock,
+    )?;
+    let persisted = read_cap_prepared_session_v2(&runtime.prepared, Path::new(&filename), clock)?;
+    if persisted.bundle != bundle {
+        return Err(MkoError::new(
+            "prepared_bundle_invalid",
+            "prepared plaintext session failed exact canonical validation",
+        ));
+    }
+    Ok(PreparedPdfResultV2 {
+        bundle,
+        bundle_path,
+        outcome,
+        created_at: persisted.created_at,
+        expires_at: persisted.expires_at,
+    })
+}
+
 pub fn read_prepared_content_v2(path: &Path) -> Result<PreparedContentV2, MkoError> {
     read_prepared_content_v2_with_clock(path, &SystemClock)
 }
@@ -329,6 +457,9 @@ fn validate_bundle_integrity(bundle: &PreparedContentV2) -> Result<(), MkoError>
 ///
 /// The PDF extractor currently supplies page text rather than stable paragraph
 /// geometry, so every locator explicitly advertises `granularity:coarse`.
+/// Chunks already-extracted text into the bundle every downstream surface
+/// consumes. Named for the PDF path it was written for; a web snapshot arrives
+/// here as one page, having never needed an extractor.
 pub fn build_pdf_prepared_content_v2(
     asset: &AssetRecordV2,
     pages: &[String],
@@ -397,13 +528,19 @@ fn validate_asset(asset: &AssetRecordV2) -> Result<(), MkoError> {
         .fingerprint
         .strip_prefix("sha256:")
         .map(|digest| format!("personal-asset-{digest}"));
+    // A snapshot's media type is its own; what must hold for either origin is
+    // that the identity is derived from the fingerprint of what was stored.
+    let media_type_ok = match asset.origin {
+        AssetOriginV2::ProviderPdf => asset.media_type == "application/pdf",
+        AssetOriginV2::WebSnapshot => asset.media_type == "text/plain",
+    };
     if asset.schema_version != 2
-        || asset.media_type != "application/pdf"
+        || !media_type_ok
         || expected_id.as_deref() != Some(asset.id.as_str())
     {
         return Err(MkoError::new(
             "asset_binding_invalid",
-            "prepared PDF input requires an exact schema-v2 PDF Asset identity",
+            "prepared input requires an exact schema-v2 Asset identity",
         ));
     }
     Ok(())
