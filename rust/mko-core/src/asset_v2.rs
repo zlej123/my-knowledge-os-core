@@ -690,7 +690,7 @@ fn title_fallback(locator: &str) -> Result<String, MkoError> {
     Ok(title)
 }
 
-fn validate_asset_id(id: &str) -> Result<(), MkoError> {
+pub(crate) fn validate_asset_id(id: &str) -> Result<(), MkoError> {
     let hash = id.strip_prefix("personal-asset-").unwrap_or_default();
     if hash.len() != 64
         || !hash

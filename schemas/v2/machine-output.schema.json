@@ -53,6 +53,12 @@
     },
     {
       "$ref": "#/$defs/failure"
+    },
+    {
+      "$ref": "#/$defs/questions_list_success"
+    },
+    {
+      "$ref": "#/$defs/questions_append_success"
     }
   ],
   "$defs": {
@@ -76,7 +82,9 @@
         "review.feedback",
         "dashboard",
         "doctor",
-        "sync.status"
+        "sync.status",
+        "questions.list",
+        "questions.append"
       ]
     },
     "next_action": {
@@ -1566,6 +1574,120 @@
         },
         "data": {
           "$ref": "#/$defs/queue_drafts_data"
+        }
+      }
+    },
+    "asked_question": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "asked_at",
+        "became_unit"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "asked_at": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "became_unit": {
+          "type": "boolean"
+        }
+      }
+    },
+    "questions_list_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset_id",
+        "items"
+      ],
+      "properties": {
+        "asset_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/asked_question"
+          }
+        }
+      }
+    },
+    "questions_list_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "questions.list"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/questions_list_data"
+        }
+      }
+    },
+    "questions_append_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset_id",
+        "question_id"
+      ],
+      "properties": {
+        "asset_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "question_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
+    "questions_append_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "questions.append"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/questions_append_data"
         }
       }
     }

@@ -1,0 +1,9 @@
+{
+  "schema_version": 2,
+  "command": "questions.append",
+  "result": "ok",
+  "data": {
+    "asset_id": "personal-asset-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "question_id": "personal-question-sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}
