@@ -50,7 +50,7 @@ This Skill is written for exactly one Core version. Before the first `mko` comma
 (after installation checks), verify the contract:
 
 ```bash
-mko handshake --skill-version "0.3.13" --format json-v2
+mko handshake --skill-version "0.3.14" --format json-v2
 ```
 
 Pass the pinned version string above exactly; never substitute the CLI's own reported version.

@@ -124,6 +124,11 @@ pub struct ProjectionBodyV2 {
     /// prevent.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub analysis: Vec<ProjectionPointV2>,
+    /// What the model supplied that the document never said. Separate from
+    /// `analysis`, which reasons about the document: a reader who cannot tell
+    /// these apart cannot tell what they actually have evidence for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background: Vec<ProjectionPointV2>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limitations: Vec<ProjectionPointV2>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -535,6 +540,7 @@ pub fn source_projection_body_v2(
             })
             .collect(),
         analysis: Vec::new(),
+        background: Vec::new(),
         limitations: response
             .limitations
             .iter()
@@ -585,7 +591,15 @@ pub fn knowledge_projection_body_v2(
         analysis: response
             .units
             .iter()
-            .filter(|unit| !grounded_kind(&unit.kind))
+            .filter(|unit| {
+                !grounded_kind(&unit.kind) && unit.kind != KnowledgeUnitKindV2::Background
+            })
+            .map(point)
+            .collect(),
+        background: response
+            .units
+            .iter()
+            .filter(|unit| unit.kind == KnowledgeUnitKindV2::Background)
             .map(point)
             .collect(),
         limitations: Vec::new(),
@@ -617,6 +631,7 @@ fn append_projection_body(text: &mut String, body: &ProjectionBodyV2) {
     }
     append_points(text, "문서가 뒷받침하는 내용", &body.grounded);
     append_points(text, "LLM 분석 (문서의 주장 아님)", &body.analysis);
+    append_points(text, "배경지식 (문서에 없는 내용)", &body.background);
     append_points(text, "한계", &body.limitations);
     if let Some(locator) = &body.document_locator {
         text.push_str(&format!("\n## 원본 문서\n\n- {}\n", normalize(locator)));

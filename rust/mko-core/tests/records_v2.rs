@@ -4,7 +4,10 @@ use chrono::{DateTime, Utc};
 use mko_core::{
     clock::Clock,
     config_v2::{DomainPolicyV2, KnowledgeConfigV2, PerspectiveV2},
-    model_v2::{ContentBlockV2, KnowledgeResponseV2, PreparedContentV2, SourceResponseV2},
+    model_v2::{
+        ContentBlockV2, KnowledgeBasisV2, KnowledgeResponseV2, KnowledgeUnitKindV2,
+        PreparedContentV2, SourceResponseV2,
+    },
     perspective_v2::{prepare_perspective_confirmation_v2, publish_perspective_confirmation_v2},
     records_v2::{
         AssetRecordV2, CurrentPointerV2, KnowledgeRevisionV2, RecordProjectionStatusV2,
@@ -408,6 +411,73 @@ fn source_and_knowledge_mechanical_grounding_rules_are_core_enforced() {
             .code(),
         "knowledge_grounding_invalid"
     );
+}
+
+// What the model knows may reach the note, and may argue with the document —
+// a datasheet can be stale or wrong. What it may never do is arrive as one of
+// the kinds a reader trusts as the document's own words. A wrong document claim
+// is recoverable: the note carries a locator and the owner opens the page. A
+// wrong model claim recorded as a plain fact is not, because six months later
+// nothing tells it apart.
+#[test]
+fn model_knowledge_is_admitted_as_background_and_refused_as_fact() {
+    let mut background = new_environment();
+    background.knowledge.units[0].kind = KnowledgeUnitKindV2::Background;
+    background.knowledge.units[0].basis = KnowledgeBasisV2::ModelKnowledge;
+    background.knowledge.units[0].evidence_refs.clear();
+    write_knowledge(&background, &background.knowledge, None).unwrap();
+
+    for grounded in [
+        KnowledgeUnitKindV2::Fact,
+        KnowledgeUnitKindV2::Definition,
+        KnowledgeUnitKindV2::Formula,
+        KnowledgeUnitKindV2::Result,
+    ] {
+        let mut posing = new_environment();
+        posing.knowledge.units[0].kind = grounded;
+        posing.knowledge.units[0].basis = KnowledgeBasisV2::ModelKnowledge;
+        posing.knowledge.units[0].evidence_refs.clear();
+        assert_eq!(
+            write_knowledge(&posing, &posing.knowledge, None)
+                .unwrap_err()
+                .code(),
+            "knowledge_grounding_invalid"
+        );
+    }
+
+    // A background unit holding evidence is a fact under the wrong label, and
+    // would understate what the document actually supports.
+    let mut grounded_background = new_environment();
+    grounded_background.knowledge.units[0].kind = KnowledgeUnitKindV2::Background;
+    grounded_background.knowledge.units[0].basis = KnowledgeBasisV2::ModelKnowledge;
+    assert_eq!(
+        write_knowledge(&grounded_background, &grounded_background.knowledge, None)
+            .unwrap_err()
+            .code(),
+        "knowledge_grounding_invalid"
+    );
+
+    // Nor may it borrow a basis that claims the document said something.
+    let mut mislabelled = new_environment();
+    mislabelled.knowledge.units[0].kind = KnowledgeUnitKindV2::Background;
+    mislabelled.knowledge.units[0].basis = KnowledgeBasisV2::Evidence;
+    assert_eq!(
+        write_knowledge(&mislabelled, &mislabelled.knowledge, None)
+            .unwrap_err()
+            .code(),
+        "knowledge_grounding_invalid"
+    );
+}
+
+// The document is not automatically right, so the model must be able to say so.
+#[test]
+fn model_knowledge_may_argue_with_the_document() {
+    let mut environment = new_environment();
+    environment.knowledge.units[0].kind = KnowledgeUnitKindV2::Counterargument;
+    environment.knowledge.units[0].basis = KnowledgeBasisV2::ModelKnowledge;
+    environment.knowledge.units[0].evidence_refs.clear();
+
+    write_knowledge(&environment, &environment.knowledge, None).unwrap();
 }
 
 #[test]
