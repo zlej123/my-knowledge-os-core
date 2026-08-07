@@ -51,6 +51,10 @@ pub enum JsonV2Command {
     Queue,
     #[serde(rename = "queue.drafts")]
     QueueDrafts,
+    #[serde(rename = "questions.list")]
+    QuestionsList,
+    #[serde(rename = "questions.append")]
+    QuestionsAppend,
     #[serde(rename = "show")]
     Show,
     #[serde(rename = "review.open")]
@@ -153,6 +157,34 @@ pub struct PendingDraftV2 {
 pub struct QueueDraftsDataV2 {
     pub items: Vec<PendingDraftV2>,
     pub scan_complete: bool,
+}
+
+/// One question the owner asked about a piece of material.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AskedQuestionV2 {
+    pub text: String,
+    pub asked_at: String,
+    /// Whether the answer was kept in the note. False is the ordinary case:
+    /// most questions are worth asking and not worth keeping.
+    pub became_unit: bool,
+}
+
+/// What was asked about this material before, so a new session can continue a
+/// study rather than restart it. Answers are deliberately absent — an answer
+/// either became a unit, with its provenance, or was disposable.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionsListDataV2 {
+    pub asset_id: String,
+    pub items: Vec<AskedQuestionV2>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionsAppendDataV2 {
+    pub asset_id: String,
+    pub question_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -542,6 +574,20 @@ pub enum JsonV2Success {
         result: JsonV2SuccessResult,
         data: QueueDraftsDataV2,
     },
+    #[serde(rename = "questions.list")]
+    QuestionsList {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: QuestionsListDataV2,
+    },
+    #[serde(rename = "questions.append")]
+    QuestionsAppend {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: QuestionsAppendDataV2,
+    },
     #[serde(rename = "show")]
     Show {
         #[serde(deserialize_with = "deserialize_schema_version")]
@@ -662,6 +708,22 @@ impl JsonV2Success {
 
     pub fn queue_drafts(data: QueueDraftsDataV2) -> Self {
         Self::QueueDrafts {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
+    pub fn questions_list(data: QuestionsListDataV2) -> Self {
+        Self::QuestionsList {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
+    pub fn questions_append(data: QuestionsAppendDataV2) -> Self {
+        Self::QuestionsAppend {
             schema_version: 2,
             result: JsonV2SuccessResult::Ok,
             data,

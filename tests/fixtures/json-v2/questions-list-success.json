@@ -1,0 +1,20 @@
+{
+  "schema_version": 2,
+  "command": "questions.list",
+  "result": "ok",
+  "data": {
+    "asset_id": "personal-asset-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "items": [
+      {
+        "text": "ADC 샘플링 레이트가 왜 이 값인지",
+        "asked_at": "2026-08-06T10:00:00+00:00",
+        "became_unit": false
+      },
+      {
+        "text": "클럭 도메인 분리 이유",
+        "asked_at": "2026-08-06T10:12:00+00:00",
+        "became_unit": true
+      }
+    ]
+  }
+}

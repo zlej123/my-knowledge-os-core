@@ -36,6 +36,7 @@ pub mod prepared_v2;
 pub mod profile;
 pub mod projection_v2;
 pub mod provider_scan;
+pub mod question_v2;
 pub mod queue_v2;
 pub mod quick_note_v2;
 pub mod records_v2;

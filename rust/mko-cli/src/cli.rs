@@ -41,11 +41,12 @@ use mko_core::{
     },
     json_v2::{
         AddBatchDataV2, AddBatchItemErrorV2, AddBatchItemV2, AddBatchWarningV2, AddDataV2,
-        AddOutcomeV2, AddSingleDataV2, DashboardCanonicalStateDataV2, DashboardDataV2,
-        DashboardFileDataV2, DashboardFileKindDataV2, DashboardFileStateDataV2,
+        AddOutcomeV2, AddSingleDataV2, AskedQuestionV2, DashboardCanonicalStateDataV2,
+        DashboardDataV2, DashboardFileDataV2, DashboardFileKindDataV2, DashboardFileStateDataV2,
         DashboardProjectionStateDataV2, DoctorCheckDataV2, DoctorCheckStatusV2, DoctorDataV2,
         HandshakeDataV2, JsonV2Command, JsonV2Success, NextActionV2, PendingDraftReasonV2,
-        PendingDraftV2, QueueDraftsDataV2, SetupApplyDataV2,
+        PendingDraftV2, QuestionsAppendDataV2, QuestionsListDataV2, QueueDraftsDataV2,
+        SetupApplyDataV2,
     },
     knowledge::{
         ConceptKind, ConceptMatch, KnowledgeSearchQuery, WriteKnowledgeRequest, approve_knowledge,
@@ -56,6 +57,7 @@ use mko_core::{
     perspective_v2::{prepare_perspective_confirmation_v2, publish_perspective_confirmation_v2},
     prepare::{PrepareRequest, prepare_source},
     provider_scan::MonotonicElapsedClock,
+    question_v2::{QuestionRecordV2, append_question_v2, questions_for_asset_v2},
     queue_v2::{
         KnowledgeSearchLayerV2, ResurfacedKnowledgeStateV2, resurface_knowledge_by_perspective_v2,
         search_approved_knowledge_by_perspective_v2, summarize_home_queue_v2,
@@ -309,6 +311,9 @@ enum Command {
     Status(StatusArgs),
     #[command(hide = true)]
     Queue(QueueArgs),
+    /// Records a question asked about registered material, or lists what was
+    /// asked before. Answers are never stored — see `question_v2`.
+    Ask(AskArgs),
     #[command(hide = true)]
     Show(ShowArgs),
     #[command(name = "review-open", hide = true)]
@@ -588,6 +593,23 @@ struct StatusArgs {
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
 }
+#[derive(Args)]
+struct AskArgs {
+    #[arg(long)]
+    asset: String,
+    #[arg(long, conflicts_with = "list")]
+    text: Option<String>,
+    /// Mark that the answer was kept in the note.
+    #[arg(long, requires = "text")]
+    became_unit: bool,
+    #[arg(long)]
+    list: bool,
+    #[arg(long)]
+    repo: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
+}
+
 #[derive(Args)]
 struct QueueArgs {
     #[arg(long)]
@@ -1575,6 +1597,7 @@ fn run(cli: Cli) -> Result<Exit, MkoError> {
         Some(Command::Inbox(arguments)) => inbox(arguments).map(|_| Exit::Success),
         Some(Command::Status(arguments)) => status(arguments).map(|_| Exit::Success),
         Some(Command::Queue(arguments)) => queue_v2(arguments).map(|_| Exit::Success),
+        Some(Command::Ask(arguments)) => ask_v2(arguments).map(|_| Exit::Success),
         Some(Command::Show(arguments)) => show_v2(arguments).map(|_| Exit::Success),
         Some(Command::ReviewOpen(arguments)) => review_open_v2(arguments).map(|_| Exit::Success),
         Some(Command::ReviewFeedback(arguments)) => {
@@ -2323,6 +2346,81 @@ fn review(arguments: ReviewArgs) -> Result<(), MkoError> {
         }
     }
     Ok(())
+}
+
+/// Records a question, or reads back what was asked about this material
+/// before. A new session opens on a study already in progress rather than
+/// starting one over.
+fn ask_v2(arguments: AskArgs) -> Result<(), MkoError> {
+    if arguments.format == OutputFormat::JsonV1 {
+        return Err(MkoError::new(
+            "format_unsupported",
+            "mko ask supports human or json-v2 output",
+        ));
+    }
+    let context = resolve_context(arguments.repo.clone())?;
+    if arguments.list {
+        let items = questions_for_asset_v2(&context.repository_root, &arguments.asset)?
+            .into_iter()
+            .map(|question| AskedQuestionV2 {
+                text: question.text,
+                asked_at: question.asked_at.to_rfc3339(),
+                became_unit: question.became_unit,
+            })
+            .collect::<Vec<_>>();
+        return match arguments.format {
+            OutputFormat::JsonV2 => {
+                crate::output::emit_json_v2(JsonV2Success::questions_list(QuestionsListDataV2 {
+                    asset_id: arguments.asset,
+                    items,
+                }))
+            }
+            _ => {
+                if items.is_empty() {
+                    println!("이 자료에 대해 물어본 것이 없습니다.");
+                } else {
+                    println!("이 자료에 대해 지난번 물어보신 것");
+                    for item in &items {
+                        let kept = if item.became_unit {
+                            "  (→ 노트에 반영됨)"
+                        } else {
+                            ""
+                        };
+                        println!("  · {}{kept}", item.text);
+                    }
+                }
+                Ok(())
+            }
+        };
+    }
+
+    let Some(text) = arguments.text.as_deref() else {
+        return Err(MkoError::new(
+            "question_invalid",
+            "pass --text to record a question, or --list to read what was asked",
+        ));
+    };
+    let recorded = append_question_v2(
+        &context.repository_root,
+        &QuestionRecordV2::new(
+            &arguments.asset,
+            text,
+            SystemClock.now_utc(),
+            arguments.became_unit,
+        ),
+    )?;
+    match arguments.format {
+        OutputFormat::JsonV2 => {
+            crate::output::emit_json_v2(JsonV2Success::questions_append(QuestionsAppendDataV2 {
+                asset_id: recorded.asset_id,
+                question_id: recorded.id,
+            }))
+        }
+        _ => {
+            println!("기록했습니다.");
+            Ok(())
+        }
+    }
 }
 
 fn queue_v2(arguments: QueueArgs) -> Result<(), MkoError> {
@@ -3496,6 +3594,15 @@ fn json_v2_command(cli: &Cli) -> Option<JsonV2Command> {
             format: OutputFormat::JsonV2,
             ..
         }) => Some(JsonV2Command::Add),
+        Command::Ask(AskArgs {
+            list: true,
+            format: OutputFormat::JsonV2,
+            ..
+        }) => Some(JsonV2Command::QuestionsList),
+        Command::Ask(AskArgs {
+            format: OutputFormat::JsonV2,
+            ..
+        }) => Some(JsonV2Command::QuestionsAppend),
         Command::Queue(QueueArgs {
             pending_drafts: true,
             format: OutputFormat::JsonV2,
@@ -3677,6 +3784,11 @@ fn json_v2_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option
                 JsonV2Command::Queue
             },
         ),
+        ("ask", _) => Some(if args.iter().any(|argument| argument == "--list") {
+            JsonV2Command::QuestionsList
+        } else {
+            JsonV2Command::QuestionsAppend
+        }),
         ("show", _) => Some(JsonV2Command::Show),
         ("review-open", _) => Some(JsonV2Command::ReviewOpen),
         ("review-feedback", _) => Some(JsonV2Command::ReviewFeedback),
