@@ -448,5 +448,16 @@ fabricated text into the owner's live knowledge base under a genuine `blog.rust-
 and both files had to be removed by hand. Verify snapshot behaviour against a scratch knowledge
 base, or against a page actually fetched — never against invented text wearing a real address.
 
+**"Everything downstream is unchanged" was wrong.** The design said a snapshot
+would reach drafting through the same pipeline as a PDF, and the Skill told
+agents to continue "from the prepare step onward". Running it end to end on a
+real page proved otherwise: `mko source prepare` inspects a *provider file* and
+rejected the snapshot's address with `path_not_portable`. Link ingestion was
+registration and nothing else. Fixed by routing prepare on the Asset's origin —
+a snapshot has no provider file to fingerprint and no extractor to run, so what
+remains is checking that the stored text still hashes to the identity it was
+registered under. Found only because the run happened; four PRs had merged
+green.
+
 **Not built, deliberately:** a web UI; unattended fetching or drafting; answer transcripts; batch
 approval (unchanged from the 2026-08-05 resolution).

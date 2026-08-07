@@ -150,3 +150,92 @@ fn a_snapshot_without_a_title_falls_back_to_its_address() {
     .asset;
     assert_eq!(long.title_fallback.chars().count(), 200);
 }
+
+// "Everything downstream is the same" was claimed in the design and was not
+// true: prepare inspected a provider file and rejected a snapshot's address as
+// a non-portable path. A page the agent read has to reach drafting, or link
+// ingestion is registration and nothing else.
+#[test]
+fn a_snapshot_prepares_into_a_bundle_a_draft_can_cite() {
+    use mko_core::{
+        model_v2::{ContentBlockV2, PreparedMetadataV2, PreparedTrustV2},
+        prepared_v2::prepare_snapshot_asset_v2,
+    };
+
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    let asset = register_web_snapshot_v2(RegisterSnapshotRequestV2 {
+        repository_root: &repository,
+        url: "https://example.com/release-notes",
+        title: "Release notes",
+        text: "The Error trait is now available in core.",
+        fetched_at: Utc::now(),
+    })
+    .unwrap()
+    .asset;
+
+    let prepared = prepare_snapshot_asset_v2(
+        &repository,
+        &asset.id,
+        PreparedMetadataV2 {
+            title: None,
+            authors: Vec::new(),
+            created_at: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(prepared.bundle.asset_id, asset.id);
+    assert_eq!(prepared.bundle.asset_fingerprint, asset.fingerprint);
+    assert_eq!(
+        prepared.bundle.trust,
+        PreparedTrustV2::UntrustedDocumentContent,
+        "a page the agent fetched is data, exactly as a document is"
+    );
+    let ContentBlockV2::Text { id, locator, text } = &prepared.bundle.content_blocks[0] else {
+        panic!("a snapshot is text, so its blocks are text blocks");
+    };
+    assert!(id.starts_with("block-"));
+    assert!(locator.starts_with("page:1;chunk:1"), "{locator}");
+    assert!(text.contains("Error trait"), "{text}");
+}
+
+// The evidence a note cites must be the evidence that was read. If the stored
+// text no longer hashes to the identity it was registered under, preparing it
+// would bind a draft to something nobody approved.
+#[test]
+fn a_snapshot_whose_stored_text_changed_will_not_prepare() {
+    use mko_core::{model_v2::PreparedMetadataV2, prepared_v2::prepare_snapshot_asset_v2};
+
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    let asset = register_web_snapshot_v2(RegisterSnapshotRequestV2 {
+        repository_root: &repository,
+        url: "https://example.com/page",
+        title: "Page",
+        text: "What was actually read.",
+        fetched_at: Utc::now(),
+    })
+    .unwrap()
+    .asset;
+    let stored = repository.join("assets/snapshots").join(format!(
+        "{}.txt",
+        asset.id.strip_prefix("personal-asset-").unwrap()
+    ));
+    std::fs::write(&stored, "Something else entirely.").unwrap();
+
+    let error = prepare_snapshot_asset_v2(
+        &repository,
+        &asset.id,
+        PreparedMetadataV2 {
+            title: None,
+            authors: Vec::new(),
+            created_at: None,
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "registered_asset_changed");
+}
