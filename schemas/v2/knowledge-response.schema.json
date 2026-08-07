@@ -4,63 +4,141 @@
   "title": "My Knowledge OS knowledge response v2",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "synthesis", "units"],
+  "required": [
+    "schema_version",
+    "synthesis",
+    "units"
+  ],
   "properties": {
-    "schema_version": { "const": 2 },
-    "synthesis": { "type": "string", "minLength": 1, "maxLength": 262144 },
+    "schema_version": {
+      "const": 2
+    },
+    "synthesis": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 262144
+    },
     "units": {
       "type": "array",
       "maxItems": 4096,
-      "items": { "$ref": "#/$defs/unit" }
+      "items": {
+        "$ref": "#/$defs/unit"
+      }
     }
   },
   "$defs": {
     "text_span_utf8": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["start", "end"],
+      "required": [
+        "start",
+        "end"
+      ],
       "properties": {
-        "start": { "type": "integer", "minimum": 0 },
-        "end": { "type": "integer", "minimum": 0 }
+        "start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "table_range": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["row_start", "row_end", "column_start", "column_end"],
+      "required": [
+        "row_start",
+        "row_end",
+        "column_start",
+        "column_end"
+      ],
       "properties": {
-        "row_start": { "type": "integer", "minimum": 0 },
-        "row_end": { "type": "integer", "minimum": 0 },
-        "column_start": { "type": "integer", "minimum": 0 },
-        "column_end": { "type": "integer", "minimum": 0 }
+        "row_start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "row_end": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "column_start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "column_end": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "evidence_ref": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["block_id", "locator"],
+      "required": [
+        "block_id",
+        "locator"
+      ],
       "properties": {
-        "block_id": { "type": "string", "minLength": 1, "maxLength": 4096 },
-        "locator": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "block_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "locator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
         "text_span_utf8": {
-          "anyOf": [{ "$ref": "#/$defs/text_span_utf8" }, { "type": "null" }]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/text_span_utf8"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "table_range": {
-          "anyOf": [{ "$ref": "#/$defs/table_range" }, { "type": "null" }]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/table_range"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "not": {
-        "required": ["text_span_utf8", "table_range"],
+        "required": [
+          "text_span_utf8",
+          "table_range"
+        ],
         "properties": {
-          "text_span_utf8": { "type": "object" },
-          "table_range": { "type": "object" }
+          "text_span_utf8": {
+            "type": "object"
+          },
+          "table_range": {
+            "type": "object"
+          }
         }
       }
     },
     "unit": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "title", "body", "confidence", "basis", "evidence_refs", "tags"],
+      "required": [
+        "kind",
+        "title",
+        "body",
+        "confidence",
+        "basis",
+        "evidence_refs",
+        "tags"
+      ],
       "properties": {
         "kind": {
           "enum": [
@@ -72,47 +150,140 @@
             "hypothesis",
             "counterargument",
             "uncertainty",
-            "open_question"
+            "open_question",
+            "background"
           ]
         },
-        "title": { "type": "string", "minLength": 1, "maxLength": 4096 },
-        "body": { "type": "string", "minLength": 1, "maxLength": 65536 },
-        "confidence": { "enum": ["high", "medium", "low"] },
-        "basis": { "enum": ["evidence", "missing_evidence", "conflicting_evidence"] },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "confidence": {
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "basis": {
+          "enum": [
+            "evidence",
+            "missing_evidence",
+            "conflicting_evidence",
+            "model_knowledge"
+          ]
+        },
         "evidence_refs": {
           "type": "array",
           "maxItems": 1024,
-          "items": { "$ref": "#/$defs/evidence_ref" }
+          "items": {
+            "$ref": "#/$defs/evidence_ref"
+          }
         },
         "tags": {
           "type": "array",
           "maxItems": 1024,
-          "items": { "type": "string", "maxLength": 4096 }
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
         }
       },
       "allOf": [
         {
           "if": {
             "properties": {
-              "kind": { "enum": ["fact", "definition", "formula", "result"] }
+              "kind": {
+                "enum": [
+                  "fact",
+                  "definition",
+                  "formula",
+                  "result"
+                ]
+              }
             }
           },
           "then": {
             "properties": {
-              "basis": { "const": "evidence" },
-              "evidence_refs": { "minItems": 1 }
+              "basis": {
+                "const": "evidence"
+              },
+              "evidence_refs": {
+                "minItems": 1
+              }
             }
           }
         },
         {
           "if": {
             "properties": {
-              "basis": { "enum": ["missing_evidence", "conflicting_evidence"] }
+              "basis": {
+                "enum": [
+                  "missing_evidence",
+                  "conflicting_evidence"
+                ]
+              }
             }
           },
           "then": {
             "properties": {
-              "kind": { "enum": ["counterargument", "uncertainty", "open_question"] }
+              "kind": {
+                "enum": [
+                  "counterargument",
+                  "uncertainty",
+                  "open_question"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "basis": {
+                "const": "model_knowledge"
+              }
+            },
+            "required": [
+              "basis"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "background",
+                  "counterargument"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "background"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "basis": {
+                "const": "model_knowledge"
+              },
+              "evidence_refs": {
+                "maxItems": 0
+              }
             }
           }
         }

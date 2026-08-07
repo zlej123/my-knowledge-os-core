@@ -609,6 +609,30 @@ fn validate_knowledge_response(
                 | KnowledgeUnitKindV2::Uncertainty
                 | KnowledgeUnitKindV2::OpenQuestion
         );
+        let model_knowledge = matches!(unit.basis, KnowledgeBasisV2::ModelKnowledge);
+        let background = matches!(unit.kind, KnowledgeUnitKindV2::Background);
+
+        // What the model knows may reach the note, and may argue with the
+        // document — a document is not automatically right. It may not arrive
+        // as one of the kinds a reader trusts as the document's own words: a
+        // wrong document claim is recoverable by opening the page, and a wrong
+        // model claim recorded as a fact is not.
+        if model_knowledge
+            && !(background || matches!(unit.kind, KnowledgeUnitKindV2::Counterargument))
+        {
+            return Err(MkoError::new(
+                "knowledge_grounding_invalid",
+                "model knowledge is restricted to background and counterargument units",
+            ));
+        }
+        // A background unit holding evidence is a fact under the wrong label,
+        // and would understate what the document actually supports.
+        if background && !(model_knowledge && unit.evidence_refs.is_empty()) {
+            return Err(MkoError::new(
+                "knowledge_grounding_invalid",
+                "a background unit carries model knowledge and no evidence",
+            ));
+        }
 
         if grounded_kind
             && (!matches!(unit.basis, KnowledgeBasisV2::Evidence) || unit.evidence_refs.is_empty())
@@ -624,7 +648,12 @@ fn validate_knowledge_response(
                 "missing or conflicting evidence is restricted to uncertainty units",
             ));
         }
-        if unit.evidence_refs.is_empty() && !(missing_or_conflicting && uncertainty_kind) {
+        // A model-knowledge unit is the other way to hold no evidence: it says
+        // so in its basis rather than claiming the document fell short.
+        if unit.evidence_refs.is_empty()
+            && !(missing_or_conflicting && uncertainty_kind)
+            && !model_knowledge
+        {
             return Err(MkoError::new(
                 "knowledge_grounding_invalid",
                 "an empty evidence list requires an uncertainty kind and explicit basis",

@@ -323,9 +323,11 @@ fn search_layer(kind: &KnowledgeUnitKindV2) -> KnowledgeSearchLayerV2 {
         | KnowledgeUnitKindV2::Definition
         | KnowledgeUnitKindV2::Formula
         | KnowledgeUnitKindV2::Result => KnowledgeSearchLayerV2::GroundedEvidence,
-        KnowledgeUnitKindV2::Interpretation | KnowledgeUnitKindV2::Hypothesis => {
-            KnowledgeSearchLayerV2::LlmAnalysis
-        }
+        // Background is what the model supplied, so it belongs with the rest of
+        // what the model supplied — never with the document's own words.
+        KnowledgeUnitKindV2::Interpretation
+        | KnowledgeUnitKindV2::Hypothesis
+        | KnowledgeUnitKindV2::Background => KnowledgeSearchLayerV2::LlmAnalysis,
         KnowledgeUnitKindV2::Counterargument
         | KnowledgeUnitKindV2::Uncertainty
         | KnowledgeUnitKindV2::OpenQuestion => KnowledgeSearchLayerV2::CounterargumentOrUncertainty,

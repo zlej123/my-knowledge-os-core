@@ -238,6 +238,11 @@ pub enum KnowledgeUnitKindV2 {
     Counterargument,
     Uncertainty,
     OpenQuestion,
+    /// What the model knows that the document does not say.
+    ///
+    /// Kept apart from the grounded kinds so a reader can always tell the
+    /// document's own words from what was supplied around them.
+    Background,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -254,6 +259,8 @@ pub enum KnowledgeBasisV2 {
     Evidence,
     MissingEvidence,
     ConflictingEvidence,
+    /// The model supplied this, and the document does not support it.
+    ModelKnowledge,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

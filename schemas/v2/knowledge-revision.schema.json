@@ -73,11 +73,11 @@
       "additionalProperties": false,
       "required": ["kind", "title", "body", "confidence", "basis", "evidence_refs", "tags"],
       "properties": {
-        "kind": { "enum": ["fact", "definition", "formula", "result", "interpretation", "hypothesis", "counterargument", "uncertainty", "open_question"] },
+        "kind": { "enum": ["fact", "definition", "formula", "result", "interpretation", "hypothesis", "counterargument", "uncertainty", "open_question", "background"] },
         "title": { "type": "string", "minLength": 1, "maxLength": 4096 },
         "body": { "type": "string", "minLength": 1, "maxLength": 65536 },
         "confidence": { "enum": ["high", "medium", "low"] },
-        "basis": { "enum": ["evidence", "missing_evidence", "conflicting_evidence"] },
+        "basis": { "enum": ["evidence", "missing_evidence", "conflicting_evidence", "model_knowledge"] },
         "evidence_refs": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/evidence_ref" } },
         "tags": { "type": "array", "maxItems": 1024, "items": { "type": "string", "maxLength": 4096 } }
       },

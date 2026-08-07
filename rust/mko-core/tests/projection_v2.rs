@@ -352,3 +352,85 @@ fn write_manifest(repository: &std::path::Path, paths: &[String]) {
     }
     fs::write(repository.join(".mko/generated-manifest.yaml"), text).expect("manifest");
 }
+
+// Sending model knowledge to the same section as the model's reading of the
+// document would lose the distinction the unit kind exists to make: an
+// interpretation reasons about what the document said, and a background claim
+// supplies something the document never mentioned.
+#[test]
+fn background_reads_as_background_and_never_as_what_the_document_said() {
+    use mko_core::model_v2::{
+        ConfidenceV2, KnowledgeBasisV2, KnowledgeResponseV2, KnowledgeUnitKindV2, KnowledgeUnitV2,
+    };
+
+    let unit = |kind, basis, title: &str, body: &str, evidence: Vec<_>| KnowledgeUnitV2 {
+        kind,
+        title: title.into(),
+        body: body.into(),
+        confidence: ConfidenceV2::Medium,
+        basis,
+        evidence_refs: evidence,
+        tags: Vec::new(),
+    };
+    let response = KnowledgeResponseV2 {
+        schema_version: 2,
+        synthesis: "요약".into(),
+        units: vec![
+            unit(
+                KnowledgeUnitKindV2::Fact,
+                KnowledgeBasisV2::Evidence,
+                "문서가 말한 것",
+                "샘플링 레이트는 20 MSPS입니다.",
+                vec![mko_core::model_v2::EvidenceRefV2 {
+                    block_id: "block-000001".into(),
+                    locator: "page:1;chunk:1;granularity:coarse".into(),
+                    text_span_utf8: None,
+                    table_range: None,
+                }],
+            ),
+            unit(
+                KnowledgeUnitKindV2::Interpretation,
+                KnowledgeBasisV2::Evidence,
+                "문서에 대한 해석",
+                "이 값은 대역폭 제약에서 나온 것으로 보입니다.",
+                vec![mko_core::model_v2::EvidenceRefV2 {
+                    block_id: "block-000001".into(),
+                    locator: "page:1;chunk:1;granularity:coarse".into(),
+                    text_span_utf8: None,
+                    table_range: None,
+                }],
+            ),
+            unit(
+                KnowledgeUnitKindV2::Background,
+                KnowledgeBasisV2::ModelKnowledge,
+                "통상적인 설계",
+                "같은 급의 레이더 SoC는 보통 이 범위를 씁니다.",
+                Vec::new(),
+            ),
+        ],
+    };
+
+    let body = mko_core::projection_v2::knowledge_projection_body_v2(&response, None);
+
+    let grounded = body.find("문서가 뒷받침하는 내용").unwrap();
+    let background_heading = body.find("배경지식").unwrap();
+    let background_claim = body.find("같은 급의 레이더 SoC").unwrap();
+    let interpretation = body.find("대역폭 제약").unwrap();
+
+    assert!(
+        background_heading > grounded,
+        "model knowledge must never precede what the document supports:\n{body}"
+    );
+    assert!(
+        background_claim > background_heading,
+        "the background claim belongs under its own heading:\n{body}"
+    );
+    assert!(
+        interpretation < background_heading,
+        "an interpretation reasons about the document and is not background:\n{body}"
+    );
+    assert!(
+        body[..background_heading].contains("샘플링 레이트는 20 MSPS입니다."),
+        "a grounded fact must not be moved into the background section:\n{body}"
+    );
+}
