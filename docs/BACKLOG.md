@@ -461,3 +461,41 @@ green.
 
 **Not built, deliberately:** a web UI; unattended fetching or drafting; answer transcripts; batch
 approval (unchanged from the 2026-08-05 resolution).
+
+## Cross-asset evidence — now hurting in practice (measured 2026-08-09)
+
+The owner's use case arrived: crawl qalert conspiracy posts from DCInside,
+score their predictions against reality, and keep the verdicts as knowledge.
+A Phase 0 run went end to end on the real knowledge base — four posts and one
+outcome document (FEMA's 2023-08-03 EAS-test announcement) snapshotted,
+prepared, and drafted, with verdict notes on two posts.
+
+**What worked without change.** Content-addressed snapshots are exactly right
+for this material: posts in these communities get edited and deleted, and a
+snapshot taken at capture time is tamper-evident. The three-layer projection
+(문서가 뒷받침 / LLM 분석 / 배경지식) cleanly separates what the post said,
+the verdict, and the method. One run found a sharp result: the single
+"hit-looking" prediction (EBS test within 2 months, posted 23.08.30) was
+published 27 days *after* FEMA's public announcement of the Oct 4 test —
+repackaging, not foresight.
+
+**Where it hurt, exactly as the design doc predicted.** A verdict inherently
+joins two documents — the prediction post and the outcome document — and
+`evidence_refs` can only point into the asset's own bundle
+(`validate_evidence_refs(bundle, ..)`). The FEMA snapshot sits in the same
+knowledge base, yet the verdict unit on the qalert note can name it only in
+prose. The judgment that carries the most value is the one unit that cannot be
+mechanically grounded. Occurrence one, documented; per the rule, a second
+occurrence justifies designing cross-asset evidence references.
+
+**Second measurement: approval scale.** One Phase 0 run put 7 items in the
+review queue (5 from this run alone). Per-item TTY approval is fine at this
+size; at the owner's stated ambition (whole-gallery analysis, 500+ posts) it
+is not. Batch approval stays rejected (2026-08-05, joint with Thesis); the
+shape worth designing when this hurts again is approving an *analysis* (one
+verdict record spanning many source snapshots) rather than each source.
+
+**Crawl notes.** DCInside gallery pages and posts read fine through a plain
+browser fetch; no bot wall was hit at this volume. Comments can carry the
+community's own dated predictions — sometimes more falsifiable than the post —
+and are worth capturing when they do.
