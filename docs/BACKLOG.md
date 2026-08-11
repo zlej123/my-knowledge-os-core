@@ -499,3 +499,33 @@ verdict record spanning many source snapshots) rather than each source.
 browser fetch; no bot wall was hit at this volume. Comments can carry the
 community's own dated predictions — sometimes more falsifiable than the post —
 and are worth capturing when they do.
+
+## Cross-asset evidence — second occurrence, 2026-08-11 (design now earned)
+
+Round 2 of the qalert analysis hit the same wall as round 1, twice in one
+session, in both time directions.
+
+**Backward (판정).** The verdict on the 2024-06-27 prediction post — Biden did
+not resign on August 19; he withdrew from the candidacy on July 21 and served
+out the term — rests on facts about the world. They entered the note as
+`counterargument`/`model_knowledge` prose, uncitable, even though nothing
+prevents snapshotting a contemporaneous report. The evidence model binds a
+unit to the one bundle it was drafted from, so a judgment that compares two
+documents cannot cite the second one.
+
+**Forward (검증 대기).** The 2026-08-11 Korea post claims a July 2026 선관위
+압수수색. The honest unit today is an `open_question`; when a Korean news
+snapshot later resolves it, that snapshot will be a registered Asset in this
+same knowledge base — and the resolving revision still will not be able to
+cite it.
+
+Per the occurrence rule (two real occurrences), cross-asset evidence
+references now earn design work. The design question is not "allow any ref
+anywhere" but what a *judgment* unit is: a unit whose claim is about the
+relationship between two evidenced documents (prediction ↔ outcome), each
+side citing its own bundle. Prediction-scoring is the first workload, but the
+same shape serves "datasheet A contradicts datasheet B".
+
+Also measured this round: two posts produced two review items (the per-record
+ceremony holds); the question log crossed sessions correctly — the round-1
+questions surfaced on reopening the assets.
