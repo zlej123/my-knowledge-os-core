@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MKO — 통합 작업공간 프로토타입</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #1f2926;
+      --muted: #6d7872;
+      --paper: #f5f1e8;
+      --surface: #fffdf8;
+      --surface-2: #ede8dd;
+      --line: #d9d3c8;
+      --green: #285b4b;
+      --green-soft: #dce9e2;
+      --amber: #9a6425;
+      --amber-soft: #f4e4c9;
+      --red: #984d44;
+      --red-soft: #f2ded9;
+      --blue: #3f6172;
+      --blue-soft: #dce8ed;
+      --shadow: 0 14px 34px rgba(50, 56, 51, .08);
+      --radius: 18px;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--ink); background: var(--paper); }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    .app { min-height: 100vh; display: grid; grid-template-columns: 238px minmax(0, 1fr); }
+    .sidebar {
+      position: sticky; top: 0; height: 100vh; padding: 28px 20px;
+      background: #203d35; color: #f5f1e8; display: flex; flex-direction: column;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; margin: 0 8px 30px; }
+    .brand-mark { width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center; background: #d6b56f; color: #203d35; font-weight: 800; }
+    .brand strong { display: block; font-size: 18px; letter-spacing: -.02em; }
+    .brand span { color: #bfd0c9; font-size: 12px; }
+    .nav { display: grid; gap: 7px; }
+    .nav button { width: 100%; border: 0; border-radius: 12px; padding: 12px 14px; color: #d7e1dc; background: transparent; text-align: left; display: flex; justify-content: space-between; }
+    .nav button:hover, .nav button.active { color: #fff; background: rgba(255,255,255,.11); }
+    .nav .count { min-width: 24px; padding: 1px 7px; border-radius: 999px; color: #203d35; background: #d6b56f; text-align: center; font-size: 12px; font-weight: 700; }
+    .sidebar-note { margin-top: auto; padding: 14px; border: 1px solid rgba(255,255,255,.14); border-radius: 14px; color: #c7d5cf; font-size: 12px; line-height: 1.55; }
+    main { min-width: 0; padding: 34px 38px 56px; }
+    .topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin-bottom: 28px; }
+    .eyebrow { color: var(--green); font-size: 12px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    h1 { margin: 7px 0 5px; font-family: ui-serif, Georgia, serif; font-size: clamp(30px, 4vw, 46px); font-weight: 650; letter-spacing: -.04em; }
+    .lede { margin: 0; color: var(--muted); line-height: 1.6; }
+    .prototype { flex: 0 0 auto; padding: 9px 12px; border-radius: 999px; background: var(--amber-soft); color: var(--amber); font-size: 12px; font-weight: 800; }
+    .view { display: none; }
+    .view.active { display: block; animation: fade .18s ease-out; }
+    @keyframes fade { from { opacity: 0; transform: translateY(3px); } }
+    .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 24px; }
+    .metric { padding: 18px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+    .metric strong { display: block; font-size: 28px; font-family: ui-serif, Georgia, serif; }
+    .metric span { color: var(--muted); font-size: 13px; }
+    .section-title { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 28px 0 13px; }
+    .section-title h2 { margin: 0; font-size: 18px; }
+    .section-title span { color: var(--muted); font-size: 13px; }
+    .queue { display: grid; gap: 11px; }
+    .attention-card { display: grid; grid-template-columns: 4px 1fr auto; gap: 16px; align-items: center; padding: 17px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); }
+    .rail { align-self: stretch; border-radius: 999px; background: var(--blue); }
+    .rail.red { background: var(--red); }
+    .rail.amber { background: var(--amber); }
+    .rail.green { background: var(--green); }
+    .type { display: inline-flex; gap: 6px; align-items: center; margin-bottom: 7px; color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .04em; }
+    .attention-card h3 { margin: 0 0 5px; font-size: 16px; }
+    .attention-card p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .button { border: 1px solid var(--line); border-radius: 11px; padding: 9px 12px; background: var(--surface); color: var(--ink); font-weight: 750; }
+    .button:hover { border-color: var(--green); }
+    .button.primary { border-color: var(--green); color: white; background: var(--green); }
+    .button.ghost { background: transparent; }
+    .button.danger { border-color: var(--red); color: var(--red); background: transparent; }
+    .searchbar { display: flex; gap: 10px; margin-bottom: 16px; }
+    .searchbar input { flex: 1; min-width: 0; padding: 13px 15px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); color: var(--ink); outline: none; }
+    .filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+    .chip { border: 1px solid var(--line); border-radius: 999px; padding: 7px 11px; color: var(--muted); background: var(--surface); font-size: 12px; }
+    .chip.active { color: var(--green); border-color: var(--green); background: var(--green-soft); font-weight: 800; }
+    .knowledge-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .knowledge-card { min-height: 220px; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); display: flex; flex-direction: column; }
+    .knowledge-card h3 { margin: 8px 0 10px; font-size: 17px; line-height: 1.4; }
+    .knowledge-card p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+    .knowledge-card .footer { margin-top: auto; padding-top: 16px; display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 11px; }
+    .badge { display: inline-flex; align-items: center; gap: 5px; width: fit-content; padding: 5px 8px; border-radius: 999px; color: var(--green); background: var(--green-soft); font-size: 10px; font-weight: 850; letter-spacing: .03em; }
+    .badge.amber { color: var(--amber); background: var(--amber-soft); }
+    .badge.red { color: var(--red); background: var(--red-soft); }
+    .badge.blue { color: var(--blue); background: var(--blue-soft); }
+    .workspace { display: grid; grid-template-columns: minmax(180px, .72fr) minmax(320px, 1.35fr) minmax(260px, 1fr); gap: 13px; min-height: 610px; }
+    .panel { min-width: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); overflow: hidden; box-shadow: var(--shadow); }
+    .panel-head { padding: 16px 17px; border-bottom: 1px solid var(--line); background: #fbf8f1; }
+    .panel-head strong { display: block; font-size: 14px; }
+    .panel-head span { color: var(--muted); font-size: 11px; }
+    .panel-body { padding: 16px; }
+    .claim { width: 100%; margin-bottom: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: transparent; color: var(--ink); text-align: left; }
+    .claim.active { border-color: var(--green); background: var(--green-soft); }
+    .claim strong { display: block; font-size: 13px; }
+    .claim span { color: var(--muted); font-size: 11px; }
+    .thesis-doc h2 { margin: 0 0 5px; font-family: ui-serif, Georgia, serif; font-size: 26px; }
+    .thesis-doc .meta { color: var(--muted); font-size: 12px; }
+    .thesis-doc blockquote { margin: 20px 0; padding: 2px 0 2px 16px; border-left: 3px solid var(--green); font-family: ui-serif, Georgia, serif; font-size: 17px; line-height: 1.6; }
+    .thesis-doc h3 { margin: 22px 0 8px; font-size: 14px; }
+    .thesis-doc p, .thesis-doc li { color: #48534e; font-size: 13px; line-height: 1.65; }
+    .candidate { margin-bottom: 10px; padding: 13px; border: 1px solid var(--line); border-radius: 13px; }
+    .candidate-search { width: 100%; margin-bottom: 12px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 11px; background: #fbf8f1; color: var(--ink); outline: none; }
+    .candidate-search:focus { border-color: var(--green); box-shadow: 0 0 0 3px var(--green-soft); }
+    .candidate h4 { margin: 8px 0 6px; font-size: 13px; line-height: 1.45; }
+    .candidate p { margin: 0 0 11px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+    .candidate button { width: 100%; }
+    .decision-layout { display: grid; grid-template-columns: 1.15fr .85fr; gap: 16px; }
+    .decision-card { padding: 20px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+    .decision-card h2, .decision-card h3 { margin-top: 0; }
+    .score { display: flex; align-items: baseline; gap: 7px; margin: 16px 0; }
+    .score strong { font-family: ui-serif, Georgia, serif; font-size: 48px; }
+    .score span { color: var(--muted); }
+    .factor { display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); font-size: 13px; }
+    .locked { padding: 14px; border-radius: 13px; background: var(--surface-2); color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .timeline { margin: 0; padding: 0; list-style: none; }
+    .timeline li { position: relative; padding: 0 0 20px 22px; color: var(--muted); font-size: 12px; }
+    .timeline li::before { content: ""; position: absolute; left: 2px; top: 3px; width: 9px; height: 9px; border-radius: 50%; background: var(--green); }
+    .timeline li::after { content: ""; position: absolute; left: 6px; top: 14px; bottom: 3px; width: 1px; background: var(--line); }
+    .timeline li:last-child::after { display: none; }
+    .timeline strong { display: block; color: var(--ink); margin-bottom: 3px; }
+    .modal-backdrop { position: fixed; inset: 0; z-index: 20; display: none; place-items: center; padding: 22px; background: rgba(21, 31, 28, .55); backdrop-filter: blur(5px); }
+    .modal-backdrop.open { display: grid; }
+    .modal { width: min(620px, 100%); max-height: 90vh; overflow: auto; border-radius: 22px; background: var(--surface); box-shadow: 0 32px 80px rgba(0,0,0,.24); }
+    .modal-head { padding: 22px 24px 16px; border-bottom: 1px solid var(--line); }
+    .modal-head h2 { margin: 0 0 5px; font-family: ui-serif, Georgia, serif; }
+    .modal-head p { margin: 0; color: var(--muted); font-size: 12px; }
+    .modal-body { padding: 20px 24px; }
+    .binding { padding: 13px; border: 1px dashed var(--line); border-radius: 12px; background: #fbf8f1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
+    .field { margin-top: 17px; }
+    .field label { display: block; margin-bottom: 7px; font-size: 12px; font-weight: 800; }
+    .relation-options { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .relation-options button { padding: 10px 5px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); background: transparent; font-size: 11px; }
+    .relation-options button.active { border-color: var(--amber); color: var(--amber); background: var(--amber-soft); font-weight: 800; }
+    .consequence { margin-top: 17px; padding: 13px; border-radius: 12px; background: var(--blue-soft); color: var(--blue); font-size: 12px; line-height: 1.6; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 9px; padding: 16px 24px 22px; }
+    .toast { position: fixed; right: 26px; bottom: 26px; z-index: 30; max-width: 360px; padding: 14px 16px; border-radius: 13px; color: white; background: var(--green); box-shadow: var(--shadow); font-size: 13px; transform: translateY(20px); opacity: 0; pointer-events: none; transition: .2s ease; }
+    .toast.show { transform: translateY(0); opacity: 1; }
+    @media (max-width: 1080px) {
+      .workspace { grid-template-columns: 220px 1fr; }
+      .workspace .panel:last-child { grid-column: 1 / -1; }
+      .knowledge-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 760px) {
+      .app { grid-template-columns: 1fr; }
+      .sidebar { position: static; height: auto; padding: 16px; }
+      .brand { margin-bottom: 15px; }
+      .nav { grid-template-columns: repeat(4, 1fr); }
+      .nav button { justify-content: center; font-size: 12px; }
+      .nav .count, .sidebar-note { display: none; }
+      main { padding: 24px 16px 40px; }
+      .metrics { grid-template-columns: repeat(2, 1fr); }
+      .knowledge-grid, .decision-layout, .workspace { grid-template-columns: 1fr; }
+      .workspace .panel:last-child { grid-column: auto; }
+      .attention-card { grid-template-columns: 4px 1fr; }
+      .attention-card > button { grid-column: 2; justify-self: start; }
+      .relation-options { grid-template-columns: repeat(2, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">M</div>
+        <div><strong>My Knowledge OS</strong><span>생각에서 판단까지</span></div>
+      </div>
+      <nav class="nav" aria-label="주요 메뉴">
+        <button class="active" data-view="today">오늘 <span class="count" id="today-count">4</span></button>
+        <button data-view="knowledge">지식</button>
+        <button data-view="investment">투자 <span class="count">2</span></button>
+        <button data-view="decisions">판단 <span class="count">1</span></button>
+      </nav>
+      <div class="sidebar-note">
+        이 화면은 가짜 데이터로 만든 상호작용 프로토타입입니다. 어떤 버튼도 실제 지식, Thesis, 포트폴리오를 변경하지 않습니다.
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <div class="eyebrow" id="eyebrow">Unified attention</div>
+          <h1 id="page-title">오늘</h1>
+          <p class="lede" id="page-lede">지식과 투자 판단 중 지금 내가 해야 할 일만 봅니다.</p>
+        </div>
+        <div class="prototype">INTERACTION PROTOTYPE</div>
+      </header>
+
+      <section class="view active" id="view-today">
+        <div class="metrics">
+          <div class="metric"><strong>2</strong><span>지식 검토</span></div>
+          <div class="metric"><strong id="evidence-metric">1</strong><span>근거 관계 판단</span></div>
+          <div class="metric"><strong>1</strong><span>포트폴리오 판단</span></div>
+          <div class="metric"><strong>0</strong><span>실행 승인</span></div>
+        </div>
+        <div class="section-title"><h2>먼저 볼 것</h2><span>위험도와 선행관계 순</span></div>
+        <div class="queue" id="attention-queue">
+          <article class="attention-card">
+            <div class="rail red"></div>
+            <div><div class="type">판단 · PORTFOLIO DECISION</div><h3>LEU 비중을 늘리지 않고 현금을 유지합니다</h3><p>점수 64점 · 매수 기준 65점 미달 · 판단을 기록해야 다음 주기로 넘어갑니다.</p></div>
+            <button class="button" data-go="decisions">판단 검토</button>
+          </article>
+          <article class="attention-card" id="pending-evidence-card">
+            <div class="rail amber"></div>
+            <div><div class="type">투자 · EVIDENCE RELATION</div><h3>새 공식 자료가 공급 병목 주장을 약화시킵니다</h3><p>사실을 받아들일지뿐 아니라 어느 Claim을 어떤 방향으로 바꾸는지 확인합니다.</p></div>
+            <button class="button" data-go="investment">관계 확정</button>
+          </article>
+          <article class="attention-card">
+            <div class="rail green"></div>
+            <div><div class="type">지식 · KNOWLEDGE REVISION</div><h3>우라늄 농축 공급망의 구조적 제약</h3><p>근거와 LLM 분석을 분리해 만든 새 Knowledge 초안입니다.</p></div>
+            <button class="button" data-go="knowledge">지식 검토</button>
+          </article>
+          <article class="attention-card">
+            <div class="rail"></div>
+            <div><div class="type">자료 · RECOVERY</div><h3>PDF 1건의 텍스트를 읽지 못했습니다</h3><p>새 사본을 내보내거나 스캔한 뒤 다시 등록할 수 있습니다. 다른 작업은 막히지 않았습니다.</p></div>
+            <button class="button ghost" data-toast="복구 절차를 열었습니다. 실제 제품에서는 정확한 실패 원인과 한 가지 다음 행동을 표시합니다.">복구 방법</button>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="view-knowledge">
+        <div class="searchbar"><input id="knowledge-search" aria-label="지식 검색" value="병목" placeholder="승인된 지식과 내 생각에서 찾기"><button class="button primary" id="search-button">찾기</button></div>
+        <div class="filters"><button class="chip">전체</button><button class="chip active">투자</button><button class="chip">프로젝트</button><button class="chip">기술</button><button class="chip">내 생각</button></div>
+        <div class="knowledge-grid" id="knowledge-grid">
+          <article class="knowledge-card" data-search="병목 우라늄 농축 공급망">
+            <span class="badge">승인된 지식 · 투자</span>
+            <h3>우라늄 농축 공급망의 구조적 병목</h3>
+            <p>서방권 농축 능력은 제한되어 있지만 신규 설비와 정책 지원이 병목의 지속 기간을 바꿀 수 있습니다.</p>
+            <div class="footer"><span>Knowledge · rev 8f2a</span><span>2026.08.05</span></div>
+          </article>
+          <article class="knowledge-card" data-search="haleu 계약 수요 병목">
+            <span class="badge">승인된 Source · 투자</span>
+            <h3>HALEU 계약 조건과 실제 공급 일정</h3>
+            <p>계약 발표와 상업적 공급 능력은 같은 사건이 아닙니다. 증설 일정과 고객 인도 조건을 따로 봐야 합니다.</p>
+            <div class="footer"><span>Source · rev b41c</span><span>2026.08.02</span></div>
+          </article>
+          <article class="knowledge-card" data-search="경쟁사 gle 병목 반론">
+            <span class="badge amber">나중에 보기 · 투자</span>
+            <h3>GLE 재가동이 기존 병목 가정에 주는 반론</h3>
+            <p>경쟁 설비의 재가동은 공급 부족이 영구적이라는 가정을 약화합니다. 일정과 허가 진행을 계속 관찰해야 합니다.</p>
+            <div class="footer"><span>Knowledge · rev 10d7</span><span>2026.08.01</span></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="view" id="view-investment">
+        <div class="workspace">
+          <section class="panel">
+            <div class="panel-head"><strong>LEU · Claims</strong><span>활성 Thesis v2</span></div>
+            <div class="panel-body">
+              <button class="claim active" data-claim-id="claim-leu-supply-bottleneck" data-claim-revision="sha256:c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1c1a1"><strong>서방 농축 능력 병목</strong><span>근거 4 · 반론 2</span></button>
+              <button class="claim" data-claim-id="claim-leu-pricing-power" data-claim-revision="sha256:c2b2c2b2c2b2c2b2c2b2c2b2c2b2c2b2c2b2c2b2c2b2c2b2c2b2c2b2"><strong>가격 결정력</strong><span>근거 2 · 반론 1</span></button>
+              <button class="claim" data-claim-id="claim-leu-execution" data-claim-revision="sha256:c3d3c3d3c3d3c3d3c3d3c3d3c3d3c3d3c3d3c3d3c3d3c3d3c3d3c3d3"><strong>증설 실행력</strong><span>근거 3 · 열린 질문 2</span></button>
+              <button class="claim" data-claim-id="claim-leu-permanent-loss" data-claim-revision="sha256:c4e4c4e4c4e4c4e4c4e4c4e4c4e4c4e4c4e4c4e4c4e4c4e4c4e4c4e4"><strong>영구 손실 위험</strong><span>경고 1</span></button>
+              <div class="locked">반증 조건: 경쟁 공급이 예상보다 빠르게 상업화되거나 주요 계약이 취소되면 병목 가정을 다시 검토합니다.</div>
+            </div>
+          </section>
+
+          <section class="panel thesis-doc">
+            <div class="panel-head"><strong>현재 Thesis</strong><span>발행 v2 · 2026.08.03</span></div>
+            <div class="panel-body">
+              <h2>Centrus Energy</h2>
+              <div class="meta">Bottleneck investing · 장기 관찰 · 현재 점수 64</div>
+              <blockquote>서방권 농축 공급의 제약은 Centrus에 희소성을 제공하지만, 정책 지원과 계약 발표가 곧 경제적 해자를 의미하지는 않는다.</blockquote>
+              <h3>이 Claim의 현재 판단</h3>
+              <p>공급 제약은 확인되지만 새로운 경쟁 능력과 증설 실행 불확실성이 지속 기간을 제한할 수 있습니다. 근거는 방향보다 시점과 규모를 구분해서 읽어야 합니다.</p>
+              <h3>아직 모르는 것</h3>
+              <ul><li>상업적 HALEU 물량이 손익에 기여하는 정확한 시점</li><li>경쟁 설비 허가와 실제 가동 사이의 지연</li><li>정책 의존 매출의 지속 가능성</li></ul>
+              <div class="locked">이 화면에서 근거 초안을 만들어도 현재 발행 Thesis, 점수, 포트폴리오는 바뀌지 않습니다.</div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head"><strong>MKO 근거 후보</strong><span>승인됨 · 투자 관점 · 현재 revision</span></div>
+            <div class="panel-body">
+              <input class="candidate-search" id="investment-search" aria-label="현재 Thesis 안에서 승인된 투자 지식 검색" placeholder="이 Thesis 안에서 승인된 투자 지식 검색">
+              <article class="candidate" data-candidate-search="우라늄 농축 공급망 구조적 병목 knowledge">
+                <span class="badge">Knowledge</span>
+                <h4>우라늄 농축 공급망의 구조적 병목</h4>
+                <p>rev 8f2a · 승인 2026.08.05<br>공급 제약과 신규 증설 가능성을 함께 정리합니다.</p>
+                <button class="button primary promote" data-title="우라늄 농축 공급망의 구조적 병목" data-record-type="knowledge" data-id="personal-knowledge-8f2a" data-revision="sha256:8f2a8f2a8f2a8f2a8f2a8f2a8f2a8f2a8f2a8f2a8f2a8f2a8f2a8f2a8f2a" data-approval-event="personal-review-20260805-8f2a" data-investment-use-state="allowed-private-reference" data-public-export-state="blocked">근거 초안으로 사용</button>
+              </article>
+              <article class="candidate" data-candidate-search="haleu 계약 조건 공급 일정 source">
+                <span class="badge blue">Source</span>
+                <h4>HALEU 계약 조건과 실제 공급 일정</h4>
+                <p>rev b41c · 승인 2026.08.02<br>공식 계약과 인도 일정의 차이를 확인합니다.</p>
+                <button class="button promote" data-title="HALEU 계약 조건과 실제 공급 일정" data-record-type="source" data-id="personal-source-b41c" data-revision="sha256:b41cb41cb41cb41cb41cb41cb41cb41cb41cb41cb41cb41cb41cb41cb41cb41c" data-approval-event="personal-review-20260802-b41c" data-investment-use-state="allowed-private-reference" data-public-export-state="blocked">근거 초안으로 사용</button>
+              </article>
+              <article class="candidate" data-candidate-search="gle 재가동 경쟁사 반론 deferred knowledge">
+                <span class="badge amber">Deferred Knowledge</span>
+                <h4>GLE 재가동이 기존 가정에 주는 반론</h4>
+                <p>현재 승인 revision이 아니므로 투자 근거로 승격할 수 없습니다.</p>
+                <button class="button" disabled>먼저 Knowledge 검토</button>
+              </article>
+              <article class="candidate" data-candidate-search="이전 계약 요약 stale source">
+                <span class="badge red">Stale Source</span>
+                <h4>이전 계약 발표 요약</h4>
+                <p>연결한 revision보다 최신 revision이 있습니다. stale 상태에서는 Evidence 초안을 만들 수 없습니다.</p>
+                <button class="button" data-toast="최신 Source revision으로 이동합니다. stale revision에서는 근거 초안을 만들 수 없습니다.">최신 revision 열기</button>
+              </article>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" id="view-decisions">
+        <div class="decision-layout">
+          <section class="decision-card">
+            <span class="badge red">판단 대기</span>
+            <h2>LEU · 2026년 8월 판단</h2>
+            <p class="lede">매수 기준에 1점 못 미칩니다. “아무것도 하지 않음”도 같은 절차로 기록합니다.</p>
+            <div class="score"><strong>64</strong><span>/ 100 · 기준 65</span></div>
+            <div class="factor"><span>병목의 지속성</span><strong>17 / 20</strong></div>
+            <div class="factor"><span>경쟁 우위</span><strong>11 / 20</strong></div>
+            <div class="factor"><span>실행력</span><strong>12 / 20</strong></div>
+            <div class="factor"><span>영구 손실 위험</span><strong>24 / 40</strong></div>
+            <div class="locked" style="margin-top:16px">제안: 신규 비중 0% · 현금 유지. 이 판단을 확정해도 주문은 만들어지지 않습니다.</div>
+            <div style="display:flex; gap:9px; margin-top:16px"><button class="button primary" data-toast="프로토타입: '현금 유지' 판단을 확정했습니다. 실제 데이터는 변경되지 않았습니다.">현금 유지 판단 확정</button><button class="button danger" data-toast="수정 사유 입력 화면을 열었습니다.">수정</button></div>
+          </section>
+          <section class="decision-card">
+            <h3>판단의 계보</h3>
+            <ol class="timeline">
+              <li><strong>Source와 Knowledge 승인</strong>공급 병목과 경쟁 설비 자료의 exact revision</li>
+              <li><strong>Evidence 관계 확정</strong>지지 4 · 약화 2 · 모순 0</li>
+              <li><strong>Thesis v2 발행</strong>새 증거가 이전 가정을 재맥락화함</li>
+              <li><strong>Scorecard 64</strong>결정론적 정책 v1.2</li>
+              <li><strong>포트폴리오 판단 대기</strong>현금 유지도 명시적 결정으로 기록</li>
+            </ol>
+            <div class="locked">실행 계획 없음<br>포트폴리오 판단이 “비중 0%”이므로 승인하거나 실행할 주문이 없습니다.</div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="promotion-modal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" aria-describedby="modal-description">
+      <div class="modal-head"><h2 id="modal-title" tabindex="-1">Evidence 초안 만들기</h2><p id="modal-description">승인된 지식을 투자 판단에 연결합니다. 원본 Knowledge는 바뀌지 않습니다.</p></div>
+      <div class="modal-body">
+        <div class="binding" id="binding"></div>
+        <div class="field"><label>연결할 Claim</label><div class="button" id="modal-claim" style="width:100%; text-align:left"></div></div>
+        <div class="field"><label>이 근거가 Claim에 주는 영향</label><div class="relation-options" role="radiogroup" aria-label="Evidence가 Claim에 주는 영향"><button role="radio" aria-checked="false" data-relation="지지">지지</button><button class="active" role="radio" aria-checked="true" data-relation="약화">약화</button><button role="radio" aria-checked="false" data-relation="모순">모순</button><button role="radio" aria-checked="false" data-relation="무관">무관</button></div></div>
+        <div class="consequence" id="modal-consequence"><strong>확인하면:</strong> exact Knowledge revision을 참조하는 pending Evidence 초안 1건을 만듭니다.<br><strong>아직 하지 않는 것:</strong> Knowledge 재분류, Thesis 발행, 점수 변경, 포트폴리오·주문 생성.</div>
+      </div>
+      <div class="modal-actions"><button class="button" id="cancel-promotion">취소</button><button class="button primary" id="confirm-promotion">약화 근거 초안 만들기</button></div>
+    </div>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    const pageMeta = {
+      today: ['Unified attention', '오늘', '지식과 투자 판단 중 지금 내가 해야 할 일만 봅니다.'],
+      knowledge: ['Shared knowledge', '지식', '자료 근거, LLM 분석, 내 생각을 섞지 않고 찾습니다.'],
+      investment: ['Investment module', '투자', '승인된 지식을 Claim과 Thesis 판단으로 연결합니다.'],
+      decisions: ['Decision lineage', '판단', '점수부터 포트폴리오와 실행까지 어떤 근거로 결정했는지 봅니다.']
+    };
+
+    function showView(name) {
+      document.querySelectorAll('.view').forEach(view => view.classList.toggle('active', view.id === `view-${name}`));
+      document.querySelectorAll('.nav button').forEach(button => button.classList.toggle('active', button.dataset.view === name));
+      const [eyebrow, title, lede] = pageMeta[name];
+      document.querySelector('#eyebrow').textContent = eyebrow;
+      document.querySelector('#page-title').textContent = title;
+      document.querySelector('#page-lede').textContent = lede;
+      window.scrollTo({top: 0, behavior: 'smooth'});
+    }
+
+    document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => showView(button.dataset.view)));
+    document.querySelectorAll('[data-go]').forEach(button => button.addEventListener('click', () => showView(button.dataset.go)));
+
+    const toast = document.querySelector('#toast');
+    let toastTimer;
+    function showToast(message) {
+      toast.textContent = message;
+      toast.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove('show'), 3400);
+    }
+    document.querySelectorAll('[data-toast]').forEach(button => button.addEventListener('click', () => showToast(button.dataset.toast)));
+
+    document.querySelector('#search-button').addEventListener('click', () => {
+      const term = document.querySelector('#knowledge-search').value.trim().toLowerCase();
+      document.querySelectorAll('[data-search]').forEach(card => {
+        card.style.display = !term || card.dataset.search.toLowerCase().includes(term) ? 'flex' : 'none';
+      });
+    });
+
+    let selectedClaim = claimFromButton(document.querySelector('.claim.active'));
+    function claimFromButton(button) {
+      return {id: button.dataset.claimId, revision: button.dataset.claimRevision, title: button.querySelector('strong').textContent};
+    }
+    document.querySelectorAll('.claim').forEach(claim => claim.addEventListener('click', () => {
+      document.querySelectorAll('.claim').forEach(item => item.classList.remove('active'));
+      claim.classList.add('active');
+      selectedClaim = claimFromButton(claim);
+      showToast(`${selectedClaim.title} Claim을 선택했습니다.`);
+    }));
+
+    document.querySelector('#investment-search').addEventListener('input', event => {
+      const term = event.target.value.trim().toLowerCase();
+      document.querySelectorAll('[data-candidate-search]').forEach(card => {
+        card.style.display = !term || card.dataset.candidateSearch.toLowerCase().includes(term) ? 'block' : 'none';
+      });
+    });
+
+    const modal = document.querySelector('#promotion-modal');
+    const modalTitle = document.querySelector('#modal-title');
+    const modalDescription = document.querySelector('#modal-description');
+    const modalClaim = document.querySelector('#modal-claim');
+    const binding = document.querySelector('#binding');
+    const confirmPromotion = document.querySelector('#confirm-promotion');
+    const drafts = new Map();
+    let returnFocus = null;
+    let modalMode = 'create';
+    let pendingRecord = null;
+    let pendingDraft = null;
+    let draftSequence = 1;
+
+    function selectedRelation() {
+      return document.querySelector('.relation-options button.active').dataset.relation;
+    }
+
+    function setRelation(relation) {
+      document.querySelectorAll('.relation-options button').forEach(item => {
+        const selected = item.dataset.relation === relation;
+        item.classList.toggle('active', selected);
+        item.setAttribute('aria-checked', String(selected));
+      });
+      confirmPromotion.textContent = modalMode === 'create' ? `${relation} 근거 초안 만들기` : `${relation} 관계 확정`;
+    }
+
+    document.querySelectorAll('.relation-options button').forEach(button => button.addEventListener('click', () => {
+      setRelation(button.dataset.relation);
+    }));
+
+    function recordBinding(record, claim) {
+      return `record_id: ${record.id}\nrecord_type: ${record.type}\ncontent_revision: ${record.revision}\napproval_event: ${record.approvalEvent}\nrecord_state: approved\nscope: private\ninvestment_use_state: ${record.investmentUseState}\npublic_export_state: ${record.publicExportState}\nsnapshot: current\nclaim_id: ${claim.id}\nclaim_revision: ${claim.revision}\nsource: MKO Core`;
+    }
+
+    function openCreateModal(button) {
+      modalMode = 'create';
+      returnFocus = button;
+      pendingRecord = {
+        title: button.dataset.title,
+        type: button.dataset.recordType,
+        id: button.dataset.id,
+        revision: button.dataset.revision,
+        approvalEvent: button.dataset.approvalEvent,
+        investmentUseState: button.dataset.investmentUseState,
+        publicExportState: button.dataset.publicExportState
+      };
+      pendingDraft = null;
+      modalTitle.textContent = 'Evidence 초안 만들기';
+      modalDescription.textContent = '승인된 지식을 투자 판단에 연결합니다. 원본 Knowledge는 바뀌지 않습니다.';
+      modalClaim.textContent = `${selectedClaim.title} · ${selectedClaim.id}`;
+      binding.textContent = recordBinding(pendingRecord, selectedClaim);
+      document.querySelector('#modal-consequence').innerHTML = '<strong>확인하면:</strong> 위 exact record와 Claim revision을 참조하는 pending Evidence 초안 1건을 만듭니다.<br><strong>아직 하지 않는 것:</strong> Knowledge 재분류, Thesis 발행, 점수 변경, 포트폴리오·주문 생성.';
+      setRelation('약화');
+      modal.classList.add('open');
+      modalTitle.focus();
+    }
+
+    function openReviewModal(draft, trigger) {
+      modalMode = 'review';
+      returnFocus = trigger;
+      pendingDraft = draft;
+      pendingRecord = draft.record;
+      selectedClaim = draft.claim;
+      document.querySelectorAll('.claim').forEach(item => item.classList.toggle('active', item.dataset.claimId === selectedClaim.id));
+      modalTitle.textContent = 'Evidence 초안 검토';
+      modalDescription.textContent = `${draft.id}의 사실, Claim 연결, 관계를 다시 확인합니다.`;
+      modalClaim.textContent = `${selectedClaim.title} · ${selectedClaim.id}`;
+      binding.textContent = `evidence_id: ${draft.id}\n${recordBinding(draft.record, draft.claim)}`;
+      document.querySelector('#modal-consequence').innerHTML = '<strong>확인하면:</strong> 이 프로토타입 안에서 관계 검토 상태만 갱신합니다.<br><strong>아직 하지 않는 것:</strong> Thesis 발행, 점수 변경, 포트폴리오·주문 생성.';
+      setRelation(draft.relation);
+      modal.classList.add('open');
+      modalTitle.focus();
+    }
+
+    document.querySelectorAll('.promote').forEach(button => button.addEventListener('click', () => {
+      openCreateModal(button);
+    }));
+
+    function closeModal() {
+      modal.classList.remove('open');
+      if (returnFocus) returnFocus.focus();
+    }
+    document.querySelector('#cancel-promotion').addEventListener('click', closeModal);
+    modal.addEventListener('click', event => { if (event.target === modal) closeModal(); });
+    document.addEventListener('keydown', event => {
+      if (!modal.classList.contains('open')) return;
+      if (event.key === 'Escape') { closeModal(); return; }
+      if (event.key !== 'Tab') return;
+      const focusable = [...modal.querySelectorAll('button:not([disabled]), [tabindex="-1"]')];
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    });
+
+    function updateDraftCounts() {
+      document.querySelector('#evidence-metric').textContent = String(1 + drafts.size);
+      document.querySelector('#today-count').textContent = String(4 + drafts.size);
+    }
+
+    function appendDraftCard(draft) {
+      const queue = document.querySelector('#attention-queue');
+      const card = document.createElement('article');
+      card.className = 'attention-card';
+      card.dataset.draftKey = draft.key;
+      const rail = document.createElement('div');
+      rail.className = 'rail amber';
+      const body = document.createElement('div');
+      const type = document.createElement('div');
+      type.className = 'type';
+      type.textContent = `투자 · NEW EVIDENCE DRAFT · 방금 · ${draft.id}`;
+      const title = document.createElement('h3');
+      title.textContent = draft.record.title;
+      const summary = document.createElement('p');
+      summary.textContent = `${draft.relation} → ${draft.claim.title}. exact revision ${draft.record.revision}`;
+      body.append(type, title, summary);
+      const review = document.createElement('button');
+      review.className = 'button';
+      review.textContent = 'Evidence 초안 검토';
+      review.addEventListener('click', () => openReviewModal(draft, review));
+      card.append(rail, body, review);
+      queue.insertBefore(card, document.querySelector('#pending-evidence-card'));
+    }
+
+    confirmPromotion.addEventListener('click', () => {
+      const relation = selectedRelation();
+      if (modalMode === 'review') {
+        pendingDraft.relation = relation;
+        const card = document.querySelector(`[data-draft-key="${pendingDraft.key}"]`);
+        card.querySelector('p').textContent = `${relation} → ${pendingDraft.claim.title}. exact revision ${pendingDraft.record.revision}`;
+        closeModal();
+        showToast(`${pendingDraft.id}의 ${relation} 관계를 확인했습니다. 현재 Thesis와 점수는 바뀌지 않았습니다.`);
+        return;
+      }
+      const key = `${pendingRecord.id}:${pendingRecord.revision}:${selectedClaim.id}:${selectedClaim.revision}`;
+      if (drafts.has(key)) {
+        const existing = drafts.get(key);
+        closeModal();
+        showToast(`${existing.id}가 이미 있습니다. 중복 초안을 만들지 않았습니다.`);
+        return;
+      }
+      const draft = {
+        id: `evidence-draft-prototype-${String(draftSequence++).padStart(3, '0')}`,
+        key,
+        record: {...pendingRecord},
+        claim: {...selectedClaim},
+        relation
+      };
+      drafts.set(key, draft);
+      appendDraftCard(draft);
+      updateDraftCounts();
+      closeModal();
+      showToast(`${draft.id}를 만들었습니다. 현재 Thesis와 점수는 바뀌지 않았습니다.`);
+    });
+  </script>
+</body>
+</html>

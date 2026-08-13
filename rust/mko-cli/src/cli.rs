@@ -91,6 +91,7 @@ use crate::{
         emit_encoded_json, emit_json_v1, emit_json_v1_failure, emit_json_v2, emit_json_v2_failure,
         emit_json_value, emit_legacy_json_error, json_v2_next_action,
     },
+    ui::{UiConfig, serve_ui},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -287,6 +288,8 @@ enum Command {
     Add(AddArgs),
     /// 승인된 지식에서 내용을 찾습니다
     Find(FindArgs),
+    /// 지식과 투자 판단을 한 화면에서 읽습니다
+    Ui(UiArgs),
     /// 내 문장을 그대로 빠르게 저장합니다
     Remember(RememberArgs),
     #[command(hide = true)]
@@ -377,6 +380,19 @@ struct FindArgs {
     perspective: Option<PerspectiveArg>,
     #[arg(long)]
     repo: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct UiArgs {
+    #[arg(long)]
+    repo: Option<PathBuf>,
+    #[arg(long, default_value = "127.0.0.1:2036")]
+    bind: String,
+    #[arg(long, default_value = "http://127.0.0.1:2035")]
+    thesis_url: String,
+    /// Bounds test and smoke servers without adding a shutdown mutation route.
+    #[arg(long, hide = true)]
+    max_requests: Option<usize>,
 }
 
 #[derive(Args)]
@@ -1576,6 +1592,7 @@ fn run(cli: Cli) -> Result<Exit, MkoError> {
         Some(Command::Setup(arguments)) => setup(arguments).map(|_| Exit::Success),
         Some(Command::Add(arguments)) => add(arguments).map(|_| Exit::Success),
         Some(Command::Find(arguments)) => find(arguments).map(|_| Exit::Success),
+        Some(Command::Ui(arguments)) => ui(arguments).map(|_| Exit::Success),
         Some(Command::Remember(arguments)) => remember(arguments).map(|_| Exit::Success),
         Some(Command::Perspective(arguments)) => {
             confirm_perspectives(arguments).map(|_| Exit::Success)
@@ -1637,6 +1654,21 @@ fn run(cli: Cli) -> Result<Exit, MkoError> {
             command: HooksCommand::Install(arguments),
         }) => install_hook(arguments).map(|_| Exit::Success),
     }
+}
+
+fn ui(arguments: UiArgs) -> Result<(), MkoError> {
+    let context = resolve_context(arguments.repo)?;
+    let thesis_token = std::env::var("THESIS_API_TOKEN")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    serve_ui(UiConfig {
+        repository_root: context.repository_root,
+        provider_root: context.provider_root,
+        bind: arguments.bind,
+        thesis_url: arguments.thesis_url,
+        thesis_token,
+        max_requests: arguments.max_requests,
+    })
 }
 
 // The handshake is deliberately context-free: it must verify a fresh install

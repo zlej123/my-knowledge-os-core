@@ -37,6 +37,7 @@ fn help_exposes_the_human_command_surface_only() {
         .stdout(predicate::str::contains("setup"))
         .stdout(predicate::str::contains("add"))
         .stdout(predicate::str::contains("find"))
+        .stdout(predicate::str::contains("ui"))
         .stdout(predicate::str::contains("remember"))
         .stdout(predicate::str::contains("review"))
         .stdout(predicate::str::contains("doctor"))

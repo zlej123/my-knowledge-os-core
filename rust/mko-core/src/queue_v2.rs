@@ -111,6 +111,7 @@ pub struct HomeQueueSummaryV2 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KnowledgeSearchMatchV2 {
     pub knowledge_id: String,
+    pub current_revision: String,
     pub asset_id: String,
     pub title: String,
     pub body: String,
@@ -293,6 +294,7 @@ pub fn search_approved_knowledge_by_perspective_v2(
                 })
                 .map(|unit| KnowledgeSearchMatchV2 {
                     knowledge_id: target.record_id.clone(),
+                    current_revision: target.pointer.revision.clone(),
                     asset_id: target.asset.id.clone(),
                     title: unit.title.clone(),
                     body: unit.body.clone(),

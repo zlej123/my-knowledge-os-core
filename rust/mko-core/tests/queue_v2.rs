@@ -121,6 +121,7 @@ fn search_returns_only_approved_knowledge_and_home_counts_it() {
     let matches = search_approved_knowledge_v2(environment.root.path(), "reported").unwrap();
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].title, "Reported result");
+    assert_eq!(matches[0].current_revision, knowledge.revision);
     // An excerpt is only useful if it leads somewhere: the path a result points
     // at must be the readable document that actually exists.
     let readable =
