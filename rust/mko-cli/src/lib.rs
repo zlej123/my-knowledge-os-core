@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod cli_v2;
 pub mod output;
+pub mod ui;
 
 use mko_core::{
     add::BatchAddResult,

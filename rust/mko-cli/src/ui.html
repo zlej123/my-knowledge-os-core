@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>My Knowledge OS</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink:#1f2926; --muted:#69756f; --paper:#f4f0e7; --surface:#fffdf8;
+      --surface-2:#ece7dc; --line:#d9d2c6; --green:#285b4b; --green-soft:#dce9e2;
+      --amber:#936022; --amber-soft:#f3e3c8; --red:#984d44; --red-soft:#f2ded9;
+      --blue:#3f6172; --blue-soft:#dce8ed; --shadow:0 14px 34px rgba(50,56,51,.08);
+      font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR",sans-serif;
+    }
+    *{box-sizing:border-box} body{margin:0;color:var(--ink);background:var(--paper)} button,input,select{font:inherit} button{cursor:pointer}
+    .app{min-height:100vh;display:grid;grid-template-columns:238px minmax(0,1fr)}
+    .sidebar{position:sticky;top:0;height:100vh;padding:28px 20px;background:#203d35;color:#f5f1e8;display:flex;flex-direction:column}
+    .brand{display:flex;align-items:center;gap:12px;margin:0 8px 30px}.brand-mark{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;background:#d6b56f;color:#203d35;font-weight:850}
+    .brand strong{display:block;font-size:18px}.brand span{color:#bfd0c9;font-size:12px}.nav{display:grid;gap:7px}.nav button{width:100%;border:0;border-radius:12px;padding:12px 14px;color:#d7e1dc;background:transparent;text-align:left;display:flex;justify-content:space-between}
+    .nav button:hover,.nav button.active{color:white;background:rgba(255,255,255,.11)}.count{min-width:24px;padding:1px 7px;border-radius:999px;color:#203d35;background:#d6b56f;text-align:center;font-size:12px;font-weight:800}
+    .sidebar-note{margin-top:auto;padding:14px;border:1px solid rgba(255,255,255,.14);border-radius:14px;color:#c7d5cf;font-size:12px;line-height:1.55}
+    main{min-width:0;padding:34px 38px 56px}.topbar{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;margin-bottom:26px}.eyebrow{color:var(--green);font-size:12px;font-weight:850;letter-spacing:.08em;text-transform:uppercase}
+    h1{margin:7px 0 5px;font-family:ui-serif,Georgia,serif;font-size:clamp(30px,4vw,46px);font-weight:650;letter-spacing:-.04em}.lede{margin:0;color:var(--muted);line-height:1.6}.toolbar{display:flex;align-items:center;gap:9px}.mode{padding:8px 11px;border-radius:999px;color:var(--green);background:var(--green-soft);font-size:11px;font-weight:850;white-space:nowrap}
+    .button{border:1px solid var(--line);border-radius:11px;padding:9px 12px;color:var(--ink);background:var(--surface);font-weight:750}.button:hover{border-color:var(--green)}.button.primary{color:white;border-color:var(--green);background:var(--green)}
+    .view{display:none}.view.active{display:block;animation:fade .16s ease-out}@keyframes fade{from{opacity:0;transform:translateY(3px)}}
+    .metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:24px}.metric{padding:18px;border:1px solid var(--line);border-radius:18px;background:var(--surface);box-shadow:var(--shadow)}.metric strong{display:block;font-family:ui-serif,Georgia,serif;font-size:28px}.metric span{color:var(--muted);font-size:13px}
+    .section-title{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:27px 0 13px}.section-title h2{margin:0;font-size:18px}.section-title span{color:var(--muted);font-size:12px}
+    .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.queue{display:grid;gap:11px}.card{min-width:0;padding:18px;border:1px solid var(--line);border-radius:17px;background:var(--surface);box-shadow:var(--shadow)}
+    .attention{display:grid;grid-template-columns:4px 1fr auto;gap:16px;align-items:center}.rail{align-self:stretch;border-radius:999px;background:var(--blue)}.rail.investment{background:var(--amber)}.rail.blocked{background:var(--red)}
+    .type{margin-bottom:7px;color:var(--muted);font-size:11px;font-weight:850;letter-spacing:.04em;text-transform:uppercase}.card h3{margin:0 0 7px;font-size:16px;line-height:1.4}.card p{margin:0;color:var(--muted);font-size:13px;line-height:1.55;overflow-wrap:anywhere}.card .meta{margin-top:13px;padding-top:12px;border-top:1px solid var(--line);color:var(--muted);font-size:11px}
+    .badge{display:inline-flex;width:fit-content;margin-bottom:9px;padding:5px 8px;border-radius:999px;color:var(--green);background:var(--green-soft);font-size:10px;font-weight:850}.badge.amber{color:var(--amber);background:var(--amber-soft)}.badge.red{color:var(--red);background:var(--red-soft)}.badge.blue{color:var(--blue);background:var(--blue-soft)}
+    .status{margin-bottom:18px;padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:var(--surface);color:var(--muted);font-size:13px;line-height:1.55}.status.connected{border-color:#abcbbb;background:var(--green-soft);color:var(--green)}.status.partial{border-color:#d9bd89;background:var(--amber-soft);color:var(--amber)}.status.unavailable,.status.needs_token{border-color:#dfb6af;background:var(--red-soft);color:var(--red)}
+    .searchbar{display:grid;grid-template-columns:minmax(0,1fr) 150px auto;gap:9px;margin-bottom:18px}.searchbar.investment-search{grid-template-columns:minmax(0,1fr) auto}.searchbar input,.searchbar select{min-width:0;padding:12px 13px;border:1px solid var(--line);border-radius:12px;background:var(--surface);color:var(--ink);outline:none}.searchbar input:focus,.searchbar select:focus{border-color:var(--green);box-shadow:0 0 0 3px var(--green-soft)}
+    .split{display:grid;grid-template-columns:1.1fr .9fr;gap:16px}.claims{margin:12px 0 0;padding-left:18px}.claims li{margin:7px 0;color:var(--muted);font-size:12px;line-height:1.5}.relation{font-weight:850;color:var(--amber)}.empty{padding:28px;border:1px dashed var(--line);border-radius:15px;color:var(--muted);text-align:center;background:rgba(255,255,255,.35)}
+    .source-link{display:inline-block;margin-top:12px;color:var(--green);font-size:12px;font-weight:750;text-underline-offset:3px}.command-box{margin-top:12px;padding:12px;border-radius:11px;background:#252f2c;color:#e5eee9;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;overflow-wrap:anywhere}
+    dialog{width:min(560px,calc(100% - 32px));border:0;border-radius:20px;padding:0;background:var(--surface);color:var(--ink);box-shadow:0 28px 80px rgba(0,0,0,.28)}dialog::backdrop{background:rgba(20,30,27,.55);backdrop-filter:blur(4px)}.dialog-head{padding:21px 22px 14px;border-bottom:1px solid var(--line)}.dialog-head h2{margin:0 0 5px;font-family:ui-serif,Georgia,serif}.dialog-body{padding:18px 22px}.dialog-actions{padding:0 22px 20px;display:flex;justify-content:flex-end}
+    .loading{padding:46px;text-align:center;color:var(--muted)}
+    @media(max-width:1060px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.split{grid-template-columns:1fr}}
+    @media(max-width:760px){.app{grid-template-columns:1fr}.sidebar{position:static;height:auto;padding:16px}.brand{margin-bottom:14px}.nav{grid-template-columns:repeat(4,1fr)}.nav button{justify-content:center;font-size:12px}.nav .count,.sidebar-note{display:none}main{padding:24px 16px 40px}.topbar{align-items:flex-start}.toolbar{flex-direction:column-reverse;align-items:flex-end}.metrics,.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.attention{grid-template-columns:4px 1fr}.attention>.button{grid-column:2;justify-self:start}.searchbar{grid-template-columns:1fr}.searchbar .button{justify-self:start}}
+    @media(max-width:450px){.metrics,.grid{grid-template-columns:1fr}.prototype-hide{display:none}}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark">M</div><div><strong>My Knowledge OS</strong><span>생각에서 판단까지</span></div></div>
+      <nav class="nav" aria-label="주요 메뉴">
+        <button class="active" data-view="today" aria-current="page" aria-controls="view-today">오늘 <span class="count" id="nav-today">0</span></button>
+        <button data-view="knowledge" aria-controls="view-knowledge">지식</button>
+        <button data-view="investment" aria-controls="view-investment">투자 <span class="count" id="nav-investment">0</span></button>
+        <button data-view="decisions" aria-controls="view-decisions">판단 <span class="count" id="nav-decisions">0</span></button>
+      </nav>
+      <div class="sidebar-note">이 화면은 현재 상태를 읽기만 합니다. 검토·승인·발행·실행은 기존 owner-controlled 흐름에서 수행합니다.</div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div><div class="eyebrow" id="eyebrow">Unified attention</div><h1 id="page-title">오늘</h1><p class="lede" id="page-lede">지식과 투자 판단 중 지금 내가 해야 할 일만 봅니다.</p></div>
+        <div class="toolbar"><button class="button" id="refresh">새로고침</button><div class="mode">READ ONLY</div></div>
+      </header>
+      <div class="status" id="global-status" role="status" aria-live="polite">현재 상태를 불러오는 중입니다.</div>
+
+      <section class="view active" id="view-today">
+        <div class="metrics">
+          <div class="metric"><strong id="metric-knowledge">–</strong><span>지식 검토</span></div>
+          <div class="metric"><strong id="metric-evidence">–</strong><span>근거 관계 판단</span></div>
+          <div class="metric"><strong id="metric-decisions">–</strong><span>포트폴리오 판단</span></div>
+          <div class="metric"><strong id="metric-executions">–</strong><span>실행 검토</span></div>
+        </div>
+        <div class="section-title"><h2>먼저 볼 것</h2><span>위험도와 선행관계 순</span></div>
+        <div class="queue" id="attention-list"><div class="loading">불러오는 중…</div></div>
+      </section>
+
+      <section class="view" id="view-knowledge">
+        <form class="searchbar" id="search-form">
+          <input id="search-input" aria-label="승인된 지식과 내 생각 검색" placeholder="승인된 지식과 내 생각에서 찾기" required maxlength="200">
+          <select id="search-perspective" aria-label="관점 필터"><option value="">전체 관점</option><option value="investment">투자</option><option value="project">프로젝트</option><option value="technical">기술</option><option value="learning">학습</option><option value="life">생활</option></select>
+          <button class="button primary" type="submit">찾기</button>
+        </form>
+        <div class="section-title"><h2 id="knowledge-heading">다시 볼 지식</h2><span id="knowledge-count" role="status" aria-live="polite"></span></div>
+        <div class="grid" id="knowledge-list"></div>
+      </section>
+
+      <section class="view" id="view-investment">
+        <div class="status" id="investment-status"></div>
+        <form class="searchbar investment-search" id="investment-search-form">
+          <input id="investment-search-input" aria-label="Thesis와 투자 근거 검색" placeholder="회사, Thesis, Claim, 근거에서 찾기" maxlength="200">
+          <button class="button primary" type="submit">투자에서 찾기</button>
+        </form>
+        <div class="section-title"><h2>현재 Thesis</h2><span id="thesis-count" role="status" aria-live="polite">발행 상태와 반증 조건</span></div>
+        <div class="grid" id="thesis-list"></div>
+        <div class="section-title"><h2>근거 검토</h2><span id="evidence-count" role="status" aria-live="polite">관계 판단 대기</span></div>
+        <div class="grid" id="evidence-list"></div>
+        <div class="section-title"><h2>공시 후보</h2><span id="filing-count" role="status" aria-live="polite">원문을 읽고 Evidence 후보 여부 판단</span></div>
+        <div class="grid" id="filing-list"></div>
+      </section>
+
+      <section class="view" id="view-decisions">
+        <div class="status">판단과 실행은 한 화면에서 읽되 별도 결정으로 유지합니다. 이 화면에는 mutation control이 없습니다.</div>
+        <div class="split">
+          <div><div class="section-title"><h2>포트폴리오 판단</h2><span>승인 대기</span></div><div class="queue" id="decision-list"></div></div>
+          <div><div class="section-title"><h2>실행 계획</h2><span>승인 또는 paper fill 대기</span></div><div class="queue" id="execution-list"></div></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="command-dialog" aria-labelledby="command-title">
+    <div class="dialog-head"><h2 id="command-title">다음 행동</h2><p class="lede">표시된 명령은 자동 실행되지 않습니다.</p></div>
+    <div class="dialog-body"><p id="command-description"></p><div class="command-box" id="command-text"></div></div>
+    <div class="dialog-actions"><button class="button" id="command-close">닫기</button></div>
+  </dialog>
+
+  <script>
+    const meta = {
+      today:['Unified attention','오늘','지식과 투자 판단 중 지금 내가 해야 할 일만 봅니다.'],
+      knowledge:['Shared knowledge','지식','자료 근거, LLM 분석, 내 생각을 섞지 않고 찾습니다.'],
+      investment:['Investment module','투자','현재 Thesis와 근거 관계를 한 흐름에서 읽습니다.'],
+      decisions:['Decision lineage','판단','점수 이후의 포트폴리오 판단과 실행 계획을 분리해서 봅니다.']
+    };
+    let projection = null;
+    const dialog = document.querySelector('#command-dialog');
+    const empty = text => { const node=document.createElement('div'); node.className='empty'; node.textContent=text; return node; };
+    const element = (tag,className,text) => { const node=document.createElement(tag); if(className) node.className=className; if(text!==undefined) node.textContent=text; return node; };
+    const setText = (selector,value) => { document.querySelector(selector).textContent=String(value); };
+    const compact = (value,limit=220) => { const text=String(value||'').replace(/\s+/g,' ').trim(); return text.length>limit ? `${text.slice(0,limit)}…` : text; };
+    function safeExternalUrl(value){ try{ const url=new URL(value); return ['http:','https:'].includes(url.protocol)?url.href:null; }catch{return null;} }
+    function safeSecUrl(value){try{const url=new URL(value);const host=url.hostname.toLocaleLowerCase('en');return url.protocol==='https:'&&(host==='sec.gov'||host.endsWith('.sec.gov'))?url.href:null;}catch{return null;}}
+    function showView(name){
+      document.querySelectorAll('.view').forEach(view=>view.classList.toggle('active',view.id===`view-${name}`));
+      document.querySelectorAll('[data-view]').forEach(button=>{const active=button.dataset.view===name;button.classList.toggle('active',active);if(active)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');});
+      const [eyebrow,title,lede]=meta[name]; setText('#eyebrow',eyebrow); setText('#page-title',title); setText('#page-lede',lede); window.scrollTo({top:0,behavior:'smooth'});
+    }
+    document.querySelectorAll('[data-view]').forEach(button=>button.addEventListener('click',()=>showView(button.dataset.view)));
+    function showCommand(item){
+      setText('#command-description',`${item.next_action} — 이 UI에서는 실행하지 않습니다.`); setText('#command-text',item.command||'기존 owner-controlled 검토 화면을 사용하세요.'); dialog.showModal(); document.querySelector('#command-close').focus();
+    }
+    document.querySelector('#command-close').addEventListener('click',()=>dialog.close());
+    dialog.addEventListener('click',event=>{if(event.target===dialog)dialog.close();});
+    function badge(text,tone=''){ const node=element('span',`badge ${tone}`.trim(),text); return node; }
+    function renderAttention(items){
+      const list=document.querySelector('#attention-list'); list.replaceChildren();
+      if(!items.length){list.append(empty('지금 확인할 항목이 없습니다.'));return;}
+      items.forEach(item=>{
+        const card=element('article','card attention'); const rail=element('div',`rail ${item.domain==='investment'?'investment':''} ${item.priority===0?'blocked':''}`.trim());
+        const body=element('div'); body.append(element('div','type',`${item.domain} · ${item.kind}`),element('h3','',item.title),element('p','',compact(item.detail)));
+        const action=element('button','button',item.next_action); action.type='button'; action.addEventListener('click',()=>showCommand(item)); card.append(rail,body,action); list.append(card);
+      });
+    }
+    function renderKnowledge(items,heading='다시 볼 지식'){
+      setText('#knowledge-heading',heading); setText('#knowledge-count',`${items.length}건`); const list=document.querySelector('#knowledge-list'); list.replaceChildren();
+      if(!items.length){list.append(empty('표시할 지식이 없습니다.'));return;}
+      items.forEach(item=>{
+        const card=element('article','card'); const state=item.record_type==='quick_note'?'내 생각':item.review_state==='deferred'?'나중에 보기':'승인된 지식';
+        card.append(badge(state,item.review_state==='deferred'?'amber':''),element('h3','',item.title),element('p','',compact(item.synthesis||item.body,300)));
+        const meta=element('div','meta',item.current_revision||item.revision||item.record_id||item.knowledge_id); card.append(meta); list.append(card);
+      });
+    }
+    function investmentMatch(item,query){if(!query)return true;const needle=query.toLocaleLowerCase('ko');return Object.values(item).flatMap(value=>Array.isArray(value)?value:[value]).some(value=>JSON.stringify(value).toLocaleLowerCase('ko').includes(needle));}
+    function renderInvestment(data,query=''){
+      const status=document.querySelector('#investment-status'); status.className=`status ${data.status}`; status.textContent=data.message+(data.next_action?` 다음 행동: ${data.next_action}`:'')+(data.warnings.length?` 경고: ${data.warnings.join(' ')}`:'');
+      const filteredTheses=data.theses.filter(item=>investmentMatch(item,query));const filteredEvidence=data.evidence.filter(item=>investmentMatch(item,query));const filteredFilings=data.filing_candidates.filter(item=>investmentMatch(item,query));setText('#thesis-count',`${filteredTheses.length}건 · 발행 상태와 반증 조건`);setText('#evidence-count',`${filteredEvidence.length}건 · 관계 판단 대기`);setText('#filing-count',`${filteredFilings.length}건 · 원문 확인 대기`);
+      const theses=document.querySelector('#thesis-list'); theses.replaceChildren();
+      if(!filteredTheses.length) theses.append(empty(query?'검색에 맞는 Thesis가 없습니다.':data.status==='connected'?'현재 Thesis가 없습니다.':'투자 모듈을 연결하면 현재 Thesis가 나타납니다.'));
+      filteredTheses.forEach(item=>{
+        const publicationMatches=item.publication_version===item.version;const publication=item.publication_state==='unknown'?'발행 상태 확인 불가':item.publication_state==='not_published'?'최신 버전 미발행':publicationMatches?`${item.publication_status} · 발행 v${item.publication_version}`:`최신 v${item.version} 미발행 · 활성 v${item.publication_version}`;
+        const card=element('article','card'); card.append(badge(publication,item.publication_status==='active'&&publicationMatches?'':'amber'),element('h3','',`${item.company_id} · ${item.thesis_id} v${item.version}`),element('p','',compact(item.core_claim,300)));
+        if(item.claims.length){const list=element('ul','claims');item.claims.forEach(claim=>{const li=element('li','');li.append(element('strong','',`${claim.key}: `),document.createTextNode(claim.statement));list.append(li);});card.append(list);}
+        if(item.falsification_conditions.length){card.append(badge('반증 조건','red'));const list=element('ul','claims');item.falsification_conditions.forEach(condition=>{const li=element('li','');li.append(element('strong','',`${condition.key}: `),document.createTextNode(condition.statement));list.append(li);});card.append(list);}
+        const publicationMeta=item.publication_state==='unknown'?'활성 발행 상태를 읽지 못했습니다.':item.publication_version?`활성 발행 v${item.publication_version} · 근거 ${item.evidence_count}건 · ${item.published_at}`:'활성 발행 없음';card.append(element('div','meta',publicationMeta)); theses.append(card);
+      });
+      const evidence=document.querySelector('#evidence-list'); evidence.replaceChildren(); if(!filteredEvidence.length)evidence.append(empty(query?'검색에 맞는 Evidence가 없습니다.':'검토할 Evidence가 없습니다.'));
+      filteredEvidence.forEach(item=>{const card=element('article','card');card.append(badge(item.relation,'amber'),element('h3','',`${item.company_id} · ${item.claim_key}`),element('p','',compact(item.summary,320)),element('div','meta',`${item.source_title} · ${item.locator}`));const href=safeExternalUrl(item.source_uri);if(href){const link=element('a','source-link','원문 열기');link.href=href;link.target='_blank';link.rel='noopener noreferrer';card.append(link);}evidence.append(card);});
+      const filings=document.querySelector('#filing-list'); filings.replaceChildren(); if(!filteredFilings.length)filings.append(empty(query?'검색에 맞는 공시 후보가 없습니다.':'새 공시 후보가 없습니다.'));
+      filteredFilings.forEach(item=>{const card=element('article','card');card.append(badge('공시 후보','blue'),element('h3','',`${item.company_id} · ${item.form}`),element('p','',`${item.filing_date} 제출`));const href=safeSecUrl(item.filing_uri);if(href){const link=element('a','source-link','SEC 원문 열기');link.href=href;link.target='_blank';link.rel='noopener noreferrer';card.append(link);}else{card.append(element('div','meta','SEC 도메인이 아닌 링크는 열지 않습니다.'));}filings.append(card);});
+    }
+    function renderDecisions(data){
+      const decisions=document.querySelector('#decision-list');decisions.replaceChildren();if(!data.decisions.length)decisions.append(empty('대기 중인 포트폴리오 판단이 없습니다.'));
+      data.decisions.forEach(item=>{const card=element('article','card');card.append(badge('포트폴리오 판단','red'),element('h3','',item.id),element('p','',compact(item.rationale,280)),element('div','meta',`현금 ${(item.cash_weight*100).toFixed(1)}% · 포지션 ${item.position_count}개 · ${item.created_at}`));decisions.append(card);});
+      const executions=document.querySelector('#execution-list');executions.replaceChildren();if(!data.executions.length)executions.append(empty('대기 중인 실행 계획이 없습니다.'));
+      data.executions.forEach(item=>{const card=element('article','card');card.append(badge(item.state,item.state==='ready_paper_execution'?'red':'amber'),element('h3','',item.id),element('p','',`${item.proposal_count}개 주문 · 명목금액 ${item.notional.toLocaleString()}`),element('div','meta',`${item.portfolio_decision_id} · ${item.created_at}`));executions.append(card);});
+    }
+    function render(data){
+      projection=data; const corePending=data.core.counts.review_pending+data.core.counts.changes_requested;
+      setText('#metric-knowledge',corePending);setText('#metric-evidence',data.investment.pending.evidence);setText('#metric-decisions',data.investment.pending.decisions);setText('#metric-executions',data.investment.pending.executions);
+      setText('#nav-today',data.attention.length);setText('#nav-investment',data.investment.pending.evidence+data.investment.pending.filings);setText('#nav-decisions',data.investment.pending.decisions+data.investment.pending.executions);
+      const status=document.querySelector('#global-status');status.className=`status ${data.core.scan_complete?'connected':'partial'}`;status.textContent=`MKO ${data.core.generation} · ${data.core.next_action}${data.core.scan_complete?'':' · 자료 스캔 불완전, 새로고침 또는 mko doctor로 확인'} · 투자 모듈 ${data.investment.status} · 읽기 전용`;
+      renderAttention(data.attention);renderKnowledge(data.core.knowledge);renderInvestment(data.investment);renderDecisions(data.investment);
+    }
+    async function load(){
+      const status=document.querySelector('#global-status');status.className='status';status.textContent='현재 상태를 불러오는 중입니다.';
+      try{const response=await fetch('/api/projection',{headers:{Accept:'application/json'}});const body=await response.json();if(!response.ok)throw new Error(body.detail||'상태를 불러오지 못했습니다.');render(body);}catch(error){status.className='status unavailable';status.textContent=error.message;}
+    }
+    document.querySelector('#refresh').addEventListener('click',load);
+    document.querySelector('#investment-search-form').addEventListener('submit',event=>{event.preventDefault();if(projection)renderInvestment(projection.investment,document.querySelector('#investment-search-input').value.trim());});
+    document.querySelector('#search-form').addEventListener('submit',async event=>{
+      event.preventDefault();const q=document.querySelector('#search-input').value.trim();const perspective=document.querySelector('#search-perspective').value;const params=new URLSearchParams({q});if(perspective)params.set('perspective',perspective);
+      const list=document.querySelector('#knowledge-list');list.replaceChildren(element('div','loading','검색 중…'));
+      try{const response=await fetch(`/api/search?${params}`,{headers:{Accept:'application/json'}});const body=await response.json();if(!response.ok)throw new Error(body.detail||'검색하지 못했습니다.');renderKnowledge(body.items,`“${q}” 검색 결과`);}catch(error){list.replaceChildren(empty(error.message));}
+    });
+    load();
+  </script>
+</body>
+</html>
