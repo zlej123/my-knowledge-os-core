@@ -50,7 +50,7 @@ This Skill is written for exactly one Core version. Before the first `mko` comma
 (after installation checks), verify the contract:
 
 ```bash
-mko handshake --skill-version "0.3.19" --format json-v2
+mko handshake --skill-version "0.3.20" --format json-v2
 ```
 
 Pass the pinned version string above exactly; never substitute the CLI's own reported version.
@@ -281,7 +281,11 @@ mko schema show knowledge-response-v2 --format json-v2
 Create exactly one `knowledge-response-v2` JSON object matching the returned schema:
 
 - `fact`, `definition`, `formula`, and `result` are Source-grounded and require exact evidence;
-- LLM opinion belongs only in `interpretation` or `hypothesis`, never as a Source fact;
+- LLM opinion that reasons about what the document says belongs in `interpretation` or
+  `hypothesis`, and still requires evidence like any grounded unit. Opinion the document does
+  **not** support is a `background` unit with `model_knowledge` basis and no evidence, or a
+  `counterargument` when it argues against the document. Never a Source fact, and never an
+  `interpretation` carrying references that do not support it;
 - use `counterargument`, `uncertainty`, and `open_question` for weaknesses and checks;
 - include at least one counterargument and one open question for finance, medical, legal, or any
   configured high-risk domain;

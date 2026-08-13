@@ -286,6 +286,46 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "evidence_refs": {
+                "maxItems": 0
+              }
+            },
+            "required": [
+              "evidence_refs"
+            ]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "counterargument",
+                      "uncertainty",
+                      "open_question"
+                    ]
+                  },
+                  "basis": {
+                    "enum": [
+                      "missing_evidence",
+                      "conflicting_evidence"
+                    ]
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "basis": {
+                    "const": "model_knowledge"
+                  }
+                }
+              }
+            ]
+          }
         }
       ]
     }

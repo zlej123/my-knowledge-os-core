@@ -529,3 +529,79 @@ same shape serves "datasheet A contradicts datasheet B".
 Also measured this round: two posts produced two review items (the per-record
 ceremony holds); the question log crossed sessions correctly — the round-1
 questions surfaced on reopening the assets.
+
+## Four adversarial reviews — 2026-08-13
+
+The owner said the work felt like it was going off the rails and asked for
+independent review. Four reviewers were given deliberately adversarial briefs:
+argue the product has drifted, refute the pending design, prove the usability
+work did not help, find what green CI does not catch. Their load-bearing
+claims were verified against the code before being acted on. What follows is
+what the reviews changed, and what they left standing.
+
+**The meta-finding, which all four reached independently.** Every item on the
+2026-08-03 usability list was closed against the individual friction it named,
+and each of those closures is real. Nothing was closed against the *loop*: can
+the owner get from a PDF to an approved note, and then to the next one. That
+question had no owner in the codebase, no test, and no metric. The measured
+result was two approvals in ten days against a queue that grew fourfold.
+
+**Fixed, with the bug reproduced as a test first:** evidence written outside
+the guarded path (symlink escape and an unrepairable torn write); the review
+screen reaching only the lexicographically smallest asset hash, leaving seven
+of eight pending items unreachable; the published schema accepting five unit
+shapes Core rejects at write time; SKILL.md instructing agents to put
+unsupported opinion in `interpretation`, which forced the laundering that
+`background`/`model_knowledge` exists to prevent.
+
+**Discarded:** the cross-asset judgment design (PR #37), unmerged. Its central
+argument — that a `judgment` kind was "the same move as `background`" — was
+backwards. `background` strips trust from an unevidenced claim; the proposed
+`judgment` would have conferred `basis: evidence` on a conclusion appearing in
+neither cited document, and moved it above `LLM 분석` in the vault and into the
+grounded search layer. If the need returns, the cheaper shape is
+`EvidenceRefV2.asset_id` permitted only on `counterargument`, which already
+carries `model_knowledge` legally.
+
+### `judgment_v2.rs` is unwired, not dead — do not delete it
+
+A reviewer flagged the module as dead code (327 lines, zero references from
+`cli.rs`, no `judgments/` directory in any knowledge base) and recommended
+deleting it before building anything else named `judgment`. That
+recommendation was correct at the time and is now obsolete: PR #37 is closed,
+so there is no second `judgment` to collide with.
+
+What the module actually is: the owner's **own** hand-written judgment
+annotation, echo-confirmed and bound to a knowledge revision — `# User
+judgment`, `JudgmentAuthorshipV2::UserConfirmedViaTty`. It comes from the
+original v0.3 design (`2026-07-22-v0.3-knowledge-ux-design.md`, "echo-confirmed
+judgment annotations"), arrived complete with its own tests in the single
+commit `d9fccc1`, and has never been modified since. It was implemented and
+never routed from the CLI.
+
+Deleting it would destroy a designed, tested capability to remove a line count.
+It stays. If it is still unwired when someone next reads this, the question to
+ask is "should the owner be able to annotate a knowledge record with their own
+judgment," not "why is this file here."
+
+### Technical documents cannot cite their own mathematics — first occurrence
+
+Drafting the first real note from the owner's own 728-page textbook
+(`Signals and Systems`, prepared 2026-08-13) found the limit that ten days of
+feature work never touched. Prose claims cite cleanly. Equations arrive as
+mangled single-line text — `∫ ∞ −∞ x(τ)h(t − τ)dτ` — and every figure is lost
+entirely, so any claim resting on a formula or a diagram cannot be evidenced at
+all. The note records this as an `open_question` rather than hiding it.
+
+This is the first occurrence, and it comes from the owner's actual work
+material rather than a hobby project. Every snapshot workload to date has been
+plain text, which is why nothing surfaced it. Second occurrence earns design
+work.
+
+**Still open, owner decisions:** the Calterah radar guide remains unreadable
+after a full download and retry (`pdf_text_unreadable`, the
+`adobe-cmap-parser` panic recorded above) — the paths are an owner-exported
+copy or an upstream fork. And `mko ui` (PR #38, another session) shipped a web
+UI six days after this file recorded "Not built, deliberately: a web UI,"
+without the version bump `AGENTS.md` requires, so the installed binary does not
+have the command it documents.
