@@ -239,3 +239,77 @@ fn a_snapshot_whose_stored_text_changed_will_not_prepare() {
 
     assert_eq!(error.code(), "registered_asset_changed");
 }
+
+// Every other v2 writer goes through atomic::write_new, which opens the parent
+// as a capability directory and refuses a destination that is not a regular
+// file. This one used a bare `path.exists()` guard, and `exists()` follows
+// symlinks — so a dangling link at the destination reported "no file here" and
+// the write went through it, landing evidence outside the repository.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_destination_cannot_carry_evidence_out_of_the_repository() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    let text = "The page said this.";
+    let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(text.as_bytes()));
+    let outside = root.path().join("outside.txt");
+    std::os::unix::fs::symlink(
+        &outside,
+        repository
+            .join("assets/snapshots")
+            .join(format!("{hash}.txt")),
+    )
+    .unwrap();
+
+    let error = register_web_snapshot_v2(RegisterSnapshotRequestV2 {
+        repository_root: &repository,
+        url: "https://example.com/page",
+        title: "Page",
+        text,
+        fetched_at: Utc::now(),
+    })
+    .unwrap_err();
+
+    assert_eq!(error.code(), "registry_destination_invalid");
+    assert!(
+        !outside.exists(),
+        "evidence must never be written through a link out of the knowledge base"
+    );
+}
+
+// A torn or truncated write left the stored text permanently wrong: the old
+// `path.exists()` short-circuit meant re-registering the identical page
+// reported success without repairing anything, and preparing it then failed
+// with registered_asset_changed forever. The hash IS the identity, so bytes
+// that do not match it are provably damaged and provably repairable.
+#[test]
+fn a_damaged_snapshot_is_repaired_by_registering_the_same_page_again() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    let request = |text: &'static str| RegisterSnapshotRequestV2 {
+        repository_root: &repository,
+        url: "https://example.com/page",
+        title: "Page",
+        text,
+        fetched_at: Utc::now(),
+    };
+    let asset = register_web_snapshot_v2(request("The page said this."))
+        .unwrap()
+        .asset;
+    let stored = repository.join("assets/snapshots").join(format!(
+        "{}.txt",
+        asset.id.strip_prefix("personal-asset-").unwrap()
+    ));
+    std::fs::write(&stored, "The page said th").unwrap();
+
+    let again = register_web_snapshot_v2(request("The page said this.")).unwrap();
+
+    assert_eq!(again.asset.id, asset.id);
+    assert_eq!(
+        read_snapshot_text_v2(&repository, &asset.id).unwrap(),
+        "The page said this.",
+        "the evidence must be restored, not silently left damaged"
+    );
+}

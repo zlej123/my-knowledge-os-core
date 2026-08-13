@@ -718,7 +718,11 @@ fn require_real_directory(path: &Path, code: &str) -> Result<(), MkoError> {
     }
 }
 
-fn read_bounded_nofollow(path: &Path, limit: u64, subject: &str) -> Result<Vec<u8>, MkoError> {
+pub(crate) fn read_bounded_nofollow(
+    path: &Path,
+    limit: u64,
+    subject: &str,
+) -> Result<Vec<u8>, MkoError> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     configure_std_nofollow(&mut options);

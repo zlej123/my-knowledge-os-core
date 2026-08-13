@@ -94,9 +94,23 @@ pub(crate) fn json_v2_next_action(code: &str) -> NextActionV2 {
         | "snapshot_unreadable"
         | "snapshot_arguments_incomplete"
         | "snapshot_timestamp_invalid" => NextActionV2::Add,
+        // Registering the same page again rewrites content-addressed evidence
+        // that no longer matches its identity, so this is repairable by the
+        // caller rather than a dead end.
+        "registered_asset_changed" | "snapshot_damaged" => NextActionV2::Add,
+        // Write-path failures on the append-only stores: the observation was
+        // not recorded, and the same call is the way to record it.
+        "snapshot_write_failed"
+        | "snapshot_destination_invalid"
+        | "question_write_failed"
+        | "question_destination_invalid"
+        | "question_unreadable"
+        | "attempt_write_failed"
+        | "attempt_destination_invalid"
+        | "attempt_unreadable" => NextActionV2::Retry,
+        "question_invalid" | "asset_binding_invalid" => NextActionV2::Add,
         "projection_not_found"
         | "projection_snapshot_changed"
-        | "projection_stale"
         | "dashboard_drift"
         | "dashboard_snapshot_changed"
         | "review_target_blocked" => NextActionV2::Repair,

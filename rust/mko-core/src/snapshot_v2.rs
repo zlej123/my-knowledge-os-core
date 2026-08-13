@@ -16,8 +16,10 @@ use chrono::{DateTime, Utc};
 
 use crate::{
     asset_v2::{
-        AssetRegistrationResultV2, validate_asset_record_v2, write_asset_registry_record_v2,
+        AssetRegistrationResultV2, read_bounded_nofollow, validate_asset_record_v2,
+        write_asset_registry_record_v2,
     },
+    atomic::{write_new, write_replace},
     clock::SystemClock,
     config_v2::KnowledgeConfigV2,
     error::MkoError,
@@ -144,12 +146,33 @@ fn write_snapshot_text(repository_root: &Path, hash: &str, bytes: &[u8]) -> Resu
         Err(error) => return Err(MkoError::new("snapshot_write_failed", error.to_string())),
     }
     let path = directory.join(format!("{hash}.txt"));
-    // Content-addressed: identical text is already this file, byte for byte.
-    if path.exists() {
-        return Ok(());
+    // Evidence goes through the same writer as every other v2 record: a
+    // capability-scoped parent, a destination that must be a regular file, and
+    // a temporary-write-fsync-rename that cannot leave a half-written file
+    // behind. This once used a bare `exists()` guard, which follows links —
+    // a dangling symlink here reported "nothing there" and the write went
+    // through it, out of the knowledge base.
+    let outcome = write_new(&path, bytes, |existing| {
+        let stored = read_bounded_nofollow(existing, MAX_SNAPSHOT_BYTES, "snapshot")?;
+        if stored == bytes {
+            Ok(())
+        } else {
+            Err(MkoError::new(
+                "snapshot_damaged",
+                "stored snapshot text does not match the identity it is filed under",
+            ))
+        }
+    });
+    match outcome {
+        Ok(_) => Ok(()),
+        // The hash is the identity, so bytes that disagree with it are
+        // provably damaged and these bytes are provably what belongs there.
+        // Registering the page again is the repair; before, the exists()
+        // short-circuit reported success and left the damage in place, which
+        // made preparation fail as registered_asset_changed forever.
+        Err(error) if error.code() == "snapshot_damaged" => write_replace(&path, bytes),
+        Err(error) => Err(error),
     }
-    fs::write(&path, bytes)
-        .map_err(|error| MkoError::new("snapshot_write_failed", error.to_string()))
 }
 
 fn snapshot_path(repository_root: &Path, hash: &str) -> std::path::PathBuf {
