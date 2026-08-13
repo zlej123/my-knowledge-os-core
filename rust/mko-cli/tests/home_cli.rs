@@ -229,14 +229,22 @@ mod macos {
     /// A record whose generated projection is gone: Core reports it blocked and
     /// wanting diagnosis, which is the state this guidance has to notice.
     fn seed_blocked_record(repository: &Path) {
+        seed_pending_record(repository, "paper", "Seeded paper");
+    }
+
+    fn seed_pending_record(repository: &Path, slug: &str, title: &str) {
         let provider = repository.parent().unwrap().join("seed-inbox");
         fs::create_dir_all(&provider).unwrap();
-        fs::write(provider.join("paper.pdf"), b"%PDF-1.7\nfixture").unwrap();
+        fs::write(
+            provider.join(format!("{slug}.pdf")),
+            format!("%PDF-1.7\nfixture {slug}").as_bytes(),
+        )
+        .unwrap();
         let asset =
             mko_core::asset_v2::register_pdf_asset_v2(mko_core::asset_v2::RegisterAssetRequestV2 {
                 repository_root: repository,
                 provider_root: &provider,
-                logical_locator: "paper.pdf",
+                logical_locator: &format!("{slug}.pdf"),
                 hydration_confirmation: mko_core::asset_v2::HydrationConfirmationV2::NotConfirmed,
             })
             .unwrap()
@@ -245,7 +253,7 @@ mod macos {
             &asset,
             &["Evidence text for the test.".into()],
             mko_core::model_v2::PreparedMetadataV2 {
-                title: Some("Seeded paper".into()),
+                title: Some(title.to_owned()),
                 authors: Vec::new(),
                 created_at: None,
             },
@@ -259,7 +267,7 @@ mod macos {
         };
         let response = mko_core::model_v2::SourceResponseV2 {
             schema_version: 2,
-            title: "Seeded paper".into(),
+            title: title.to_owned(),
             authors: Vec::new(),
             publication_date: None,
             one_sentence_summary: "A bounded summary.".into(),
@@ -560,6 +568,61 @@ mod macos {
         assert_eq!(
             inside["data"]["healthy"], true,
             "a configured machine must diagnose as configured: {inside}"
+        );
+    }
+
+    // The queue is keyed by Asset id — a content hash — so taking its first
+    // item meant the lexicographically smallest hash, the same one on every
+    // launch. Deferring leaves an item exactly where it was, and `mko queue`
+    // (the only source of the id `mko review <ID>` needs) is a hidden command.
+    // With several items pending, all but one were unreachable from the home
+    // screen. No test asked whether the owner could get to the next one.
+    #[test]
+    #[allow(deprecated)]
+    fn every_pending_item_can_be_reached_from_the_review_screen() {
+        let root = tempdir().unwrap();
+        let repository = root.path().join("v3-kb");
+        let provider = root.path().join("provider");
+        scaffold_personal_kb_v2(&repository).unwrap();
+        fs::create_dir(&provider).unwrap();
+        seed_pending_record(&repository, "alpha", "첫 번째 문서");
+        seed_pending_record(&repository, "beta", "두 번째 문서");
+        seed_pending_record(&repository, "gamma", "세 번째 문서");
+
+        let output = Command::new(assert_cmd::cargo::cargo_bin("mko"))
+            .arg("review")
+            .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+            .env("HOME", root.path())
+            .current_dir(&repository)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child.stdin.take().unwrap().write_all(b"3\n")?;
+                child.wait_with_output()
+            })
+            .unwrap();
+
+        let screen = String::from_utf8_lossy(&output.stdout);
+        for title in ["첫 번째 문서", "두 번째 문서", "세 번째 문서"] {
+            assert!(
+                screen.contains(title),
+                "every pending item must be offered, not just the first: {screen}"
+            );
+        }
+        assert!(screen.contains("검토 대기 3개"), "{screen}");
+        // What matters is that choosing item 3 was accepted and carried through
+        // to publication. Publication then refuses for its own reasons — these
+        // fixtures are blocked, and approval needs a real terminal — but a
+        // selection error or an empty queue would mean the owner never got to
+        // choose at all, which is the defect this guards.
+        let reported = format!("{screen}{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            !reported.contains("review_selection_invalid")
+                && !reported.contains("review_queue_empty"),
+            "choosing a listed item must reach publication: {reported}"
         );
     }
 

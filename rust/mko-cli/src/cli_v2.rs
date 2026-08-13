@@ -304,6 +304,71 @@ fn record_write_data(result: mko_core::records_v2::RecordWriteResultV2) -> Recor
     }
 }
 
+/// Lets the owner pick which pending item to review.
+///
+/// This used to take the first item of the queue and nothing else. The queue is
+/// keyed by Asset id — a content hash — so "first" meant the lexicographically
+/// smallest hash, the same item every single time, and `[d] 나중에` leaves an
+/// item exactly where it was. With eight items pending, seven of them could not
+/// be reached from the home screen at all; the only route was `mko review <ID>`
+/// with a 70-character id obtained from `mko queue`, which is a hidden command.
+fn choose_review_item(repository: &Path) -> Result<String, MkoError> {
+    let items = derive_queue_v2(repository)?.items;
+    let (first, rest) = items
+        .split_first()
+        .ok_or_else(|| MkoError::new("review_queue_empty", "there is no pending review item"))?;
+    if rest.is_empty() {
+        return Ok(first.item_id.clone());
+    }
+
+    println!();
+    println!("검토 대기 {}개", items.len());
+    for (index, item) in items.iter().enumerate() {
+        println!(
+            "{}. {} [{} / {}]",
+            index + 1,
+            item.title,
+            item_type_label(&item.item_type),
+            state_label(&item.state),
+        );
+        println!("   다음 작업: {}", action_label(&item.next_action));
+    }
+    println!();
+    print!("검토할 항목 번호 [Enter: 1번] › ");
+    std::io::stdout()
+        .flush()
+        .map_err(|error| MkoError::new("output_failed", error.to_string()))?;
+    let mut selected = String::new();
+    std::io::stdin()
+        .read_line(&mut selected)
+        .map_err(|error| MkoError::new("review_input_failed", error.to_string()))?;
+    let selected = selected.trim();
+    if selected.is_empty() {
+        return Ok(first.item_id.clone());
+    }
+    selected
+        .parse::<usize>()
+        .ok()
+        .filter(|index| (1..=items.len()).contains(index))
+        .map(|index| items[index - 1].item_id.clone())
+        .ok_or_else(|| MkoError::new("review_selection_invalid", "표시된 항목 번호를 입력하세요"))
+}
+
+/// What is left after a decision. Finishing one item and being told nothing
+/// about the rest is the point at which the owner has to go find out for
+/// themselves whether they are done.
+fn report_review_remaining(repository: &Path) {
+    let Ok(queue) = derive_queue_v2(repository) else {
+        return;
+    };
+    match queue.items.len() {
+        0 => println!("검토할 항목이 모두 끝났습니다."),
+        remaining => {
+            println!("검토 대기 {remaining}개가 남았습니다: `mko`로 이어서 볼 수 있습니다.")
+        }
+    }
+}
+
 pub fn review(
     repository: &Path,
     stable_id: Option<&str>,
@@ -311,24 +376,22 @@ pub fn review(
 ) -> Result<(), MkoError> {
     let selected_id = match stable_id {
         Some(stable_id) => stable_id.to_owned(),
-        None => derive_queue_v2(repository)?
-            .items
-            .into_iter()
-            .next()
-            .map(|item| item.item_id)
-            .ok_or_else(|| {
-                MkoError::new("review_queue_empty", "there is no pending review item")
-            })?,
+        None => choose_review_item(repository)?,
     };
     match publish_tty_review_v2(repository, &selected_id, clock)? {
-        TtyReviewOutcomeV2::Approved(publication) => report_review_publication(&publication)?,
+        TtyReviewOutcomeV2::Approved(publication) => {
+            report_review_publication(&publication)?;
+            report_review_remaining(repository);
+        }
         TtyReviewOutcomeV2::ChangesRequested(publication) => {
             println!("수정을 요청했습니다: {}", publication.record.id);
             println!("다음 초안이 준비되면 이 항목이 다시 검토 대기열에 올라옵니다.");
+            report_review_remaining(repository);
         }
         TtyReviewOutcomeV2::Deferred(publication) => {
             println!("나중에 보기로 했습니다: {}", publication.record.id);
             println!("이 항목은 검토 대기열에 그대로 남아 있습니다.");
+            report_review_remaining(repository);
         }
         TtyReviewOutcomeV2::Cancelled => {
             println!("아무것도 바꾸지 않았습니다.");
