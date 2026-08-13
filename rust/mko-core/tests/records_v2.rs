@@ -646,3 +646,70 @@ fn revision_count(revision_path: &std::path::Path) -> usize {
         .unwrap()
         .count()
 }
+
+// The schema under `schemas/` is the contract an agent fetches with
+// `mko schema show` and validates its own output against. It mirrored four of
+// Core's five grounding rules. The missing one — an empty evidence list is
+// legal only for an uncertainty kind with an explicit missing/conflicting
+// basis, or for model knowledge — meant the schema accepted five unit shapes
+// that Core rejects at write time, so an agent could validate, do the work, and
+// be refused afterwards.
+#[test]
+fn the_published_schema_rejects_everything_core_rejects() {
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../../schemas/v2/knowledge-response.schema.json"
+    ))
+    .unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+
+    for kind in [
+        "interpretation",
+        "hypothesis",
+        "uncertainty",
+        "counterargument",
+        "open_question",
+    ] {
+        let unevidenced = json!({
+            "schema_version": 2,
+            "synthesis": "s",
+            "units": [{
+                "kind": kind, "title": "t", "body": "b", "confidence": "high",
+                "basis": "evidence", "evidence_refs": [], "tags": []
+            }]
+        });
+        let mut environment = new_environment();
+        environment.knowledge = serde_json::from_value(unevidenced.clone()).unwrap();
+        assert_eq!(
+            write_knowledge(&environment, &environment.knowledge, None)
+                .unwrap_err()
+                .code(),
+            "knowledge_grounding_invalid",
+            "Core must reject an unevidenced {kind}"
+        );
+        assert!(
+            !validator.is_valid(&unevidenced),
+            "the published schema must reject the same unevidenced {kind}"
+        );
+    }
+
+    // The shapes Core does allow without evidence must still validate, or the
+    // schema would have overcorrected into refusing legal work.
+    for (kind, basis) in [
+        ("counterargument", "missing_evidence"),
+        ("open_question", "conflicting_evidence"),
+        ("background", "model_knowledge"),
+    ] {
+        let legal = json!({
+            "schema_version": 2,
+            "synthesis": "s",
+            "units": [{
+                "kind": kind, "title": "t", "body": "b", "confidence": "high",
+                "basis": basis, "evidence_refs": [], "tags": []
+            }]
+        });
+        assert!(
+            validator.is_valid(&legal),
+            "the schema must still accept a legal unevidenced {kind}/{basis}"
+        );
+    }
+}

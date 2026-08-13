@@ -667,7 +667,18 @@ fn knowledge_os_skill_references_machine_validated_semantic_contracts() {
     assert!(text.contains("mko schema show review-feedback-input-v2 --format json-v2"));
     assert!(text.contains("matching the returned schema"));
     assert!(text.contains("Every key claim needs at least one exact"));
-    assert!(text.contains("LLM opinion belongs only in `interpretation` or `hypothesis`"));
+    // This assertion used to pin the sentence "LLM opinion belongs only in
+    // `interpretation` or `hypothesis`", which contradicted Core: model
+    // knowledge is restricted to `background` and `counterargument`, so an
+    // agent obeying the Skill had to file unsupported opinion as an
+    // `interpretation` with fabricated references. The test enforced the
+    // laundering that `background`/`model_knowledge` was built to prevent.
+    assert!(text.contains("`background` unit with `model_knowledge` basis and no evidence"));
+    assert!(text.contains("`counterargument` when it argues against the document"));
+    assert!(
+        !text.contains("LLM opinion belongs only in `interpretation` or `hypothesis`"),
+        "the Skill must not send unsupported opinion to a kind that requires evidence"
+    );
 }
 
 #[test]
