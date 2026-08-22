@@ -4,7 +4,7 @@ use std::{
     process::Command,
 };
 
-use crate::{atomic::write_new, error::MkoError};
+use crate::{atomic::write_new, config_v2::KnowledgeConfigV2, error::MkoError};
 
 pub const PRE_COMMIT_SCRIPT: &str = "#!/usr/bin/env bash\n# My Knowledge OS pre-commit v0.1\nset -euo pipefail\nmko check --repo \"$(git rev-parse --show-toplevel)\" --staged\n";
 
@@ -92,6 +92,7 @@ pub fn inspect_hook(repository_root: &Path) -> Result<HookInspection, MkoError> 
 }
 
 pub fn install_hooks(repository_root: &Path) -> Result<HookInstallResult, MkoError> {
+    refuse_on_v2_knowledge_base(repository_root)?;
     let inspection = inspect_hook(repository_root)?;
     let repository_root = inspection.repository_root;
     if inspection.state == HookState::Managed {
@@ -150,6 +151,24 @@ pub fn install_hooks(repository_root: &Path) -> Result<HookInstallResult, MkoErr
         result: "installed".into(),
         hook_path: ".githooks/pre-commit".into(),
     })
+}
+
+/// The pre-commit script runs `mko check`, which reads the v0.1 record
+/// model — YAML front matter on every Source and Knowledge file. A v0.3
+/// knowledge base stores revisions as `# Source revision` plus canonical JSON
+/// and has no front matter at all, so the check rejects every record it holds.
+/// Installing it therefore does not protect a v0.3 repository; it makes every
+/// `git commit` fail. Found on the first real commit of the owner's live
+/// knowledge base, minutes after doctor had demanded the hook.
+fn refuse_on_v2_knowledge_base(repository_root: &Path) -> Result<(), MkoError> {
+    let repository_root = canonical_repository_root(repository_root)?;
+    if KnowledgeConfigV2::read(&repository_root).is_ok() {
+        return Err(MkoError::new(
+            "hook_not_supported",
+            "the pre-commit check reads v0.1 records only and would reject every v0.3 revision; no hook was installed",
+        ));
+    }
+    Ok(())
 }
 
 fn canonical_repository_root(repository_root: &Path) -> Result<PathBuf, MkoError> {

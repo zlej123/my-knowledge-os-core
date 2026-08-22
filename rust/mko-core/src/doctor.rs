@@ -741,11 +741,30 @@ fn state_after_access(
 }
 
 fn hook_check(repository: &Path) -> DoctorCheck {
+    // The managed hook runs `mko check`, which understands v0.1 records only.
+    // On a v0.3 knowledge base it rejects every revision, so "installed" is
+    // the broken state and "missing" is the sound one. Doctor used to demand
+    // the hook here and call the result a repair; following that advice on
+    // the owner's live knowledge base made every commit fail.
+    let is_v2 = KnowledgeConfigV2::read(repository).is_ok();
     match inspect_hook(repository) {
+        Ok(inspection) if inspection.state == HookState::Managed && is_v2 => blocked(
+            DiagnosticArea::Hook,
+            "hook_incompatible",
+            "the installed pre-commit check reads v0.1 records only and rejects every v0.3 revision; remove .githooks/pre-commit and unset core.hooksPath",
+            Some(repository),
+            RecoveryKind::Repair,
+        ),
         Ok(inspection) if inspection.state == HookState::Managed => healthy(
             DiagnosticArea::Hook,
             "hook_managed",
             "managed Git hook is installed",
+            Some(repository),
+        ),
+        Ok(_) if is_v2 => healthy(
+            DiagnosticArea::Hook,
+            "hook_not_applicable",
+            "v0.3 records are not covered by the pre-commit check yet, so no hook is required",
             Some(repository),
         ),
         Ok(_) => blocked(
@@ -855,6 +874,7 @@ fn issue_priority(code: &str) -> usize {
         "provider_inspection_failed",
         "provider_hydration_failed",
         "hook_conflict",
+        "hook_incompatible",
         "hook_missing",
         "hook_unreadable",
         "stale_lock",
