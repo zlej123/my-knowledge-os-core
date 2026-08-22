@@ -14,7 +14,15 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 use crate::error::MkoError;
 
+/// How long an acquirer waits for another holder to finish.
 const LOCK_WAIT: Duration = Duration::from_secs(1);
+/// How long an acquirer's own bounded safety scans may keep timing out before
+/// it gives up. Kept apart from LOCK_WAIT on purpose: before this, a single
+/// budget covered both waiting for a contender and doing our own scans and
+/// fsyncs, and when slow I/O exhausted it the error said "someone else holds
+/// the lock" — on a machine where nobody did. Three of the last fifteen pushes
+/// to main failed that way, each from one process in an empty directory.
+const LOCK_WORK_BUDGET: Duration = Duration::from_secs(4);
 const LOCK_RETRY: Duration = Duration::from_millis(10);
 const PUBLICATION_STALE_TTL: ChronoDuration = ChronoDuration::minutes(15);
 const PUBLICATION_SCAN_ENTRY_LIMIT: usize = 64;
@@ -481,13 +489,18 @@ impl<'a> CapabilityPublicationLock<'a> {
         H: FnMut(&[PublicationQuarantine]),
     {
         let lock_filename = format!(".{filename}.publish.lock");
-        let deadline = Instant::now() + LOCK_WAIT;
+        let started = Instant::now();
+        let contention_deadline = started + LOCK_WAIT;
+        let work_deadline = started + LOCK_WORK_BUDGET;
         let mut saw_lock_contention = false;
         loop {
-            if Instant::now() >= deadline {
+            if saw_lock_contention && Instant::now() >= contention_deadline {
                 return Err(publication_locked_error());
             }
-            let scan_deadline = publication_scan_deadline(deadline);
+            if Instant::now() >= work_deadline {
+                return Err(acquire_exhausted_error(saw_lock_contention));
+            }
+            let scan_deadline = publication_scan_deadline(work_deadline);
             if let Err(error) = resolve_publication_quarantines_with_observer(
                 directory,
                 &lock_filename,
@@ -496,17 +509,18 @@ impl<'a> CapabilityPublicationLock<'a> {
             ) {
                 if error.code() == "registry_locked" {
                     saw_lock_contention = true;
-                    if Instant::now() < deadline {
-                        thread::sleep(LOCK_RETRY);
-                        continue;
-                    }
-                }
-                if error.code() == "registry_scan_timeout" {
-                    if Instant::now() < deadline {
+                    if Instant::now() < contention_deadline {
                         thread::sleep(LOCK_RETRY);
                         continue;
                     }
                     return Err(publication_locked_error());
+                }
+                if error.code() == "registry_scan_timeout" {
+                    if Instant::now() < work_deadline {
+                        thread::sleep(LOCK_RETRY);
+                        continue;
+                    }
+                    return Err(acquire_exhausted_error(saw_lock_contention));
                 }
                 if error.code() == "registry_scan_limit" && saw_lock_contention {
                     return Err(publication_locked_error());
@@ -527,7 +541,7 @@ impl<'a> CapabilityPublicationLock<'a> {
                     file.sync_all().map_err(lock_error)?;
                     sync_capability_directory(directory)?;
                     let identity = stable_capability_identity(&file)?;
-                    let scan_deadline = publication_scan_deadline(deadline);
+                    let scan_deadline = publication_scan_deadline(work_deadline);
                     if let Err(error) =
                         ensure_no_publication_quarantine(directory, &lock_filename, scan_deadline)
                     {
@@ -540,17 +554,18 @@ impl<'a> CapabilityPublicationLock<'a> {
                         );
                         if error.code() == "registry_locked" {
                             saw_lock_contention = true;
-                            if Instant::now() < deadline {
-                                thread::sleep(LOCK_RETRY);
-                                continue;
-                            }
-                        }
-                        if error.code() == "registry_scan_timeout" {
-                            if Instant::now() < deadline {
+                            if Instant::now() < contention_deadline {
                                 thread::sleep(LOCK_RETRY);
                                 continue;
                             }
                             return Err(publication_locked_error());
+                        }
+                        if error.code() == "registry_scan_timeout" {
+                            if Instant::now() < work_deadline {
+                                thread::sleep(LOCK_RETRY);
+                                continue;
+                            }
+                            return Err(acquire_exhausted_error(saw_lock_contention));
                         }
                         if error.code() == "registry_scan_limit" && saw_lock_contention {
                             return Err(publication_locked_error());
@@ -568,7 +583,7 @@ impl<'a> CapabilityPublicationLock<'a> {
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     saw_lock_contention = true;
-                    if Instant::now() >= deadline {
+                    if Instant::now() >= contention_deadline {
                         return Err(publication_locked_error());
                     }
                     thread::sleep(LOCK_RETRY);
@@ -1033,6 +1048,21 @@ fn registry_quarantine_invalid_error() -> MkoError {
     )
 }
 
+/// What an acquirer reports when it runs out of budget. "Locked" is a claim
+/// about another process and is made only when one was actually observed —
+/// a live holder, a live quarantine, or create_new refusing. Otherwise the
+/// honest report is that this machine's own scans did not finish.
+fn acquire_exhausted_error(saw_lock_contention: bool) -> MkoError {
+    if saw_lock_contention {
+        publication_locked_error()
+    } else {
+        MkoError::new(
+            "registry_scan_timeout",
+            "publication safety scan kept timing out on this machine with no other holder observed; retry, and check the disk if it persists",
+        )
+    }
+}
+
 fn publication_locked_error() -> MkoError {
     MkoError::new(
         "registry_locked",
@@ -1134,23 +1164,35 @@ impl PublicationLock {
         let directory =
             Dir::open_ambient_dir(parent, cap_std::ambient_authority()).map_err(lock_error)?;
         let lock_filename = format!(".{filename}.publish.lock");
-        let deadline = Instant::now() + LOCK_WAIT;
+        let started = Instant::now();
+        let contention_deadline = started + LOCK_WAIT;
+        let work_deadline = started + LOCK_WORK_BUDGET;
+        let mut saw_lock_contention = false;
         loop {
-            if Instant::now() >= deadline {
+            if saw_lock_contention && Instant::now() >= contention_deadline {
                 return Err(publication_locked_error());
             }
-            let scan_deadline = publication_scan_deadline(deadline);
+            if Instant::now() >= work_deadline {
+                return Err(acquire_exhausted_error(saw_lock_contention));
+            }
+            let scan_deadline = publication_scan_deadline(work_deadline);
             if let Err(error) =
                 resolve_publication_quarantines(&directory, &lock_filename, scan_deadline)
             {
-                if matches!(error.code(), "registry_locked" | "registry_scan_timeout")
-                    && Instant::now() < deadline
-                {
-                    thread::sleep(LOCK_RETRY);
-                    continue;
+                if error.code() == "registry_locked" {
+                    saw_lock_contention = true;
+                    if Instant::now() < contention_deadline {
+                        thread::sleep(LOCK_RETRY);
+                        continue;
+                    }
+                    return Err(publication_locked_error());
                 }
                 if error.code() == "registry_scan_timeout" {
-                    return Err(publication_locked_error());
+                    if Instant::now() < work_deadline {
+                        thread::sleep(LOCK_RETRY);
+                        continue;
+                    }
+                    return Err(acquire_exhausted_error(saw_lock_contention));
                 }
                 return Err(error);
             }
@@ -1168,7 +1210,7 @@ impl PublicationLock {
                     file.sync_all().map_err(lock_error)?;
                     sync_capability_directory(&directory)?;
                     let identity = stable_capability_identity(&file)?;
-                    let scan_deadline = publication_scan_deadline(deadline);
+                    let scan_deadline = publication_scan_deadline(work_deadline);
                     if let Err(error) =
                         ensure_no_publication_quarantine(&directory, &lock_filename, scan_deadline)
                     {
@@ -1179,14 +1221,20 @@ impl PublicationLock {
                             identity,
                             Some(&expected_contents),
                         );
-                        if matches!(error.code(), "registry_locked" | "registry_scan_timeout")
-                            && Instant::now() < deadline
-                        {
-                            thread::sleep(LOCK_RETRY);
-                            continue;
+                        if error.code() == "registry_locked" {
+                            saw_lock_contention = true;
+                            if Instant::now() < contention_deadline {
+                                thread::sleep(LOCK_RETRY);
+                                continue;
+                            }
+                            return Err(publication_locked_error());
                         }
                         if error.code() == "registry_scan_timeout" {
-                            return Err(publication_locked_error());
+                            if Instant::now() < work_deadline {
+                                thread::sleep(LOCK_RETRY);
+                                continue;
+                            }
+                            return Err(acquire_exhausted_error(saw_lock_contention));
                         }
                         return Err(error);
                     }
@@ -1200,7 +1248,8 @@ impl PublicationLock {
                     });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if Instant::now() >= deadline {
+                    saw_lock_contention = true;
+                    if Instant::now() >= contention_deadline {
                         return Err(publication_locked_error());
                     }
                     thread::sleep(LOCK_RETRY);
@@ -1247,6 +1296,8 @@ fn sync_directory(_path: &Path) -> Result<(), MkoError> {
 
 #[cfg(test)]
 mod tests {
+    use super::{LOCK_WAIT, LOCK_WORK_BUDGET, PUBLICATION_SCAN_TIME_LIMIT};
+    use std::thread;
     use std::{
         fs,
         io::Write,
@@ -1655,6 +1706,80 @@ mod tests {
         };
 
         assert_eq!(error.code(), "registry_scan_limit");
+        let _ = fs::remove_dir_all(directory_path);
+    }
+
+    // Three of the last fifteen pushes to main failed with registry_locked from
+    // one process in an empty directory: the acquirer's own scans ran out the
+    // single one-second budget and the error blamed a holder that did not
+    // exist. The stale quarantine here gives the scan real work to do, and the
+    // observer sleeps past the scan slice so every scan times out — slow I/O,
+    // simulated. Nobody holds the lock, so "locked" would be a lie.
+    #[test]
+    fn an_uncontended_acquire_whose_scans_keep_timing_out_says_so_not_locked() {
+        let directory_path = test_directory();
+        let directory = Dir::open_ambient_dir(&directory_path, ambient_authority()).unwrap();
+        let quarantine = format!("..record.md.publish.lock.cleanup-{}", "e".repeat(32));
+        let stale = serde_json::json!({
+            "pid": u32::MAX,
+            "hostname": hostname::get().unwrap().to_string_lossy(),
+            "started_at": "2000-01-01T00:00:00Z",
+            "owner_token": "e".repeat(32),
+        });
+        directory
+            .write(&quarantine, serde_json::to_vec(&stale).unwrap())
+            .unwrap();
+
+        let started = Instant::now();
+        let error = match CapabilityPublicationLock::acquire_with_quarantine_observer(
+            &directory,
+            "record.md",
+            |_| thread::sleep(PUBLICATION_SCAN_TIME_LIMIT + Duration::from_millis(200)),
+        ) {
+            Ok(_) => panic!("scans that never finish must not yield a lock"),
+            Err(error) => error,
+        };
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            error.code(),
+            "registry_scan_timeout",
+            "no other holder was ever observed, so the report must not claim one: {}",
+            error.message()
+        );
+        assert!(
+            elapsed >= LOCK_WAIT,
+            "own-work timeouts must be allowed past the contention wait, got {elapsed:?}"
+        );
+        assert!(
+            directory.metadata(".record.md.publish.lock").is_err(),
+            "a failed acquire must not leave its own lock behind"
+        );
+        let _ = fs::remove_dir_all(directory_path);
+    }
+
+    // The separation must not slow down the honest case: a lock that really
+    // is held still reports locked, and within the contention wait — not after
+    // the longer work budget.
+    #[test]
+    fn a_held_lock_still_reports_locked_within_the_contention_wait() {
+        let directory_path = test_directory();
+        let directory = Dir::open_ambient_dir(&directory_path, ambient_authority()).unwrap();
+        let held = CapabilityPublicationLock::acquire(&directory, "record.md").unwrap();
+
+        let started = Instant::now();
+        let error = match CapabilityPublicationLock::acquire(&directory, "record.md") {
+            Ok(_) => panic!("a held lock must not be acquired twice"),
+            Err(error) => error,
+        };
+        let elapsed = started.elapsed();
+
+        assert_eq!(error.code(), "registry_locked");
+        assert!(
+            elapsed < LOCK_WORK_BUDGET,
+            "contention must be reported after LOCK_WAIT, not after the work budget: {elapsed:?}"
+        );
+        drop(held);
         let _ = fs::remove_dir_all(directory_path);
     }
 

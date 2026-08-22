@@ -649,3 +649,39 @@ private remote (`zlej123/my-knowledge-os-kb`), the v0.1 hook was removed again
 healthy. The lesson is the one this file already carries twice: the defect was
 found by doing the workflow on the real repository, minutes after a review had
 called the surrounding state sound.
+
+## The publication lock blamed a phantom holder — fixed 2026-08-22
+
+`docs/BACKLOG.md` above marks the publication-lock timeout "resolved
+2026-08-03" (commit `8a02542`, "report a held publication lock whatever the
+machine speed"). That fix made a *held* lock report correctly. Its mirror
+image stayed: an *unheld* lock on a slow machine also reported
+`registry_locked`. Three of the last fifteen pushes to `main` failed that way
+— Windows, one process, one thread, an empty directory — and the 2026-08-13
+verification review named it the real defect behind the "flake".
+
+**Mechanism.** Both acquire loops used one budget, `LOCK_WAIT` (1 s), for two
+different things: waiting for another holder to finish, and doing the
+acquirer's own safety scans and fsyncs. On Windows a single scan slice is that
+whole second. When slow I/O exhausted the budget, `registry_scan_timeout` was
+converted to `registry_locked` — "someone else holds the lock" — even when
+`saw_lock_contention` was false. The acquirer then deleted its own lock and
+told the caller to go inspect a lock nobody held. The v2 envelope made it
+worse: `registry_locked` was unmapped, so the agent received
+`retryable: false, next_action: none` for a transient condition.
+
+**Fix.** Two budgets. `LOCK_WAIT` still bounds waiting on a contender.
+`LOCK_WORK_BUDGET` (4 s) bounds how long the acquirer's own bounded scans may
+keep timing out. "Locked" is now said only when contention was actually
+observed — a live holder, a live quarantine, or `create_new` refusing.
+Otherwise the honest report is `registry_scan_timeout`: this machine's own
+scans did not finish; retry, check the disk if it persists. Both outcomes are
+retryable in the v2 envelope with `next_action: retry`; the scan-limit,
+symlinked-destination, and invalid-quarantine outcomes map to repair.
+
+**Recorded, not explained.** On 2026-08-22 a different test in the same
+module, `huge_publication_quarantine_record_is_bounded`, failed once on an
+ubuntu runner — acquire returned `Ok` with a 1 MB quarantine record present —
+and passed on rerun with no code change. Its mechanism was not found; it is
+the first sighting of that signature. If it recurs, the place to look is how
+the scan enumerates quarantine entries under a tight slice.
