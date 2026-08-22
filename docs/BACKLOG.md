@@ -605,3 +605,47 @@ copy or an upstream fork. And `mko ui` (PR #38, another session) shipped a web
 UI six days after this file recorded "Not built, deliberately: a web UI,"
 without the version bump `AGENTS.md` requires, so the installed binary does not
 have the command it documents.
+
+## The v0.1 pre-commit hook wedges a v0.3 knowledge base — fixed 2026-08-22
+
+**How it surfaced.** The forward-risk review found the live knowledge base had
+never been put under Git: one copy, one disk, and `mko doctor` calling that
+healthy. The owner approved `git init` plus a private remote. The first commit
+and push succeeded. Doctor then reported `hook_missing` as a blocked check with
+`next_action: repair`, so the product's own remedy was run — `mko hooks
+install`. The very next commit failed:
+
+```
+front_matter_invalid sources/…/revisions/sha256-….md: Markdown front matter is malformed
+```
+
+on every staged v0.3 revision — twelve files the Core itself had written.
+
+**Why.** The managed hook runs `mko check --staged`. `check.rs` reads the v0.1
+record model only: it parses every Source and Knowledge file as Markdown with
+YAML front matter. A v0.3 revision is `# Source revision` followed by canonical
+JSON and has no front matter by design, so the check rejects all of them.
+`hooks.rs` does not look at the knowledge base's generation, and neither did
+doctor's `hook_check`. Doctor therefore demanded, on a v0.3 repository, a hook
+that makes every `git commit` fail — and would have reported the resulting
+state as `hook_managed`, healthy.
+
+**Fix.** On a v0.3 knowledge base: doctor reports a missing hook as
+`hook_not_applicable` (healthy — v0.3 records are not covered by the check yet),
+reports an installed v0.1 hook as `hook_incompatible` (blocked, repair, with
+the two commands that remove it), and `mko hooks install` refuses with
+`hook_not_supported` and leaves nothing behind. v0.1 knowledge bases are
+unchanged.
+
+**Not done, recorded as the first occurrence.** A v0.3 knowledge base has no
+working pre-commit check at all. `mko check` would need to understand v0.3
+revisions — or the hook would need a v0.3 check — before any commit-time
+validation exists for current repositories. One occurrence; it earns design
+work on the second.
+
+**Live state after the fix.** The live knowledge base is under Git with a
+private remote (`zlej123/my-knowledge-os-kb`), the v0.1 hook was removed again
+(`git config --unset core.hooksPath`, `.githooks/` deleted), and doctor reports
+healthy. The lesson is the one this file already carries twice: the defect was
+found by doing the workflow on the real repository, minutes after a review had
+called the surrounding state sound.

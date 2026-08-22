@@ -424,3 +424,127 @@ fn a_knowledge_base_without_git_is_not_reported_as_damaged() {
     assert_eq!(hook["status"], "healthy");
     assert_eq!(hook["next_action"], Value::Null);
 }
+
+// A v0.3 knowledge base under Git, with no hook, is the sound state: the
+// managed hook runs `mko check`, which reads v0.1 records only. Doctor used to
+// demand the hook here and call it a repair. The owner followed that advice on
+// the live knowledge base, and every commit then failed front_matter_invalid
+// on revisions the Core itself had written.
+#[test]
+#[allow(deprecated)]
+fn a_v03_knowledge_base_under_git_is_not_told_to_install_the_v01_hook() {
+    let root = tempfile::tempdir().unwrap();
+    let repository = root.path().join("kb");
+    mko_core::scaffold_v2::scaffold_personal_kb_v2(&repository).unwrap();
+    git(&repository, &["init", "--quiet"]);
+
+    let report: Value = serde_json::from_slice(
+        &Command::cargo_bin("mko")
+            .unwrap()
+            .args(["doctor", "--repo"])
+            .arg(&repository)
+            .args(["--format", "json-v2"])
+            .assert()
+            .get_output()
+            .stdout,
+    )
+    .unwrap();
+
+    let hook = report["data"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["code"].as_str().unwrap().starts_with("hook_"))
+        .expect("doctor must say something about hooks");
+    assert_eq!(hook["code"], "hook_not_applicable", "{report}");
+    assert_eq!(hook["status"], "healthy", "{report}");
+    assert_eq!(hook["next_action"], Value::Null, "{report}");
+}
+
+// The opposite case is the one that actually bit: the v0.1 hook installed in a
+// v0.3 knowledge base. That is not "managed, healthy" — it rejects every
+// revision, so it must be reported as the defect it is, with the way out.
+#[test]
+#[allow(deprecated)]
+fn a_v01_hook_inside_a_v03_knowledge_base_is_reported_as_incompatible() {
+    let root = tempfile::tempdir().unwrap();
+    let repository = root.path().join("kb");
+    mko_core::scaffold_v2::scaffold_personal_kb_v2(&repository).unwrap();
+    git(&repository, &["init", "--quiet"]);
+    let hooks = repository.join(".githooks");
+    fs::create_dir(&hooks).unwrap();
+    fs::write(hooks.join("pre-commit"), mko_core::hooks::PRE_COMMIT_SCRIPT).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(hooks.join("pre-commit"), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    git(
+        &repository,
+        &["config", "--local", "core.hooksPath", ".githooks"],
+    );
+
+    let report: Value = serde_json::from_slice(
+        &Command::cargo_bin("mko")
+            .unwrap()
+            .args(["doctor", "--repo"])
+            .arg(&repository)
+            .args(["--format", "json-v2"])
+            .assert()
+            .get_output()
+            .stdout,
+    )
+    .unwrap();
+
+    let hook = report["data"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["code"].as_str().unwrap().starts_with("hook_"))
+        .expect("doctor must say something about hooks");
+    assert_eq!(hook["code"], "hook_incompatible", "{report}");
+    assert_eq!(hook["status"], "blocked", "{report}");
+    assert_eq!(hook["next_action"], "repair", "{report}");
+    assert_eq!(report["data"]["healthy"], false, "{report}");
+}
+
+// And the installer must refuse to create that state in the first place,
+// leaving nothing behind: no .githooks, no core.hooksPath.
+#[test]
+#[allow(deprecated)]
+fn hooks_install_refuses_a_v03_knowledge_base_and_leaves_nothing_behind() {
+    let root = tempfile::tempdir().unwrap();
+    let repository = root.path().join("kb");
+    mko_core::scaffold_v2::scaffold_personal_kb_v2(&repository).unwrap();
+    git(&repository, &["init", "--quiet"]);
+
+    let output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["hooks", "install", "--repo"])
+        .arg(&repository)
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(reported.contains("hook_not_supported"), "{reported}");
+    assert!(
+        !repository.join(".githooks").exists(),
+        "a refused install must not leave a hook directory behind"
+    );
+    let hooks_path = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repository)
+        .args(["config", "--get", "core.hooksPath"])
+        .output()
+        .unwrap();
+    assert!(
+        !hooks_path.status.success(),
+        "a refused install must not set core.hooksPath"
+    );
+}
