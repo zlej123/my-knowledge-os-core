@@ -312,13 +312,19 @@ fn record_write_data(result: mko_core::records_v2::RecordWriteResultV2) -> Recor
 /// item exactly where it was. With eight items pending, seven of them could not
 /// be reached from the home screen at all; the only route was `mko review <ID>`
 /// with a 70-character id obtained from `mko queue`, which is a hidden command.
-fn choose_review_item(repository: &Path) -> Result<String, MkoError> {
-    let items = derive_queue_v2(repository)?.items;
+/// How many times a stray keystroke may be corrected before the owner is
+/// sent back to the shell. Bounded so garbage on a non-interactive stdin
+/// cannot spin this forever.
+const REVIEW_SELECTION_ATTEMPTS: usize = 3;
+
+fn choose_review_item(repository: &Path) -> Result<Option<String>, MkoError> {
+    let queue = derive_queue_v2(repository)?;
+    let items = queue.items;
     let (first, rest) = items
         .split_first()
         .ok_or_else(|| MkoError::new("review_queue_empty", "there is no pending review item"))?;
     if rest.is_empty() {
-        return Ok(first.item_id.clone());
+        return Ok(Some(first.item_id.clone()));
     }
 
     println!();
@@ -333,25 +339,59 @@ fn choose_review_item(repository: &Path) -> Result<String, MkoError> {
         );
         println!("   다음 작업: {}", action_label(&item.next_action));
     }
-    println!();
-    print!("검토할 항목 번호 [Enter: 1번] › ");
-    std::io::stdout()
-        .flush()
-        .map_err(|error| MkoError::new("output_failed", error.to_string()))?;
-    let mut selected = String::new();
-    std::io::stdin()
-        .read_line(&mut selected)
-        .map_err(|error| MkoError::new("review_input_failed", error.to_string()))?;
-    let selected = selected.trim();
-    if selected.is_empty() {
-        return Ok(first.item_id.clone());
+    if !queue.scan_complete || queue.remaining != 0 {
+        println!(
+            "주의: 검색이 완전하지 않습니다 (남은 항목: {}).",
+            queue.remaining
+        );
     }
-    selected
-        .parse::<usize>()
-        .ok()
-        .filter(|index| (1..=items.len()).contains(index))
-        .map(|index| items[index - 1].item_id.clone())
-        .ok_or_else(|| MkoError::new("review_selection_invalid", "표시된 항목 번호를 입력하세요"))
+    println!();
+
+    for attempt in 1..=REVIEW_SELECTION_ATTEMPTS {
+        print!("검토할 항목 번호 [Enter: 1번 · q: 닫기] › ");
+        std::io::stdout()
+            .flush()
+            .map_err(|error| MkoError::new("output_failed", error.to_string()))?;
+        let mut selected = String::new();
+        let read = std::io::stdin()
+            .read_line(&mut selected)
+            .map_err(|error| MkoError::new("review_input_failed", error.to_string()))?;
+        // Zero bytes is end of input, not an empty answer. Treating it as
+        // Enter reopened the very defect this screen replaced: a caller with
+        // a closed stdin silently got item 1 — the lexicographically smallest
+        // hash — every time. A closed input opens nothing.
+        if read == 0 {
+            return Err(MkoError::new(
+                "review_input_closed",
+                "선택 입력이 닫혔습니다; 대화형 터미널에서 `mko`를 다시 여세요",
+            ));
+        }
+        let selected = selected.trim();
+        if selected.is_empty() {
+            return Ok(Some(first.item_id.clone()));
+        }
+        if matches!(selected, "q" | "Q") {
+            return Ok(None);
+        }
+        if let Some(item) = selected
+            .parse::<usize>()
+            .ok()
+            .filter(|index| (1..=items.len()).contains(index))
+            .map(|index| &items[index - 1])
+        {
+            return Ok(Some(item.item_id.clone()));
+        }
+        if attempt < REVIEW_SELECTION_ATTEMPTS {
+            println!(
+                "표시된 항목 번호를 입력하세요 (1-{}, Enter: 1번, q: 닫기)",
+                items.len()
+            );
+        }
+    }
+    Err(MkoError::new(
+        "review_selection_invalid",
+        "표시된 항목 번호를 입력하세요",
+    ))
 }
 
 /// What is left after a decision. Finishing one item and being told nothing
@@ -376,7 +416,13 @@ pub fn review(
 ) -> Result<(), MkoError> {
     let selected_id = match stable_id {
         Some(stable_id) => stable_id.to_owned(),
-        None => choose_review_item(repository)?,
+        None => match choose_review_item(repository)? {
+            Some(selected_id) => selected_id,
+            None => {
+                println!("아무것도 열지 않았습니다.");
+                return Ok(());
+            }
+        },
     };
     match publish_tty_review_v2(repository, &selected_id, clock)? {
         TtyReviewOutcomeV2::Approved(publication) => {
@@ -385,7 +431,9 @@ pub fn review(
         }
         TtyReviewOutcomeV2::ChangesRequested(publication) => {
             println!("수정을 요청했습니다: {}", publication.record.id);
-            println!("다음 초안이 준비되면 이 항목이 다시 검토 대기열에 올라옵니다.");
+            println!(
+                "이 항목은 수정 요청 상태로 대기열에 남아 있고, 다음 초안이 준비되면 다시 검토할 수 있습니다."
+            );
             report_review_remaining(repository);
         }
         TtyReviewOutcomeV2::Deferred(publication) => {

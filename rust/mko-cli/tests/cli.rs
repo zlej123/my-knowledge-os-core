@@ -23,7 +23,7 @@ fn version_reports_the_product_release() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("mko 0.3.22"));
+        .stdout(predicate::str::contains("mko 0.3.23"));
 }
 
 #[test]
