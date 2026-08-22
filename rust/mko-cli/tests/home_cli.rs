@@ -228,11 +228,21 @@ mod macos {
     #[allow(deprecated)]
     /// A record whose generated projection is gone: Core reports it blocked and
     /// wanting diagnosis, which is the state this guidance has to notice.
+    /// A record whose projection has been removed: registered, drafted, and
+    /// blocked with "문제 진단" as its next action. The stuck-material tests
+    /// depend on exactly that shape.
     fn seed_blocked_record(repository: &Path) {
-        seed_pending_record(repository, "paper", "Seeded paper");
+        seed_record(repository, "paper", "Seeded paper", true);
     }
 
+    /// A healthy pending record — drafted, projected, waiting for review. The
+    /// review-screen tests need the card to actually open, which a blocked
+    /// target refuses before display.
     fn seed_pending_record(repository: &Path, slug: &str, title: &str) {
+        seed_record(repository, slug, title, false);
+    }
+
+    fn seed_record(repository: &Path, slug: &str, title: &str, blocked: bool) {
         let provider = repository.parent().unwrap().join("seed-inbox");
         fs::create_dir_all(&provider).unwrap();
         fs::write(
@@ -294,13 +304,15 @@ mod macos {
             &mko_core::clock::SystemClock,
         )
         .unwrap();
-        fs::remove_file(repository.join(
-            mko_core::projection_v2::record_projection_relative_path_v2(
-                mko_core::projection_v2::ProjectionRecordTypeV2::Source,
-                &written.record_id,
-            ),
-        ))
-        .unwrap();
+        if blocked {
+            fs::remove_file(repository.join(
+                mko_core::projection_v2::record_projection_relative_path_v2(
+                    mko_core::projection_v2::ProjectionRecordTypeV2::Source,
+                    &written.record_id,
+                ),
+            ))
+            .unwrap();
+        }
     }
 
     #[allow(deprecated)]
@@ -573,57 +585,156 @@ mod macos {
 
     // The queue is keyed by Asset id — a content hash — so taking its first
     // item meant the lexicographically smallest hash, the same one on every
-    // launch. Deferring leaves an item exactly where it was, and `mko queue`
-    // (the only source of the id `mko review <ID>` needs) is a hidden command.
-    // With several items pending, all but one were unreachable from the home
-    // screen. No test asked whether the owner could get to the next one.
+    // launch. With several items pending, all but one were unreachable from
+    // the home screen. The proof is not that a list printed: it is that the
+    // item the owner chose is the item that opened.
     #[test]
     #[allow(deprecated)]
     fn every_pending_item_can_be_reached_from_the_review_screen() {
-        let root = tempdir().unwrap();
-        let repository = root.path().join("v3-kb");
-        let provider = root.path().join("provider");
-        scaffold_personal_kb_v2(&repository).unwrap();
-        fs::create_dir(&provider).unwrap();
-        seed_pending_record(&repository, "alpha", "첫 번째 문서");
-        seed_pending_record(&repository, "beta", "두 번째 문서");
-        seed_pending_record(&repository, "gamma", "세 번째 문서");
+        let fixture = ReviewFixture::with_three_items();
 
-        let output = Command::new(assert_cmd::cargo::cargo_bin("mko"))
-            .arg("review")
-            .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
-            .env("HOME", root.path())
-            .current_dir(&repository)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                use std::io::Write;
-                child.stdin.take().unwrap().write_all(b"3\n")?;
-                child.wait_with_output()
-            })
-            .unwrap();
+        let queue = fixture.queue_json();
+        let third = &queue["data"]["items"][2];
+        let screen = fixture.review_with_stdin(b"3\n");
 
-        let screen = String::from_utf8_lossy(&output.stdout);
-        for title in ["첫 번째 문서", "두 번째 문서", "세 번째 문서"] {
+        assert!(screen.contains("검토 대기 3개"), "{screen}");
+        for item in queue["data"]["items"].as_array().unwrap() {
             assert!(
-                screen.contains(title),
-                "every pending item must be offered, not just the first: {screen}"
+                screen.contains(item["title"].as_str().unwrap()),
+                "every pending item must be offered: {screen}"
             );
         }
-        assert!(screen.contains("검토 대기 3개"), "{screen}");
-        // What matters is that choosing item 3 was accepted and carried through
-        // to publication. Publication then refuses for its own reasons — these
-        // fixtures are blocked, and approval needs a real terminal — but a
-        // selection error or an empty queue would mean the owner never got to
-        // choose at all, which is the defect this guards.
-        let reported = format!("{screen}{}", String::from_utf8_lossy(&output.stderr));
         assert!(
-            !reported.contains("review_selection_invalid")
-                && !reported.contains("review_queue_empty"),
-            "choosing a listed item must reach publication: {reported}"
+            screen.contains(&format!(
+                "Item ID: `{}`",
+                third["item_id"].as_str().unwrap()
+            )),
+            "choosing 3 must open the third listed item, not the first: {screen}"
         );
+    }
+
+    // Zero bytes on stdin is end of input, not an empty answer. Treating it
+    // as Enter reopened the old defect silently: a non-interactive caller got
+    // item 1 every time. A closed input must open nothing.
+    #[test]
+    #[allow(deprecated)]
+    fn a_closed_stdin_opens_nothing() {
+        let fixture = ReviewFixture::with_three_items();
+
+        let (screen, success) = fixture.review_with_stdin_status(b"");
+
+        assert!(!success, "a closed input must not succeed: {screen}");
+        assert!(screen.contains("review_input_closed"), "{screen}");
+        assert!(
+            !screen.contains("Item ID:"),
+            "no review card may be opened from a closed input: {screen}"
+        );
+    }
+
+    // One stray keystroke used to abort the whole screen and drop the owner
+    // back at the shell. A correction is allowed, and the corrected choice is
+    // the one that opens.
+    #[test]
+    #[allow(deprecated)]
+    fn a_typo_is_corrected_rather_than_aborting_the_screen() {
+        let fixture = ReviewFixture::with_three_items();
+        let queue = fixture.queue_json();
+        let second = &queue["data"]["items"][1];
+
+        let screen = fixture.review_with_stdin(b"x\n2\n");
+
+        assert!(screen.contains("표시된 항목 번호를 입력하세요"), "{screen}");
+        assert!(
+            screen.contains(&format!(
+                "Item ID: `{}`",
+                second["item_id"].as_str().unwrap()
+            )),
+            "the corrected choice must be the one that opens: {screen}"
+        );
+    }
+
+    // Closing the screen is an ordinary outcome, not an error.
+    #[test]
+    #[allow(deprecated)]
+    fn quitting_the_chooser_changes_nothing_and_is_not_an_error() {
+        let fixture = ReviewFixture::with_three_items();
+
+        let (screen, success) = fixture.review_with_stdin_status(b"q\n");
+
+        assert!(success, "{screen}");
+        assert!(screen.contains("아무것도 열지 않았습니다"), "{screen}");
+        assert!(!screen.contains("Item ID:"), "{screen}");
+    }
+
+    struct ReviewFixture {
+        _root: tempfile::TempDir,
+        repository: std::path::PathBuf,
+        provider: std::path::PathBuf,
+        home: std::path::PathBuf,
+    }
+
+    impl ReviewFixture {
+        fn with_three_items() -> Self {
+            let root = tempdir().unwrap();
+            let repository = root.path().join("v3-kb");
+            let provider = root.path().join("provider");
+            scaffold_personal_kb_v2(&repository).unwrap();
+            fs::create_dir(&provider).unwrap();
+            seed_pending_record(&repository, "alpha", "첫 번째 문서");
+            seed_pending_record(&repository, "beta", "두 번째 문서");
+            seed_pending_record(&repository, "gamma", "세 번째 문서");
+            let home = root.path().to_path_buf();
+            Self {
+                _root: root,
+                repository,
+                provider,
+                home,
+            }
+        }
+
+        #[allow(deprecated)]
+        fn queue_json(&self) -> serde_json::Value {
+            let output = Command::new(assert_cmd::cargo::cargo_bin("mko"))
+                .args(["queue", "--format", "json-v2"])
+                .env("MKO_PERSONAL_PROVIDER_ROOT", &self.provider)
+                .env("HOME", &self.home)
+                .current_dir(&self.repository)
+                .output()
+                .unwrap();
+            serde_json::from_slice(&output.stdout).unwrap()
+        }
+
+        fn review_with_stdin(&self, input: &[u8]) -> String {
+            self.review_with_stdin_status(input).0
+        }
+
+        #[allow(deprecated)]
+        fn review_with_stdin_status(&self, input: &[u8]) -> (String, bool) {
+            let output = Command::new(assert_cmd::cargo::cargo_bin("mko"))
+                .arg("review")
+                .env("MKO_PERSONAL_PROVIDER_ROOT", &self.provider)
+                .env("HOME", &self.home)
+                .current_dir(&self.repository)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    use std::io::Write;
+                    {
+                        let mut stdin = child.stdin.take().unwrap();
+                        stdin.write_all(input)?;
+                    } // dropped here: the child sees end of input after the bytes
+                    child.wait_with_output()
+                })
+                .unwrap();
+            let screen = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            (screen, output.status.success())
+        }
     }
 
     fn write_machine_profile(home: &Path, repository: &Path, provider: &Path) {
