@@ -60,6 +60,9 @@ pub fn emit_json_v2_failure(command: JsonV2Command, error: &MkoError) -> Result<
                     | "repository_lock_held"
                     | "review_session_random_failed"
                     | "setup_profile_locked"
+                    | "registry_locked"
+                    | "registry_scan_timeout"
+                    | "registry_write_failed"
             ),
             next_action: json_v2_next_action(error.code()),
             details: ErrorDetailsV2::default(),
@@ -117,10 +120,20 @@ pub(crate) fn json_v2_next_action(code: &str) -> NextActionV2 {
         "dashboard_user_modified"
         | "dashboard_projection_user_modified"
         | "dashboard_orphan_projection" => NextActionV2::PreserveUserEdit,
+        // Publication-lock outcomes. A held lock and a scan that could not
+        // finish on this machine are both transient; a scan that gave up on
+        // too many stray entries, a symlinked destination, or a quarantine
+        // record that will not validate need the owner to look.
         "lock_held"
         | "repository_lock_held"
         | "review_session_random_failed"
-        | "setup_profile_locked" => NextActionV2::Retry,
+        | "setup_profile_locked"
+        | "registry_locked"
+        | "registry_scan_timeout"
+        | "registry_write_failed" => NextActionV2::Retry,
+        "registry_scan_limit" | "registry_destination_invalid" | "registry_quarantine_invalid" => {
+            NextActionV2::Repair
+        }
         "repository_lock_stale" => NextActionV2::Repair,
         "review_session_expired"
         | "review_session_consumed"
