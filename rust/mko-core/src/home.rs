@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::{
     asset_v2::{inspect_inbox_pdf_assets_v2, read_asset_v2, registered_asset_ids_v2},
-    attempt_v2::{StuckReasonV2, latest_preparation_attempt_v2},
+    attempt_v2::{StuckReasonV2, latest_preparation_attempts_v2},
     config::KnowledgeConfig,
     config_v2::KnowledgeConfigV2,
     error::MkoError,
@@ -158,15 +158,20 @@ pub fn inspect_home(
                 .filter(|id| !queue.recorded_asset_ids.contains(*id))
                 .collect::<Vec<_>>();
             let in_progress = unfinished.len() as u64;
+            // One pass over the attempts log for every unfinished Asset. Asking
+            // per Asset re-read the whole directory each time, which turned
+            // the daily screen quadratic on the day a large batch was
+            // registered.
+            let mut latest_attempts =
+                latest_preparation_attempts_v2(repository_root).unwrap_or_default();
             let stuck = unfinished
                 .into_iter()
                 .map(|asset_id| {
                     // No attempt on file is not an unknown failure: it is
                     // material nobody has processed yet, which is also what an
                     // Asset registered before attempts existed looks like.
-                    let reason = latest_preparation_attempt_v2(repository_root, asset_id)
-                        .ok()
-                        .flatten()
+                    let reason = latest_attempts
+                        .remove(asset_id)
                         .and_then(|attempt| attempt.code)
                         .map_or(StuckReasonV2::NotAttempted, |code| {
                             StuckReasonV2::from_code(&code)
