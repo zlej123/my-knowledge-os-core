@@ -425,6 +425,170 @@ fn a_knowledge_base_without_git_is_not_reported_as_damaged() {
     assert_eq!(hook["next_action"], Value::Null);
 }
 
+// Git is optional and its absence is not damage — but it is not health either.
+// The forward-risk review found the owner's live knowledge base had never been
+// put under Git: reviews, immutable revisions and web-snapshot evidence (which
+// the code itself documents as "the stored text is the evidence") existed as
+// exactly one copy on one disk, and doctor called that healthy. It now says so
+// once, as the lowest-priority warning, and names the remedy; the hook check
+// keeps saying no hook is required.
+#[test]
+#[allow(deprecated)]
+fn a_knowledge_base_without_git_is_warned_it_is_one_copy_on_one_disk() {
+    let (fixture, kb) = configured_v03_knowledge_base();
+    assert!(!kb.join(".git").exists());
+
+    let report = doctor_report_v2(&fixture, &kb);
+    let backup = check_with_code(&report, "git_backup_missing");
+    assert_eq!(backup["status"], "warning", "{report}");
+    assert_eq!(backup["next_action"], "configure", "{report}");
+    // Everything else about this machine is in order, so the warning alone
+    // decides the verdict — and it is a warning, not damage.
+    assert_eq!(report["data"]["healthy"], false, "{report}");
+    assert_eq!(report["data"]["next_action"], "configure", "{report}");
+    assert!(
+        !report["data"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["status"] == "blocked"),
+        "{report}"
+    );
+    assert_eq!(
+        check_with_code(&report, "hook_not_applicable")["status"],
+        "healthy",
+        "{report}"
+    );
+}
+
+// The owner reads the human form. "설정이 필요합니다 — 프로필과 저장소 설정을
+// 확인" would send them to look at a profile that is fine; the sentence must
+// name the thing that is actually missing, without leaking the stable code.
+#[test]
+#[allow(deprecated)]
+fn the_human_form_names_the_missing_backup_rather_than_the_profile() {
+    let (fixture, kb) = configured_v03_knowledge_base();
+
+    let human = fixture
+        .command()
+        .args(["doctor", "--repo"])
+        .arg(&kb)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let human = String::from_utf8(human).unwrap();
+
+    assert!(human.contains("Git"), "{human}");
+    assert!(human.contains("원격"), "{human}");
+    assert!(!human.contains("프로필"), "{human}");
+    assert!(!human.contains("git_backup_missing"), "{human}");
+}
+
+// Under Git but with nowhere to push is still one copy on one disk.
+#[test]
+#[allow(deprecated)]
+fn a_knowledge_base_under_git_without_a_remote_is_warned_the_same_way() {
+    let (fixture, kb) = configured_v03_knowledge_base();
+    git(&kb, &["init", "--quiet"]);
+
+    let report = doctor_report_v2(&fixture, &kb);
+    let backup = check_with_code(&report, "git_remote_missing");
+    assert_eq!(backup["status"], "warning", "{report}");
+    assert_eq!(backup["next_action"], "configure", "{report}");
+    assert_eq!(report["data"]["healthy"], false, "{report}");
+    assert!(
+        check_with_code_opt(&report, "git_backup_missing").is_none(),
+        "{report}"
+    );
+}
+
+// Git with a remote is the shape the README promises; doctor says so, the
+// report is healthy, and the human form asks for nothing.
+#[test]
+#[allow(deprecated)]
+fn a_knowledge_base_under_git_with_a_remote_is_reported_backed_up() {
+    let (fixture, kb) = configured_v03_knowledge_base();
+    git(&kb, &["init", "--quiet"]);
+    git(&kb, &["remote", "add", "origin", "../backup.git"]);
+
+    let report = doctor_report_v2(&fixture, &kb);
+    let backup = check_with_code(&report, "git_backup_configured");
+    assert_eq!(backup["status"], "healthy", "{report}");
+    assert_eq!(backup["next_action"], Value::Null, "{report}");
+    for code in ["git_backup_missing", "git_remote_missing"] {
+        assert!(check_with_code_opt(&report, code).is_none(), "{report}");
+    }
+    assert_eq!(report["data"]["healthy"], true, "{report}");
+
+    let human = fixture
+        .command()
+        .args(["doctor", "--repo"])
+        .arg(&kb)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        String::from_utf8(human).unwrap().contains("정상"),
+        "{report}"
+    );
+}
+
+// A current-generation knowledge base on an otherwise healthy machine: profile
+// written, Personal Inbox present and writable, no Git yet — exactly what
+// `mko setup` leaves behind before the optional remote is offered.
+fn configured_v03_knowledge_base() -> (Fixture, PathBuf) {
+    let fixture = Fixture::new();
+    let kb = fixture.root.join("kb");
+    mko_core::scaffold_v2::scaffold_personal_kb_v2(&kb).unwrap();
+    fixture
+        .profile_store()
+        .write(&MachineProfileFile {
+            schema_version: 1,
+            default_profile: "personal".into(),
+            profiles: BTreeMap::from([(
+                "personal".into(),
+                PersonalProfile {
+                    repository_root: kb.clone(),
+                    provider_root: fixture.provider.clone(),
+                    scope: Scope::Personal,
+                },
+            )]),
+        })
+        .unwrap();
+    (fixture, kb)
+}
+
+fn doctor_report_v2(fixture: &Fixture, repository: &Path) -> Value {
+    serde_json::from_slice(
+        &fixture
+            .command()
+            .args(["doctor", "--repo"])
+            .arg(repository)
+            .args(["--format", "json-v2"])
+            .assert()
+            .get_output()
+            .stdout,
+    )
+    .unwrap()
+}
+
+fn check_with_code_opt<'a>(report: &'a Value, code: &str) -> Option<&'a Value> {
+    report["data"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["code"] == code)
+}
+
+fn check_with_code<'a>(report: &'a Value, code: &str) -> &'a Value {
+    check_with_code_opt(report, code)
+        .unwrap_or_else(|| panic!("doctor must report {code}: {report}"))
+}
+
 // A v0.3 knowledge base under Git, with no hook, is the sound state: the
 // managed hook runs `mko check`, which reads v0.1 records only. Doctor used to
 // demand the hook here and call it a repair. The owner followed that advice on
