@@ -3024,14 +3024,24 @@ fn emit_doctor_human(report: &mko_core::doctor::DoctorReport) -> Result<(), MkoE
         println!("설정과 연결 상태가 정상입니다.");
         return Ok(());
     }
-    let message = match report.next_action {
-        mko_core::json_v1::NextAction::Configure => {
+    // The backup warnings share next_action with "profile missing", but the
+    // owner must not be sent to look at a profile that is fine: the sentence
+    // names the thing that is actually missing.
+    let primary = report.primary_issue().map(|check| check.code.as_str());
+    let message = match (primary, &report.next_action) {
+        (Some("git_backup_missing"), _) => {
+            "이 지식 저장소는 Git 아래에 있지 않아 이 디스크 한 장에 사본 하나로만 존재합니다. 비공개 원격이 있는 Git 저장소로 두세요."
+        }
+        (Some("git_remote_missing"), _) => {
+            "이 지식 저장소는 Git 아래에 있지만 원격이 없어 이 디스크 한 장에 사본 하나로만 존재합니다. 비공개 원격을 추가하고 푸시하세요."
+        }
+        (_, mko_core::json_v1::NextAction::Configure) => {
             "설정이 필요합니다. 프로필과 저장소 설정을 확인한 뒤 다시 시도하세요."
         }
-        mko_core::json_v1::NextAction::Hydrate => {
+        (_, mko_core::json_v1::NextAction::Hydrate) => {
             "PDF를 아직 읽을 수 없습니다. 동기화가 끝난 뒤 파일을 한 번 열고 다시 시도하세요."
         }
-        mko_core::json_v1::NextAction::Retry => {
+        (_, mko_core::json_v1::NextAction::Retry) => {
             "다른 작업이 진행 중입니다. 잠시 후 다시 시도하세요."
         }
         _ => "설정을 복구해야 합니다. 진단 결과를 확인한 뒤 다시 시도하세요.",

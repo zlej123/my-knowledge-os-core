@@ -686,6 +686,33 @@ and passed on rerun with no code change. Its mechanism was not found; it is
 the first sighting of that signature. If it recurs, the place to look is how
 the scan enumerates quarantine entries under a tight slice.
 
+## Doctor called a single-copy knowledge base healthy — fixed 2026-08-23
+
+**How it surfaced.** The forward-risk review (2026-08-21) found the live
+knowledge base had never been put under Git — reviews, immutable revisions and
+web-snapshot evidence (which the code itself documents as "the stored text is
+the evidence") existed as one copy on one disk — and `mko doctor` reported that
+state healthy. The 2026-08-03 fix above had made it so on purpose: a knowledge
+base without Git had been diagnosed as a *broken hook*, blocked, with a repair
+the owner could not perform, and the correction went all the way to "healthy".
+
+**Why.** Two questions were folded into one check. "Is the hook in order" is
+answered by the hook check and is genuinely not applicable without Git. "Can
+the records survive this disk" was never asked anywhere.
+
+**Fix.** Doctor asks the second question as its own check on v0.3 knowledge
+bases: under Git with a remote → `git_backup_configured`, healthy; under Git
+with no remote → `git_remote_missing`; not under Git → `git_backup_missing`.
+Both warnings sit last in priority (a stale lock or a missing provider still
+leads) and carry `next_action: configure`; the human form names the missing
+backup instead of sending the owner to a profile that is fine. Setup's final
+checks do not include it — a local setup without Git still completes, as it
+always has — and v0.1 knowledge bases keep their frozen doctor surface.
+
+**Not done.** Doctor does not ask whether the remote is *current* — an unpushed
+month is still one copy. That is a question about the push habit rather than
+the configuration, and it has not hurt yet.
+
 ## Second review round — 2026-08-22
 
 Three more reviewers — fix verification, fresh eyes, forward risk — after the
@@ -706,6 +733,9 @@ Three more reviewers — fix verification, fresh eyes, forward risk — after th
 - **Home reads the attempts log once** instead of once per unfinished Asset —
   the forward-risk review's "hurts first at scale" item, measured at seven to
   forty seconds per `mko` on the day a five-hundred-post batch is registered.
+- **Doctor warns when the knowledge base is one copy on one disk** — the
+  reviewer's own phrase for the state it found; the 2026-08-03 correction had
+  gone all the way to healthy (own section above).
 
 **Still open from those reviews, in the order they bite:** the 250 ms
 record-scan deadline with hardcoded `scan_complete: true` (measured wall at

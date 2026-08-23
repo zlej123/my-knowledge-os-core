@@ -529,6 +529,23 @@ mod macos {
         let provider = root.path().join("My-Knowledge-OS-Assets/personal/inbox");
         let home = root.path().join("home");
         scaffold_personal_kb_v2(&repository).unwrap();
+        // Likewise doctor warns about a knowledge base that is one copy on
+        // one disk, so the fixture is under Git with a remote: the only thing
+        // left that can make this report unhealthy is the resolution under
+        // test.
+        for arguments in [
+            &["init", "--quiet"][..],
+            &["remote", "add", "origin", "../backup.git"][..],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(arguments)
+                    .current_dir(&repository)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
         fs::create_dir_all(&provider).unwrap();
         fs::create_dir(&home).unwrap();
         write_machine_profile(&home, &repository, &provider);

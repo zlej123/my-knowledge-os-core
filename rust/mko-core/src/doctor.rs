@@ -2,6 +2,7 @@ use std::{
     ffi::OsStr,
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use crate::{
@@ -284,6 +285,7 @@ pub fn diagnose(request: DoctorRequest, environment: &dyn DoctorEnvironment) -> 
     }
 
     if let Some((repository, _)) = repository.as_ref() {
+        checks.extend(git_backup_check(repository));
         checks.push(hook_check(repository));
         checks.extend(lock_checks(repository, environment.clock()));
     }
@@ -740,6 +742,77 @@ fn state_after_access(
     }
 }
 
+enum GitBackup {
+    Configured,
+    NoRemote,
+    NoRepository,
+}
+
+fn inspect_git_backup(repository: &Path) -> GitBackup {
+    let inside = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output();
+    match inside {
+        Ok(output) if output.status.success() => {}
+        // No repository here, or no git on this machine: either way nothing
+        // in this directory is being copied anywhere.
+        _ => return GitBackup::NoRepository,
+    }
+    let remotes = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .arg("remote")
+        .output();
+    match remotes {
+        Ok(output)
+            if output.status.success() && !output.stdout.iter().all(u8::is_ascii_whitespace) =>
+        {
+            GitBackup::Configured
+        }
+        _ => GitBackup::NoRemote,
+    }
+}
+
+/// Whether the records can survive this disk.
+///
+/// Git is optional — setup completes a local knowledge base without it and
+/// offers a private remote afterwards — so its absence is not damage and must
+/// not block anything. It is not health either: the forward-risk review found
+/// the owner's live knowledge base had never been put under Git, so reviews,
+/// immutable revisions and web-snapshot evidence existed as one copy on one
+/// disk while doctor reported healthy. One warning, lowest priority, naming
+/// the remedy. v0.1 repositories keep their frozen doctor surface, and setup's
+/// final checks do not include this one.
+fn git_backup_check(repository: &Path) -> Option<DoctorCheck> {
+    if KnowledgeConfigV2::read(repository).is_err() {
+        return None;
+    }
+    Some(match inspect_git_backup(repository) {
+        GitBackup::Configured => healthy(
+            DiagnosticArea::Repository,
+            "git_backup_configured",
+            "records are under Git with a remote",
+            Some(repository),
+        ),
+        GitBackup::NoRemote => warning(
+            DiagnosticArea::Repository,
+            "git_remote_missing",
+            "this knowledge base is under Git with no remote: its records exist as one copy on this disk; add a private remote and push",
+            Some(repository.to_path_buf()),
+            RecoveryKind::Configure,
+        ),
+        GitBackup::NoRepository => warning(
+            DiagnosticArea::Repository,
+            "git_backup_missing",
+            "this knowledge base is not under Git: its records exist as one copy on this disk; initialize a Git repository with a private remote (setup offers one) so they survive it",
+            Some(repository.to_path_buf()),
+            RecoveryKind::Configure,
+        ),
+    })
+}
+
 fn hook_check(repository: &Path) -> DoctorCheck {
     // The managed hook runs `mko check`, which understands v0.1 records only.
     // On a v0.3 knowledge base it rejects every revision, so "installed" is
@@ -880,6 +953,10 @@ fn issue_priority(code: &str) -> usize {
         "stale_lock",
         "lock_unreadable",
         "lock_active",
+        // Durability last: a stale lock or a missing provider is what stops
+        // the owner today; a missing backup is what loses everything one day.
+        "git_remote_missing",
+        "git_backup_missing",
     ];
     PRIORITY
         .iter()
@@ -893,7 +970,9 @@ fn action_for_issue(check: &DoctorCheck) -> NextAction {
         | "profile_unreadable"
         | "repository_incompatible"
         | "provider_root_invalid"
-        | "provider_missing" => NextAction::Configure,
+        | "provider_missing"
+        | "git_remote_missing"
+        | "git_backup_missing" => NextAction::Configure,
         "provider_hydration_failed" => NextAction::Hydrate,
         "lock_active" => NextAction::Retry,
         _ => NextAction::Repair,
