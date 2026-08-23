@@ -114,14 +114,34 @@ pub fn record_preparation_attempt_v2(
 }
 
 /// The most recent attempt on file for an Asset, if any.
+///
+/// Reads the whole log. A caller asking about many Assets should use
+/// [`latest_preparation_attempts_v2`] once instead of this per Asset — home
+/// did the latter, which made opening the daily screen re-parse the entire
+/// attempts directory once per unfinished Asset: 500 stalled posts times a
+/// thousand attempt files was measured at seven to forty seconds, silently.
 pub fn latest_preparation_attempt_v2(
     repository_root: &Path,
     asset_id: &str,
 ) -> Result<Option<PreparationAttemptV2>, MkoError> {
-    Ok(read_attempts_v2(repository_root)?
-        .into_iter()
-        .filter(|attempt| attempt.asset_id == asset_id)
-        .max_by_key(|attempt| attempt.observed_at))
+    Ok(latest_preparation_attempts_v2(repository_root)?.remove(asset_id))
+}
+
+/// The most recent attempt on file for every Asset that has one, in a single
+/// pass over the log.
+pub fn latest_preparation_attempts_v2(
+    repository_root: &Path,
+) -> Result<std::collections::HashMap<String, PreparationAttemptV2>, MkoError> {
+    let mut latest = std::collections::HashMap::<String, PreparationAttemptV2>::new();
+    for attempt in read_attempts_v2(repository_root)? {
+        match latest.get(&attempt.asset_id) {
+            Some(current) if current.observed_at >= attempt.observed_at => {}
+            _ => {
+                latest.insert(attempt.asset_id.clone(), attempt);
+            }
+        }
+    }
+    Ok(latest)
 }
 
 pub(crate) fn read_attempts_v2(

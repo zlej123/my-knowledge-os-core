@@ -685,3 +685,34 @@ ubuntu runner — acquire returned `Ok` with a 1 MB quarantine record present �
 and passed on rerun with no code change. Its mechanism was not found; it is
 the first sighting of that signature. If it recurs, the place to look is how
 the scan enumerates quarantine entries under a tight slice.
+
+## Second review round — 2026-08-22
+
+Three more reviewers — fix verification, fresh eyes, forward risk — after the
+2026-08-13 four. What changed because of them, in the order it landed:
+
+- **Git backup of the live knowledge base** (owner-approved; private remote
+  `zlej123/my-knowledge-os-kb`). The forward-risk review's first item: every
+  other failure on its list was recoverable only if the bytes survived, and
+  they existed as one copy on one disk while doctor called that healthy.
+- **Doctor no longer demands the v0.1 pre-commit hook on a v0.3 knowledge
+  base** — found on the very first commit of that backup (own section above).
+- **The publication lock says "locked" only when a holder was observed** —
+  the review's HIGH finding, the real defect behind the Windows "flake" (own
+  section above).
+- **The review chooser**: a closed stdin opens nothing instead of silently
+  opening item 1; a typo is corrected rather than aborting; the reachability
+  test now proves the chosen item is the one that opened.
+- **Home reads the attempts log once** instead of once per unfinished Asset —
+  the forward-risk review's "hurts first at scale" item, measured at seven to
+  forty seconds per `mko` on the day a five-hundred-post batch is registered.
+
+**Still open from those reviews, in the order they bite:** the 250 ms
+record-scan deadline with hardcoded `scan_complete: true` (measured wall at
+~300 processed assets — a design, together with the review-event log cap and
+the attempts log, as one indexing question); citations that cannot be followed
+by the reader (`mko show --evidence`, and `find` showing unreviewed records
+under a label); the contract-version wall with no migrator; fail-closed
+prepared-session cleanup that can brick prepare; the 24-hour session TTL vs
+the owner's actual cadence. Each is recorded with its mechanism in the review
+transcripts and in the sections above; none is started.

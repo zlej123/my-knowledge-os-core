@@ -3,7 +3,7 @@
   "command": "handshake",
   "result": "ok",
   "data": {
-    "cli_version": "0.3.23",
-    "skill_version": "0.3.23"
+    "cli_version": "0.3.24",
+    "skill_version": "0.3.24"
   }
 }
