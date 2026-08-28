@@ -260,3 +260,44 @@ fn migration_refuses_a_dirty_tree_even_when_untracked_files_are_configured_hidde
             .contains("contract_version: 0.3.0")
     );
 }
+
+/// The real pre-Phase-0 KB lists `views/review-queue.base` in
+/// `.mko/generated-manifest.yaml`, not only on disk. Manifest reading must
+/// tolerate that retired entry, or the migration is refused by the very
+/// state it exists to repair — observed on the owner's KB on 2026-08-29 as
+/// `projection_manifest_invalid` from `mko migrate`.
+#[test]
+fn migration_accepts_a_manifest_still_listing_the_review_queue_view() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    // Generate the dashboard first so `.mko/generated-manifest.yaml` exists —
+    // on a real KB it was written by ordinary pre-Phase-0 use.
+    mko_core::dashboard_v2::ensure_dashboard_v2(&repository).unwrap();
+    downgrade_to_migratable_contract(&repository);
+    // Mirror the real pre-Phase-0 state: the legacy view also has a
+    // dashboard entry in the generated manifest.
+    let manifest_path = repository.join(".mko/generated-manifest.yaml");
+    let legacy_bytes = fs::read(repository.join(LEGACY_REVIEW_QUEUE_VIEW_PATH)).unwrap();
+    let digest = mko_core::revision_v2::sha256_digest(&legacy_bytes);
+    let manifest = fs::read_to_string(&manifest_path).unwrap();
+    assert!(manifest.contains("dashboard_files:\n"));
+    let with_legacy_entry = manifest.replace(
+        "dashboard_files:\n",
+        &format!(
+            "dashboard_files:\n- path: {LEGACY_REVIEW_QUEUE_VIEW_PATH}\n  content_digest: {digest}\n"
+        ),
+    );
+    fs::write(&manifest_path, with_legacy_entry).unwrap();
+    git_commit_all(&repository, "freeze pre-Phase-0 KB with manifest entry");
+
+    let result = migrate_v2(&repository, &clock()).unwrap();
+
+    assert_eq!(result.to_contract_version, CONTRACT_VERSION_V2);
+    let migrated_manifest = fs::read_to_string(&manifest_path).unwrap();
+    assert!(
+        !migrated_manifest.contains(LEGACY_REVIEW_QUEUE_VIEW_PATH),
+        "the legacy manifest entry must be retired: {migrated_manifest}"
+    );
+    assert!(!repository.join(LEGACY_REVIEW_QUEUE_VIEW_PATH).exists());
+}
