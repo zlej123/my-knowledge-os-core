@@ -1299,3 +1299,75 @@ fn origin_filter_maps_display_forms_to_asset_origin_and_media_type() {
     .unwrap();
     assert!(not_web.is_empty());
 }
+
+/// Cross-origin text-identity collision (§6.1): the registry is
+/// origin-agnostic, so a video transcript byte-identical to an
+/// already-registered web snapshot converges on the same Asset, and the
+/// first immutable provider binding — the web snapshot's origin, locator,
+/// and title — remains authoritative.
+#[test]
+fn a_video_transcript_byte_identical_to_a_web_snapshot_keeps_the_first_record() {
+    let root = tempdir().unwrap();
+    scaffold_personal_kb_v2(root.path()).unwrap();
+    let web = register_web_snapshot_v2(RegisterSnapshotRequestV2 {
+        repository_root: root.path(),
+        url: "https://example.com/page",
+        title: "web first",
+        text: "identical evidence text",
+        fetched_at: Utc::now(),
+    })
+    .unwrap();
+    assert_eq!(web.outcome, AssetRegistrationOutcomeV2::Created);
+
+    let video = register_video_transcript_v2(RegisterVideoTranscriptRequestV2 {
+        repository_root: root.path(),
+        url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        title: "video later",
+        text: "identical evidence text",
+        fetched_at: Utc::now(),
+    })
+    .unwrap();
+    assert_eq!(video.outcome, AssetRegistrationOutcomeV2::Existing);
+    assert_eq!(video.asset.id, web.asset.id);
+    assert_eq!(video.asset.origin, AssetOriginV2::WebSnapshot);
+    assert_eq!(
+        video.asset.provider.logical_locator,
+        "https://example.com/page"
+    );
+}
+
+/// Every origin's serialized record — not only the ProviderPdf-shaped golden
+/// fixture — must conform to `schemas/v2/asset.schema.json`. A pasted-text
+/// record additionally exercises the empty-string locator convention.
+#[test]
+fn non_pdf_asset_records_conform_to_the_asset_schema() {
+    let root = tempdir().unwrap();
+    scaffold_personal_kb_v2(root.path()).unwrap();
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../../schemas/v2/asset.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+
+    let paste = register_pasted_text_v2(RegisterPastedTextRequestV2 {
+        repository_root: root.path(),
+        title: "paste schema shape",
+        text: "paste schema evidence text",
+        captured_at: Utc::now(),
+    })
+    .unwrap();
+    let video = register_video_transcript_v2(RegisterVideoTranscriptRequestV2 {
+        repository_root: root.path(),
+        url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        title: "video schema shape",
+        text: "video schema evidence text",
+        fetched_at: Utc::now(),
+    })
+    .unwrap();
+    for asset in [&paste.asset, &video.asset] {
+        let value: serde_json::Value =
+            serde_json::from_slice(&canonical_json_bytes(asset).unwrap()).unwrap();
+        assert!(
+            validator.is_valid(&value),
+            "asset record must conform to the schema: {value}"
+        );
+    }
+}
