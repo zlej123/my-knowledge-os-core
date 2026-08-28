@@ -97,7 +97,8 @@ Then:
    quick notes). Prefer what the base already holds over restating from memory.
 2. **Cite every record you used by its `mko://` ID** — `mko://` followed directly by each match's
    `record_id` field, with nothing in between. A citation without the ID is not traceable back to
-   the record.
+   the record. Cite a quick-note hit from `data.notes` the same way, using that note's `note_id`
+   field in place of `record_id`.
 3. **State each cited record's confirmation label inline**, taken from `confirmation.status` on that
    exact match: a human-confirmed record and an unconfirmed AI draft are not the same kind of
    evidence, and the owner needs to see which one they are getting. Say it in the same sentence as
@@ -425,7 +426,7 @@ mko source prepare --asset-id "ASSET_ID" --extracted-text ".mko/runtime/extracte
 
 ## Conversation capture
 
-See Store-on-miss below for when to capture conversation content and how to register it. It is never
+See Store-on-miss above for when to capture conversation content and how to register it. It is never
 a standalone workflow the owner asks for directly — it exists only as the storage step of a recall
 miss.
 

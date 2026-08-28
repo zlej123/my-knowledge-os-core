@@ -134,6 +134,15 @@ shape exactly.
   `SourceResponseV2`/`KnowledgeResponseV2`/`ProjectionInputV2` construction site across `mko-core`
   and `mko-cli`'s test suites was updated with an explicit (usually empty) `topics`/`topics: Vec::new()`
   field, since these are non-`Default` struct literals.
+- **The schema and the Rust structs disagree about `topics` on purpose.** The JSON Schemas mark
+  `topics` **required** — a forward contract for what a new agent submission must include from here
+  on. `SourceResponseV2`/`KnowledgeResponseV2` keep it `#[serde(default, skip_serializing_if =
+  "Vec::is_empty")]` — backward compat, so a revision file written before Phase 2 still parses and
+  re-serializes byte-identical (the round-trip test above depends on this). Nothing currently
+  validates an agent's submitted JSON against the schema at runtime — Core only applies its own
+  Rust-side bound (`topic_invalid`/`topics_too_many` in `normalize_topics`) — so today the schema is
+  documentation-of-intent for what an agent should send, not an enforced contract. The asymmetry
+  should be revisited if runtime schema validation is ever added.
 - Two test-harness fixtures that hand-build a `ProjectionInputV2` to simulate a Confirmed record
   outside the normal write path (`rust/mko-cli/tests/find_cli.rs`'s `seeded_fixture`,
   `rust/mko-core/tests/queue_v2.rs`'s `sync_projection`) needed their manual `topics` field to actually

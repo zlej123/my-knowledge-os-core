@@ -327,7 +327,7 @@ fn normalize_query_tokens_v2(term: &str) -> Result<Vec<String>, MkoError> {
         .collect::<Vec<_>>();
     if tokens.is_empty() {
         return Err(MkoError::new(
-            "knowledge_search_invalid",
+            "find_query_invalid",
             "search term must not be empty",
         ));
     }
@@ -345,7 +345,7 @@ fn normalize_tag_needle_v2(tag: Option<&str>) -> Result<Option<String>, MkoError
     let normalized = tag.trim().nfc().collect::<String>().to_lowercase();
     if normalized.is_empty() {
         return Err(MkoError::new(
-            "knowledge_search_invalid",
+            "find_query_invalid",
             "tag filter must not be empty",
         ));
     }
@@ -372,7 +372,7 @@ fn normalize_topic_needle_v2(topic: Option<&str>) -> Result<Option<String>, MkoE
     let normalized = collapsed.nfc().collect::<String>().to_lowercase();
     if normalized.is_empty() {
         return Err(MkoError::new(
-            "knowledge_search_invalid",
+            "find_query_invalid",
             "topic filter must not be empty",
         ));
     }

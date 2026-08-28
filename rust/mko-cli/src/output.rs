@@ -104,6 +104,7 @@ pub(crate) fn json_v2_next_action(code: &str) -> NextActionV2 {
         | "local_file_not_text"
         | "local_file_empty"
         | "local_file_invalid"
+        | "local_file_inside_repository"
         | "local_file_unreadable"
         // Phase 3 binary local-file forms (§6.2): a signature that does not
         // match its extension, or supplied/missing agent-read text, is the

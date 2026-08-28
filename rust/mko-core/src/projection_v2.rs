@@ -644,8 +644,12 @@ fn append_projection_body(text: &mut String, body: &ProjectionBodyV2) {
     append_points(text, "LLM 분석 (문서의 주장 아님)", &body.analysis);
     append_points(text, "배경지식 (문서에 없는 내용)", &body.background);
     append_points(text, "한계", &body.limitations);
-    if let Some(locator) = &body.document_locator {
-        text.push_str(&format!("\n## 원본 문서\n\n- {}\n", normalize(locator)));
+    // PastedText and Conversation projections carry `Some("")` for their
+    // locator (asset_v2's empty-string convention, not `None`), so an empty
+    // or whitespace-only locator must render as absent rather than as a
+    // heading over a blank bullet.
+    if let Some(locator) = body.document_locator.as_deref().and_then(non_empty) {
+        text.push_str(&format!("\n## 원본 문서\n\n- {}\n", normalize(&locator)));
     }
 }
 

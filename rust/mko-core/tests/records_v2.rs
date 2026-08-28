@@ -10,10 +10,11 @@ use mko_core::{
     },
     perspective_v2::{prepare_perspective_confirmation_v2, publish_perspective_confirmation_v2},
     records_v2::{
-        AssetRecordV2, CurrentPointerV2, KnowledgeRevisionV2, RecordProjectionStatusV2,
-        RecordWriteOutcomeV2, SourceRevisionV2, WriteKnowledgeRecordRequestV2,
-        WriteSourceRecordRequestV2, knowledge_record_id_v2, read_current_knowledge_revision_v2,
-        source_record_id_v2, write_knowledge_record_v2, write_source_record_v2,
+        AssetOriginV2, AssetRecordV2, CurrentPointerV2, KnowledgeRevisionV2,
+        RecordProjectionStatusV2, RecordWriteOutcomeV2, SourceRevisionV2,
+        WriteKnowledgeRecordRequestV2, WriteSourceRecordRequestV2, knowledge_record_id_v2,
+        read_current_knowledge_revision_v2, source_record_id_v2, write_knowledge_record_v2,
+        write_source_record_v2,
     },
     revision_v2::{canonical_json_bytes, canonical_json_sha256},
     scaffold_v2::scaffold_personal_kb_v2,
@@ -224,6 +225,41 @@ fn canonical_source_write_also_publishes_its_exact_projection() {
         "asset_link: \"assets/registry/{}.json\"",
         environment.asset.id
     )));
+}
+
+// PastedText and Conversation assets carry an empty-string locator (§6.1's
+// text-fingerprint convention, not `None`) because there is no address to
+// return to. A projection must read that as "no locator" rather than render
+// a "## 원본 문서" heading over a blank bullet — while a LocalFile asset,
+// which does have a real path, must still get the heading.
+#[test]
+fn pasted_text_origin_projection_omits_locator_heading_but_local_file_origin_keeps_it() {
+    let mut pasted = new_environment();
+    pasted.asset.origin = AssetOriginV2::PastedText;
+    pasted.asset.provider.provider_type = "pasted-text".into();
+    pasted.asset.provider.logical_locator = String::new();
+
+    let pasted_result = write_source(&pasted, &pasted.source, None).unwrap();
+    let pasted_projection = match &pasted_result.projection {
+        RecordProjectionStatusV2::Current(projection) => projection,
+        other => panic!("expected current projection, got {other:?}"),
+    };
+    let pasted_text = fs::read_to_string(&pasted_projection.path).unwrap();
+    assert!(!pasted_text.contains("원본 문서"));
+
+    let mut local_file = new_environment();
+    local_file.asset.origin = AssetOriginV2::LocalFile;
+    local_file.asset.provider.provider_type = "local-file".into();
+    local_file.asset.provider.logical_locator = "notes/example.md".into();
+
+    let local_file_result = write_source(&local_file, &local_file.source, None).unwrap();
+    let local_file_projection = match &local_file_result.projection {
+        RecordProjectionStatusV2::Current(projection) => projection,
+        other => panic!("expected current projection, got {other:?}"),
+    };
+    let local_file_text = fs::read_to_string(&local_file_projection.path).unwrap();
+    assert!(local_file_text.contains("## 원본 문서"));
+    assert!(local_file_text.contains("notes/example.md"));
 }
 
 #[test]
