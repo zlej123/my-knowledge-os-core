@@ -330,7 +330,7 @@ fn normalize_topic_needle_v2(topic: Option<&str>) -> Result<Option<String>, MkoE
     let normalized = collapsed.nfc().collect::<String>().to_lowercase();
     if normalized.is_empty() {
         return Err(MkoError::new(
-            "knowledge_search_invalid",
+            "find_query_invalid",
             "topic filter must not be empty",
         ));
     }

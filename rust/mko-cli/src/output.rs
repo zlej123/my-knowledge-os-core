@@ -104,6 +104,7 @@ pub(crate) fn json_v2_next_action(code: &str) -> NextActionV2 {
         | "local_file_not_text"
         | "local_file_empty"
         | "local_file_invalid"
+        | "local_file_inside_repository"
         | "local_file_unreadable" => NextActionV2::Add,
         // Registering the same page/file again rewrites content-addressed
         // evidence that no longer matches its identity, so this is

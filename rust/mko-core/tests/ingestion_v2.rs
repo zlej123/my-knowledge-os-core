@@ -266,6 +266,103 @@ fn local_file_and_pasted_text_converge_when_bytes_match_and_diverge_when_they_do
     assert_ne!(pasted_different_bytes.asset.id, local_file.asset.id);
 }
 
+// `--local-file` names an absolute path outside the KB deliberately (the
+// module doc says registration never routes through the Inbox machinery that
+// would otherwise enforce this). Nothing else stopped a path *inside* the KB
+// repository itself, which would silently register a duplicate of a file the
+// repository already tracks and write it into assets/originals/, dirtying
+// the tree.
+#[test]
+fn registering_a_file_inside_the_repository_is_refused_but_outside_still_succeeds() {
+    let root = tempdir().unwrap();
+    scaffold_personal_kb_v2(root.path()).unwrap();
+    let inside_path = root.path().join("README.md");
+    fs::write(&inside_path, "# Owned by the repository itself\n").unwrap();
+
+    let error = register_local_file_asset_v2(RegisterLocalFileRequestV2 {
+        repository_root: root.path(),
+        path: &inside_path,
+        title: "",
+        modified_at: Utc::now(),
+    })
+    .unwrap_err();
+    assert_eq!(error.code(), "local_file_inside_repository");
+    assert!(
+        fs::read_dir(root.path().join("assets/originals"))
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(true),
+        "a refused registration must not write anything into assets/originals/"
+    );
+
+    let source_files = tempdir().unwrap();
+    let outside_path = source_files.path().join("note.md");
+    fs::write(&outside_path, "# Owned elsewhere\n").unwrap();
+    let registered = register_local_file_asset_v2(RegisterLocalFileRequestV2 {
+        repository_root: root.path(),
+        path: &outside_path,
+        title: "",
+        modified_at: Utc::now(),
+    })
+    .unwrap();
+    assert_eq!(
+        registered.outcome,
+        mko_core::asset_v2::AssetRegistrationOutcomeV2::Created
+    );
+}
+
+// write_original_bytes used to run before write_asset_registry_record_v2
+// decided new-vs-existing, so byte-identical content re-registered under a
+// different extension left a second, unread `assets/originals/<hash>.<ext>`
+// file behind — an orphan, since the registry (keyed on the bytes' hash
+// alone) keeps pointing at whichever extension registered first.
+#[test]
+fn reregistering_identical_bytes_under_a_different_extension_leaves_no_orphaned_original() {
+    let root = tempdir().unwrap();
+    scaffold_personal_kb_v2(root.path()).unwrap();
+    let source_files = tempdir().unwrap();
+    let content = "identical content, byte for byte, different extension";
+    let md_path = source_files.path().join("note.md");
+    fs::write(&md_path, content).unwrap();
+
+    let first = register_local_file_asset_v2(RegisterLocalFileRequestV2 {
+        repository_root: root.path(),
+        path: &md_path,
+        title: "",
+        modified_at: Utc::now(),
+    })
+    .unwrap();
+    assert_eq!(
+        first.outcome,
+        mko_core::asset_v2::AssetRegistrationOutcomeV2::Created
+    );
+    let hash = first.asset.fingerprint.strip_prefix("sha256:").unwrap();
+    let originals_dir = root.path().join("assets/originals");
+    assert!(originals_dir.join(format!("{hash}.md")).exists());
+
+    let txt_path = source_files.path().join("note.txt");
+    fs::write(&txt_path, content).unwrap();
+    let second = register_local_file_asset_v2(RegisterLocalFileRequestV2 {
+        repository_root: root.path(),
+        path: &txt_path,
+        title: "",
+        modified_at: Utc::now(),
+    })
+    .unwrap();
+    assert_eq!(
+        second.outcome,
+        mko_core::asset_v2::AssetRegistrationOutcomeV2::Existing
+    );
+    assert_eq!(second.asset.id, first.asset.id);
+    // The registry keeps its first-registered binding — no rewrite from the
+    // second, different-extension registration.
+    assert_eq!(second.asset, first.asset);
+
+    assert!(originals_dir.join(format!("{hash}.md")).exists());
+    assert!(!originals_dir.join(format!("{hash}.txt")).exists());
+    let entry_count = fs::read_dir(&originals_dir).unwrap().count();
+    assert_eq!(entry_count, 1, "no orphaned original file was left behind");
+}
+
 fn source_response(topics: Vec<String>) -> SourceResponseV2 {
     SourceResponseV2 {
         schema_version: 2,

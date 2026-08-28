@@ -393,7 +393,7 @@ again returns the same `asset_id` with `outcome: existing`.
 
 ## Conversation capture
 
-See Store-on-miss below for when to capture conversation content and how to register it. It is never
+See Store-on-miss above for when to capture conversation content and how to register it. It is never
 a standalone workflow the owner asks for directly — it exists only as the storage step of a recall
 miss.
 

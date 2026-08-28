@@ -21,8 +21,8 @@ use chrono::{DateTime, Utc};
 
 use crate::{
     asset_v2::{
-        AssetRegistrationResultV2, read_bounded_nofollow, validate_asset_record_v2,
-        write_asset_registry_record_v2,
+        AssetRegistrationOutcomeV2, AssetRegistrationResultV2, read_bounded_nofollow,
+        validate_asset_record_v2, write_asset_registry_record_v2,
     },
     atomic::{write_new, write_replace},
     clock::SystemClock,
@@ -58,6 +58,7 @@ pub fn register_local_file_asset_v2(
             "a local file must be registered by its absolute path",
         ));
     }
+    reject_path_inside_repository(request.repository_root, request.path)?;
     let bytes = read_bounded_nofollow(request.path, MAX_LOCAL_FILE_BYTES, "local_file")?;
     let text = std::str::from_utf8(&bytes).map_err(|_| {
         MkoError::new(
@@ -108,8 +109,38 @@ pub fn register_local_file_asset_v2(
         &SystemClock,
         StaleRepositoryLockPolicy::Preserve,
     )?;
-    write_original_bytes(request.repository_root, &hash, &extension, &bytes)?;
-    write_asset_registry_record_v2(request.repository_root, record, &record_bytes)
+    // Decide new-vs-existing on the content-addressed registry entry before
+    // touching the originals store. The identity (`id`/`fingerprint`) comes
+    // from the file's bytes alone, not its extension, so byte-identical
+    // content re-registered under a different extension is the same Asset —
+    // writing a second `assets/originals/<hash>.<ext>` file for it first and
+    // deciding afterwards left that second file orphaned (the registry keeps
+    // pointing at the first-registered extension, and nothing ever reads the
+    // second one back).
+    let result = write_asset_registry_record_v2(request.repository_root, record, &record_bytes)?;
+    if result.outcome == AssetRegistrationOutcomeV2::Created {
+        write_original_bytes(request.repository_root, &hash, &extension, &bytes)?;
+    }
+    Ok(result)
+}
+
+/// Refuses to register a file whose canonical (symlink-resolved) path lives
+/// inside the KB repository itself. Nothing stops `--local-file` from naming
+/// a path such as `$KB/README.md`: without this check that would silently
+/// write a duplicate into `assets/originals/` and dirty the tree with a
+/// second copy of a file the repository already tracks.
+fn reject_path_inside_repository(repository_root: &Path, path: &Path) -> Result<(), MkoError> {
+    let repository_root = std::fs::canonicalize(repository_root)
+        .map_err(|error| MkoError::new("local_file_write_failed", error.to_string()))?;
+    let canonical_path = std::fs::canonicalize(path)
+        .map_err(|error| MkoError::new("local_file_unreadable", error.to_string()))?;
+    if canonical_path == repository_root || canonical_path.starts_with(&repository_root) {
+        return Err(MkoError::new(
+            "local_file_inside_repository",
+            "등록하려는 파일이 지식 베이스 저장소 안에 있습니다 — 저장소 밖의 원본 파일만 --local-file로 등록할 수 있습니다",
+        ));
+    }
+    Ok(())
 }
 
 /// The original bytes an Asset was built from, decoded as the UTF-8 text the
