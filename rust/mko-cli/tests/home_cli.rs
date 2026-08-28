@@ -322,6 +322,7 @@ mod macos {
                 outcome: mko_core::model_v2::KnowledgeRecommendationOutcomeV2::Recommend,
                 reasons: vec!["Reusable concept.".into()],
             },
+            topics: Vec::new(),
         };
         let written = mko_core::records_v2::write_source_record_v2(
             mko_core::records_v2::WriteSourceRecordRequestV2 {

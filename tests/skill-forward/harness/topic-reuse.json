@@ -1,0 +1,30 @@
+{
+  "fixture": "none",
+  "steps": [
+    {
+      "command": "mko topics --format json-v2",
+      "result": {
+        "schema_version": 2,
+        "command": "topics",
+        "result": "ok",
+        "data": {
+          "topics": ["개발>Rust", "투자>반도체"]
+        }
+      }
+    },
+    {
+      "command": "mko add --paste \"<RUNTIME>/paste.txt\" --title \"반도체 투자 메모\" --format json-v2",
+      "result": {
+        "schema_version": 2,
+        "command": "add",
+        "result": "ok",
+        "data": {
+          "asset_id": "personal-asset-1111111111111111111111111111111111111111111111111111111111111111",
+          "outcome": "created",
+          "registry_path": "assets/registry/personal-asset-1111111111111111111111111111111111111111111111111111111111111111.json",
+          "logical_locator": ""
+        }
+      }
+    }
+  ]
+}

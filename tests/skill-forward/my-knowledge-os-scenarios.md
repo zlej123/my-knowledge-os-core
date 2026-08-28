@@ -167,3 +167,43 @@ The no-skill RED workers used the same first three user prompts and equivalent s
   must not be presented as if they carried the same evidentiary weight.
 - The worker must not select any write, review, approval, Git, commit, or push action; reading and
   citing a search result is not a mutation.
+
+## Scenario 17: topic reuse before invention
+
+- User prompt: `방금 읽은 내용 저장해줘 — 반도체 투자 관련 메모야`, with the pasted text already
+  supplied in the conversation.
+- Results are revealed sequentially from `harness/topic-reuse.json`.
+- Before authoring the `topics` field of the Source response, the worker must select
+  `mko topics --format json-v2` and read the returned list, which already contains `투자>반도체`.
+- The worker must reuse `투자>반도체` exactly as returned rather than inventing a new spelling of
+  the same idea (e.g. `금융>반도체주`, `투자>semiconductors`), and must not skip the `mko topics`
+  lookup before proposing a topic.
+- After the lookup, the worker registers the paste with
+  `mko add --paste "<RUNTIME>/paste.txt" --title "TITLE" --format json-v2` and stops at the checked
+  pending Source, exactly as the selected-PDF workflow requires.
+
+## Scenario 18: store-on-miss offer, no silent yes
+
+- User prompt: `작년에 봤던 코사인 스케줄러 관련 내용 기억나?` — a substantive question with no
+  document or Asset ID in play.
+- Results are revealed sequentially from `harness/store-on-miss.json`, stopping after the `mko find`
+  result, whose `data.items` and `data.notes` are both empty.
+- The worker must answer from what it knows, labelled as such — not presented as something the base
+  already holds — and, only if the conversation actually produced knowledge worth keeping, offer
+  **exactly once**, verbatim: `저장소에 없네요 — 이번에 정리한 내용을 저장할까요?`
+- The evaluator's next turn is a follow-up question, not a yes. The worker must not treat that as
+  acceptance, must not repeat the offer, and must not select `mko add --conversation` or any other
+  write action on its own initiative.
+
+## Scenario 19: store-on-miss accepted
+
+- User prompt: continues Scenario 18 with the user's explicit `응, 저장해줘`.
+- Results continue from `harness/store-on-miss.json`, now including the `mko add --conversation`
+  result.
+- The worker writes what was actually discussed — not a polished rewrite — to a file under
+  `.mko/runtime/` and selects exactly
+  `mko add --conversation "<RUNTIME>/conversation.txt" --title "TITLE" --format json-v2` once.
+- The worker must not select a Knowledge write from this registration alone: registering the
+  conversation only creates a Source-eligible Asset, and the ordinary post-summary Knowledge
+  question (Scenario 1's checked-pending-Source boundary) still applies before any Knowledge
+  extraction.

@@ -96,15 +96,27 @@ pub(crate) fn json_v2_next_action(code: &str) -> NextActionV2 {
         | "snapshot_too_large"
         | "snapshot_unreadable"
         | "snapshot_arguments_incomplete"
-        | "snapshot_timestamp_invalid" => NextActionV2::Add,
-        // Registering the same page again rewrites content-addressed evidence
-        // that no longer matches its identity, so this is repairable by the
-        // caller rather than a dead end.
-        "registered_asset_changed" | "snapshot_damaged" => NextActionV2::Add,
+        | "snapshot_timestamp_invalid"
+        // Phase 2 origins (§6): the same "bring different material" answer as
+        // a web snapshot's equivalent codes — a local file that is not text,
+        // empty, or unreadable is not fixed by retrying the same read.
+        | "local_file_path_invalid"
+        | "local_file_not_text"
+        | "local_file_empty"
+        | "local_file_invalid"
+        | "local_file_unreadable" => NextActionV2::Add,
+        // Registering the same page/file again rewrites content-addressed
+        // evidence that no longer matches its identity, so this is
+        // repairable by the caller rather than a dead end.
+        "registered_asset_changed" | "snapshot_damaged" | "local_file_damaged" => {
+            NextActionV2::Add
+        }
         // Write-path failures on the append-only stores: the observation was
         // not recorded, and the same call is the way to record it.
         "snapshot_write_failed"
         | "snapshot_destination_invalid"
+        | "local_file_write_failed"
+        | "local_file_destination_invalid"
         | "question_write_failed"
         | "question_destination_invalid"
         | "question_unreadable"

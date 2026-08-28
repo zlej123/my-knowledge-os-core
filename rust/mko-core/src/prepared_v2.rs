@@ -24,6 +24,7 @@ use crate::{
     config_v2::{DerivedArtifactsPolicyV2, KnowledgeConfigV2},
     error::MkoError,
     fingerprint::{FileSnapshot, fingerprint_open_file, validate_pdf_content},
+    local_file_v2::read_original_text_v2,
     lock::{RepositoryMutationLock, StaleRepositoryLockPolicy},
     model_v2::{
         ContentBlockV2, ExtractorIdentityV2, PreparedArtifactTypeV2, PreparedContentV2,
@@ -233,11 +234,12 @@ where
     })
 }
 
-/// Prepares a web snapshot for drafting.
+/// Prepares a web snapshot, paste, or captured conversation for drafting —
+/// every TEXT-fingerprint origin (§6.1).
 ///
 /// The PDF path exists to get trustworthy text out of a file the owner holds:
 /// it inspects the provider, re-fingerprints the bytes, snapshots them, and
-/// runs an extractor in a child process. A snapshot needs none of that. The
+/// runs an extractor in a child process. None of these origins need that. The
 /// text is already in the knowledge base, its hash *is* the Asset's identity,
 /// and there is no provider file that could have changed underneath.
 ///
@@ -289,10 +291,13 @@ fn prepare_snapshot_inner(
         ));
     }
     let asset = read_asset_v2(repository_root, asset_id)?;
-    if asset.origin != AssetOriginV2::WebSnapshot {
+    if !matches!(
+        asset.origin,
+        AssetOriginV2::WebSnapshot | AssetOriginV2::PastedText | AssetOriginV2::Conversation
+    ) {
         return Err(MkoError::new(
             "asset_binding_invalid",
-            "this Asset is not a web snapshot",
+            "this Asset is not a web snapshot, paste, or captured conversation",
         ));
     }
     let text = read_snapshot_text_v2(repository_root, asset_id)?;
@@ -304,6 +309,89 @@ fn prepare_snapshot_inner(
     }
 
     let bundle = build_pdf_prepared_content_v2(&asset, std::slice::from_ref(&text), metadata)?;
+    persist_prepared_session_v2(repository_root, bundle, clock, "v2 snapshot prepare")
+}
+
+/// Prepares a local Markdown/text file's original bytes for drafting (§6.1).
+///
+/// Unlike the PDF path, there is no provider file to re-inspect: the original
+/// bytes are already in the knowledge base's text-originals store, and the
+/// integrity check is the same shape as a snapshot's — the stored original
+/// must still hash to the identity it was registered under.
+pub fn prepare_local_file_asset_v2(
+    repository_root: &Path,
+    asset_id: &str,
+    metadata: PreparedMetadataV2,
+) -> Result<PreparedPdfResultV2, MkoError> {
+    prepare_local_file_asset_v2_with_clock(repository_root, asset_id, metadata, &SystemClock)
+}
+
+pub fn prepare_local_file_asset_v2_with_clock(
+    repository_root: &Path,
+    asset_id: &str,
+    metadata: PreparedMetadataV2,
+    clock: &dyn Clock,
+) -> Result<PreparedPdfResultV2, MkoError> {
+    let outcome = prepare_local_file_inner(repository_root, asset_id, metadata, clock);
+    // Same observation the PDF and snapshot paths record, for the same
+    // reason: a failure that is reported once and discarded leaves material
+    // registered, stalled, and unexplained.
+    let _ = record_preparation_attempt_v2(
+        repository_root,
+        asset_id,
+        match &outcome {
+            Ok(_) => PreparationOutcomeV2::Prepared,
+            Err(_) => PreparationOutcomeV2::Failed,
+        },
+        outcome.as_ref().err().map(|error| error.code()),
+        clock,
+    );
+    outcome
+}
+
+fn prepare_local_file_inner(
+    repository_root: &Path,
+    asset_id: &str,
+    metadata: PreparedMetadataV2,
+    clock: &dyn Clock,
+) -> Result<PreparedPdfResultV2, MkoError> {
+    let config = KnowledgeConfigV2::read(repository_root)?;
+    if config.derived_artifacts == DerivedArtifactsPolicyV2::Provider {
+        return Err(MkoError::new(
+            "derived_artifacts_policy_unsupported",
+            "v0.3.0 refuses provider persistence because prepared plaintext cannot be stored safely there",
+        ));
+    }
+    let asset = read_asset_v2(repository_root, asset_id)?;
+    if asset.origin != AssetOriginV2::LocalFile {
+        return Err(MkoError::new(
+            "asset_binding_invalid",
+            "this Asset is not a local file",
+        ));
+    }
+    let text = read_original_text_v2(repository_root, &asset)?;
+    if sha256_digest(text.as_bytes()) != asset.fingerprint {
+        return Err(MkoError::new(
+            "registered_asset_changed",
+            "the stored original no longer matches the identity it was registered under",
+        ));
+    }
+
+    let bundle = build_pdf_prepared_content_v2(&asset, std::slice::from_ref(&text), metadata)?;
+    persist_prepared_session_v2(repository_root, bundle, clock, "v2 local-file prepare")
+}
+
+/// Finishes preparation once a bundle exists: writes it to the local runtime
+/// as an immutable, TTL-bound session, and reads it back for exact canonical
+/// validation. Shared by every origin that skips the PDF path's provider
+/// re-inspection and child-process extraction (a snapshot, a paste, a
+/// captured conversation, and a local file).
+fn persist_prepared_session_v2(
+    repository_root: &Path,
+    bundle: PreparedContentV2,
+    clock: &dyn Clock,
+    lock_label: &str,
+) -> Result<PreparedPdfResultV2, MkoError> {
     let runtime = LocalRuntimeV2::open(repository_root)?;
     let bundle_bytes = canonical_json_bytes(&bundle)?;
     if bundle_bytes.len() as u64 > MAX_PREPARED_BUNDLE_BYTES {
@@ -315,7 +403,7 @@ fn prepare_snapshot_inner(
 
     let _mutation_lock = RepositoryMutationLock::acquire(
         repository_root,
-        "v2 snapshot prepare",
+        lock_label,
         clock,
         StaleRepositoryLockPolicy::Preserve,
     )?;
@@ -532,7 +620,10 @@ fn validate_asset(asset: &AssetRecordV2) -> Result<(), MkoError> {
     // that the identity is derived from the fingerprint of what was stored.
     let media_type_ok = match asset.origin {
         AssetOriginV2::ProviderPdf => asset.media_type == "application/pdf",
-        AssetOriginV2::WebSnapshot => asset.media_type == "text/plain",
+        AssetOriginV2::WebSnapshot
+        | AssetOriginV2::PastedText
+        | AssetOriginV2::LocalFile
+        | AssetOriginV2::Conversation => asset.media_type == "text/plain",
     };
     if asset.schema_version != 2
         || !media_type_ok
@@ -559,7 +650,11 @@ fn normalize_metadata(mut metadata: PreparedMetadataV2) -> Result<PreparedMetada
     Ok(metadata)
 }
 
-fn normalize_single_line(value: &str) -> Result<String, MkoError> {
+/// Trims, collapses internal whitespace, and NFC-normalizes a single line of
+/// agent-supplied text — case-preserving. Shared with topics normalization
+/// (`records_v2::normalize_topics`, §6.3): a topic label is exactly this kind
+/// of value.
+pub(crate) fn normalize_single_line(value: &str) -> Result<String, MkoError> {
     let value = strip_ambiguous_controls(value);
     Ok(value
         .replace("\r\n", "\n")

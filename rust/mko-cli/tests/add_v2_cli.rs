@@ -272,3 +272,133 @@ fn a_snapshot_without_an_address_is_refused() {
         .code(1)
         .stdout(predicates::str::contains("snapshot_arguments_incomplete"));
 }
+
+// Pasted text arrives in a file, not an argument — same file-not-argument
+// discipline as `--snapshot` (§6, Phase 2).
+#[test]
+#[allow(deprecated)]
+fn pasted_text_becomes_registered_evidence_with_no_locator() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    let provider = root.path().join("Personal Inbox");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    fs::create_dir_all(&provider).unwrap();
+    let text = root.path().join("paste.txt");
+    fs::write(&text, "the owner pasted this text").unwrap();
+
+    let output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["add", "--paste"])
+        .arg(&text)
+        .args(["--title", "My paste", "--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(report["command"], "add");
+    assert_eq!(report["data"]["outcome"], "created");
+    // No locator exists for a paste (§6.1, decided): the empty-string
+    // convention.
+    assert_eq!(report["data"]["logical_locator"], "");
+
+    let second = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["add", "--paste"])
+        .arg(&text)
+        .args(["--title", "Same text again", "--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let second: serde_json::Value = serde_json::from_slice(&second).unwrap();
+    assert_eq!(second["data"]["outcome"], "existing");
+    assert_eq!(second["data"]["asset_id"], report["data"]["asset_id"]);
+}
+
+// A local Markdown/text file names the material itself: Core reads it
+// directly and stores its original bytes content-addressed (§6.1). No
+// separate runtime text file is written first, unlike `--paste`.
+#[test]
+#[allow(deprecated)]
+fn a_local_markdown_file_is_registered_by_its_original_bytes() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    let provider = root.path().join("Personal Inbox");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    fs::create_dir_all(&provider).unwrap();
+    let notes = root.path().join("owner-notes");
+    fs::create_dir_all(&notes).unwrap();
+    let note = notes.join("todo.md");
+    fs::write(&note, "# TODO\n\n- write the phase 2 plan\n").unwrap();
+
+    let output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["add", "--local-file"])
+        .arg(&note)
+        .args(["--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(report["command"], "add");
+    assert_eq!(report["data"]["outcome"], "created");
+    assert_eq!(report["data"]["logical_locator"], note.to_str().unwrap());
+    let asset_id = report["data"]["asset_id"].as_str().unwrap();
+    let hash = asset_id.strip_prefix("personal-asset-").unwrap();
+    let stored = fs::read_to_string(
+        repository
+            .join("assets/originals")
+            .join(format!("{hash}.md")),
+    )
+    .unwrap();
+    assert_eq!(stored, "# TODO\n\n- write the phase 2 plan\n");
+}
+
+// Conversation content captured on a recall miss (§6.3, store-on-miss) is
+// registered the same file-not-argument way as a paste or a snapshot.
+#[test]
+#[allow(deprecated)]
+fn captured_conversation_content_becomes_registered_evidence() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    let provider = root.path().join("Personal Inbox");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    fs::create_dir_all(&provider).unwrap();
+    let text = root.path().join("conversation.txt");
+    fs::write(
+        &text,
+        "owner: what do we know about X?\nagent: nothing found; here is what I know...",
+    )
+    .unwrap();
+
+    let output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["add", "--conversation"])
+        .arg(&text)
+        .args(["--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(report["command"], "add");
+    assert_eq!(report["data"]["outcome"], "created");
+    assert_eq!(report["data"]["logical_locator"], "");
+}

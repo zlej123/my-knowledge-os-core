@@ -319,6 +319,37 @@ fn tag_matches(tags: &[String], needle: Option<&str>) -> bool {
     }
 }
 
+/// Same normalization topics get at write time (§6.3): trim, collapse
+/// whitespace, NFC, then case-fold for a case-insensitive comparison. Storage
+/// keeps the agent's casing; only the comparison is case-insensitive.
+fn normalize_topic_needle_v2(topic: Option<&str>) -> Result<Option<String>, MkoError> {
+    let Some(topic) = topic else {
+        return Ok(None);
+    };
+    let collapsed = topic.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = collapsed.nfc().collect::<String>().to_lowercase();
+    if normalized.is_empty() {
+        return Err(MkoError::new(
+            "knowledge_search_invalid",
+            "topic filter must not be empty",
+        ));
+    }
+    Ok(Some(normalized))
+}
+
+/// A record matches a topic filter when any of its topics equals the filter
+/// case-insensitively, or is a hierarchical child of it — `투자` matches
+/// `투자>반도체` (§6, §6.3).
+fn topic_matches(topics: &[String], needle: Option<&str>) -> bool {
+    match needle {
+        None => true,
+        Some(needle) => topics.iter().any(|topic| {
+            let topic = topic.nfc().collect::<String>().to_lowercase();
+            topic == needle || topic.starts_with(&format!("{needle}>"))
+        }),
+    }
+}
+
 fn knowledge_unit_haystack(unit: &KnowledgeUnitV2, perspectives: &[PerspectiveV2]) -> String {
     let mut haystack = unit.title.to_lowercase();
     haystack.push(' ');
@@ -387,9 +418,11 @@ pub fn search_records_v2(
         SearchConfirmationFilterV2::Any,
         None,
         None,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn search_records_by_perspective_v2(
     repository_root: &Path,
     term: &str,
@@ -397,9 +430,11 @@ pub fn search_records_by_perspective_v2(
     confirmation: SearchConfirmationFilterV2,
     tag: Option<&str>,
     layer: Option<SearchLayerV2>,
+    topic: Option<&str>,
 ) -> Result<Vec<SearchMatchV2>, MkoError> {
     let tokens = normalize_query_tokens_v2(term)?;
     let tag_needle = normalize_tag_needle_v2(tag)?;
+    let topic_needle = normalize_topic_needle_v2(topic)?;
     let groups = derive_groups(repository_root)?;
     let mut matches = groups
         .values()
@@ -411,6 +446,9 @@ pub fn search_records_by_perspective_v2(
                     .as_ref()
                     .is_some_and(|selected| !revision.perspectives.contains(selected))
                 {
+                    return Vec::new();
+                }
+                if !topic_matches(&revision.response.topics, topic_needle.as_deref()) {
                     return Vec::new();
                 }
                 let label = confirmation_label_for_target(target);
@@ -456,6 +494,9 @@ pub fn search_records_by_perspective_v2(
                     return Vec::new();
                 }
                 if !tag_matches(&revision.response.tags, tag_needle.as_deref()) {
+                    return Vec::new();
+                }
+                if !topic_matches(&revision.response.topics, topic_needle.as_deref()) {
                     return Vec::new();
                 }
                 if !tokens_match_all(&source_haystack(&revision.response), &tokens) {
@@ -749,6 +790,51 @@ fn derive_groups(repository_root: &Path) -> Result<BTreeMap<String, Vec<ScannedT
     Ok(groups)
 }
 
+/// Every topic proposed on a current Source or Knowledge revision (§6.3),
+/// flat, case-insensitively deduped, and deterministically sorted.
+///
+/// Read-only and cheap on purpose (D13: `mko topics` grounds the Skill's
+/// reuse-before-invention rule, so it has to be worth running before every
+/// new proposal): it reuses `scan_collection` directly rather than
+/// `derive_groups`' full derivation, which additionally computes review
+/// histories and projection drift that a topic listing has no use for.
+pub fn list_topics_v2(repository_root: &Path) -> Result<Vec<String>, MkoError> {
+    KnowledgeConfigV2::read(repository_root)?;
+    validate_real_directory(repository_root, "queue_repository_invalid")?;
+    let deadline = Instant::now() + RECORD_SCAN_DEADLINE;
+    let mut targets = scan_collection(
+        repository_root,
+        ReviewTargetTypeV2::Source,
+        "sources",
+        deadline,
+    )?;
+    targets.extend(scan_collection(
+        repository_root,
+        ReviewTargetTypeV2::Knowledge,
+        "knowledge",
+        deadline,
+    )?);
+    if targets.len() > MAX_RECORDS {
+        return Err(queue_scan_limit());
+    }
+    // Keyed by case-folded form so two spellings of the same label collapse
+    // to one entry; the map's key order gives a deterministic result without
+    // a separate sort pass.
+    let mut topics = BTreeMap::<String, String>::new();
+    for target in &targets {
+        let response_topics = match &target.revision {
+            RevisionV2::Source(revision) => &revision.response.topics,
+            RevisionV2::Knowledge(revision) => &revision.response.topics,
+        };
+        for topic in response_topics {
+            topics
+                .entry(topic.to_lowercase())
+                .or_insert_with(|| topic.clone());
+        }
+    }
+    Ok(topics.into_values().collect())
+}
+
 /// The projection Core would generate for a record right now, derived from the
 /// record itself.
 ///
@@ -807,6 +893,11 @@ fn canonical_projection_input(target: &ScannedTarget) -> Result<ProjectionInputV
     );
     tags.sort();
     tags.dedup();
+    let mut topics = match &target.revision {
+        RevisionV2::Source(revision) => revision.response.topics.clone(),
+        RevisionV2::Knowledge(revision) => revision.response.topics.clone(),
+    };
+    topics.sort();
     let body = match &target.revision {
         RevisionV2::Source(revision) => crate::projection_v2::source_projection_body_v2(
             &revision.response,
@@ -835,6 +926,7 @@ fn canonical_projection_input(target: &ScannedTarget) -> Result<ProjectionInputV
         domain: primary_perspective(&perspectives),
         perspectives,
         tags,
+        topics,
         summary,
         body_markdown: body,
         record_link: format!("{collection}/{}/current.yaml", target.record_id),

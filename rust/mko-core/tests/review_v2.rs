@@ -550,6 +550,7 @@ fn seed_target(
             domain: "uncategorized".into(),
             perspectives: Vec::new(),
             tags: Vec::new(),
+            topics: Vec::new(),
             record_link: format!("{collection}/{record_id}/current.yaml"),
             asset_link: format!("assets/registry/personal-asset-{}.json", "a".repeat(64)),
             summary: String::new(),

@@ -49,6 +49,8 @@ pub enum JsonV2Command {
     Status,
     #[serde(rename = "find")]
     Find,
+    #[serde(rename = "topics")]
+    Topics,
     #[serde(rename = "queue")]
     Queue,
     #[serde(rename = "queue.drafts")]
@@ -151,6 +153,16 @@ pub struct FindDataV2 {
     pub items: Vec<FindMatchV2>,
     pub notes: Vec<FindNoteV2>,
     pub scan_complete: bool,
+}
+
+/// `mko topics` (D13, §6.3): a flat, case-insensitively-deduped,
+/// deterministically sorted list of every topic proposed on a current
+/// Source or Knowledge revision. The Skill consults this before proposing a
+/// new topic, to prefer reuse over invention.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TopicsDataV2 {
+    pub topics: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -639,6 +651,13 @@ pub enum JsonV2Success {
         result: JsonV2SuccessResult,
         data: FindDataV2,
     },
+    #[serde(rename = "topics")]
+    Topics {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: TopicsDataV2,
+    },
     #[serde(rename = "queue")]
     Queue {
         #[serde(deserialize_with = "deserialize_schema_version")]
@@ -779,6 +798,14 @@ impl JsonV2Success {
 
     pub fn find(data: FindDataV2) -> Self {
         Self::Find {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
+    pub fn topics(data: TopicsDataV2) -> Self {
+        Self::Topics {
             schema_version: 2,
             result: JsonV2SuccessResult::Ok,
             data,

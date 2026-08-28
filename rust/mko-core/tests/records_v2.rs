@@ -675,7 +675,8 @@ fn the_published_schema_rejects_everything_core_rejects() {
             "units": [{
                 "kind": kind, "title": "t", "body": "b", "confidence": "high",
                 "basis": "evidence", "evidence_refs": [], "tags": []
-            }]
+            }],
+            "topics": []
         });
         let mut environment = new_environment();
         environment.knowledge = serde_json::from_value(unevidenced.clone()).unwrap();
@@ -705,7 +706,8 @@ fn the_published_schema_rejects_everything_core_rejects() {
             "units": [{
                 "kind": kind, "title": "t", "body": "b", "confidence": "high",
                 "basis": basis, "evidence_refs": [], "tags": []
-            }]
+            }],
+            "topics": []
         });
         assert!(
             validator.is_valid(&legal),

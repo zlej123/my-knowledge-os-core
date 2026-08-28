@@ -163,6 +163,7 @@ fn search_confirmed_only_filter_excludes_unconfirmed() {
             SearchConfirmationFilterV2::ConfirmedOnly,
             None,
             None,
+            None,
         )
         .unwrap()
         .is_empty()
@@ -173,6 +174,7 @@ fn search_confirmed_only_filter_excludes_unconfirmed() {
             "reported",
             None,
             SearchConfirmationFilterV2::UnconfirmedOnly,
+            None,
             None,
             None,
         )
@@ -241,6 +243,7 @@ fn search_matches_source_records() {
             SearchConfirmationFilterV2::Any,
             None,
             None,
+            None,
         )
         .unwrap()
         .is_empty()
@@ -259,6 +262,7 @@ fn search_tag_and_layer_filters_narrow_results() {
         SearchConfirmationFilterV2::Any,
         Some("example"),
         None,
+        None,
     )
     .unwrap();
     assert_eq!(by_tag.len(), 1);
@@ -270,6 +274,7 @@ fn search_tag_and_layer_filters_narrow_results() {
             None,
             SearchConfirmationFilterV2::Any,
             Some("nonexistent-tag"),
+            None,
             None,
         )
         .unwrap()
@@ -283,6 +288,7 @@ fn search_tag_and_layer_filters_narrow_results() {
         SearchConfirmationFilterV2::Any,
         None,
         Some(SearchLayerV2::CounterargumentOrUncertainty),
+        None,
     )
     .unwrap();
     assert_eq!(by_layer.len(), 1);
@@ -343,6 +349,7 @@ fn confirmed_perspective_is_searchable_and_resurfacing_prioritizes_open_question
             SearchConfirmationFilterV2::Any,
             None,
             None,
+            None,
         )
         .unwrap()
         .len(),
@@ -354,6 +361,7 @@ fn confirmed_perspective_is_searchable_and_resurfacing_prioritizes_open_question
             "reported",
             Some(PerspectiveV2::Investment),
             SearchConfirmationFilterV2::Any,
+            None,
             None,
             None,
         )
@@ -712,6 +720,7 @@ fn self_consistent_projection_with_noncanonical_semantics_blocks_the_queue() {
             domain: "uncategorized".into(),
             perspectives: Vec::new(),
             tags: environment.source.tags.clone(),
+            topics: Vec::new(),
             summary: String::new(),
             body_markdown: String::new(),
             record_link: format!("sources/{}/current.yaml", source.record_id),
@@ -758,6 +767,12 @@ fn sync_projection(
     }
     tags.sort();
     tags.dedup();
+    let mut topics = if is_source {
+        environment.source.topics.clone()
+    } else {
+        environment.knowledge.topics.clone()
+    };
+    topics.sort();
     write_projection_v2(
         environment.root.path(),
         &ProjectionInputV2 {
@@ -799,6 +814,7 @@ fn sync_projection(
                 .map(|knowledge| knowledge.revision.perspectives.clone())
                 .unwrap_or_default(),
             tags,
+            topics,
             record_link: format!(
                 "{}/{}/current.yaml",
                 if is_source { "sources" } else { "knowledge" },

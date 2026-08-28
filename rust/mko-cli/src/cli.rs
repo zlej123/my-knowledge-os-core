@@ -47,12 +47,13 @@ use mko_core::{
         FindConfirmationStatusV2, FindConfirmationV2, FindDataV2, FindLayerV2, FindMatchV2,
         FindNoteV2, FindRecordTypeV2, HandshakeDataV2, JsonV2Command, JsonV2Success, NextActionV2,
         PendingDraftReasonV2, PendingDraftV2, QuestionsAppendDataV2, QuestionsListDataV2,
-        QueueDraftsDataV2, SetupApplyDataV2,
+        QueueDraftsDataV2, SetupApplyDataV2, TopicsDataV2,
     },
     knowledge::{
         ConceptKind, KnowledgeSearchQuery, WriteKnowledgeRequest, approve_knowledge,
         list_knowledge, list_unreviewed_knowledge, search_knowledge, write_knowledge_note,
     },
+    local_file_v2::{RegisterLocalFileRequestV2, register_local_file_asset_v2},
     migrate_v2::migrate_v2,
     model::AssetStatus,
     pdf::{ExtractionWorkerResponse, extract_pdf_pages_from_reader, worker_executable},
@@ -62,7 +63,7 @@ use mko_core::{
     question_v2::{QuestionRecordV2, append_question_v2, questions_for_asset_v2},
     queue_v2::{
         ConfirmationLabelV2, ResurfacedKnowledgeStateV2, SearchConfirmationFilterV2, SearchLayerV2,
-        SearchMatchV2, SearchRecordTypeV2, resurface_knowledge_by_perspective_v2,
+        SearchMatchV2, SearchRecordTypeV2, list_topics_v2, resurface_knowledge_by_perspective_v2,
         search_records_by_perspective_v2, summarize_home_queue_v2,
     },
     quick_note_v2::{
@@ -82,7 +83,11 @@ use mko_core::{
     },
     setup_plan_v2::{apply_setup_plan_v2_tty, create_setup_plan_v2},
     setup_v2::{SetupPersonalV2Request, setup_personal_v2},
-    snapshot_v2::{RegisterSnapshotRequestV2, parse_fetched_at_v2, register_web_snapshot_v2},
+    snapshot_v2::{
+        RegisterConversationRequestV2, RegisterPastedTextRequestV2, RegisterSnapshotRequestV2,
+        parse_fetched_at_v2, register_conversation_v2, register_pasted_text_v2,
+        register_web_snapshot_v2,
+    },
     source::{
         RepairSourceStateRequest, WriteSourceRequest, repair_source_state, write_source_draft,
     },
@@ -318,6 +323,8 @@ enum Command {
     Status(StatusArgs),
     #[command(hide = true)]
     Queue(QueueArgs),
+    #[command(hide = true)]
+    Topics(TopicsArgs),
     /// Records a question asked about registered material, or lists what was
     /// asked before. Answers are never stored — see `question_v2`.
     Ask(AskArgs),
@@ -396,6 +403,11 @@ struct FindArgs {
     tag: Option<String>,
     #[arg(long, value_enum)]
     layer: Option<FindLayerArg>,
+    /// Matches a record when any of its topics equals this value
+    /// case-insensitively, or is a hierarchical child of it (e.g. `투자`
+    /// matches `투자>반도체`). Arrives with `topics` in Phase 2 (§6.3).
+    #[arg(long)]
+    topic: Option<String>,
     #[arg(long)]
     repo: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -618,8 +630,8 @@ struct SetupApplyArgs {
 #[derive(Args)]
 struct AddArgs {
     #[arg(
-        required_unless_present_any = ["inbox", "snapshot"],
-        conflicts_with_all = ["inbox", "snapshot"],
+        required_unless_present_any = ["inbox", "snapshot", "paste", "local_file", "conversation"],
+        conflicts_with_all = ["inbox", "snapshot", "paste", "local_file", "conversation"],
     )]
     file: Option<PathBuf>,
     #[arg(long)]
@@ -627,15 +639,37 @@ struct AddArgs {
     /// Path to a file holding text an agent read from the web. The text arrives
     /// in a file, not an argument: a page body on a command line reaches
     /// process listings and shell history.
-    #[arg(long, conflicts_with = "inbox")]
+    #[arg(long, conflicts_with_all = ["inbox", "paste", "local_file", "conversation"])]
     snapshot: Option<PathBuf>,
-    /// The address the text was read from.
+    /// Path to a file holding text the owner pasted. Text arrives in a file,
+    /// not an argument — same file-not-argument discipline as `--snapshot`
+    /// (§6, Phase 2).
+    #[arg(long, conflicts_with_all = ["inbox", "snapshot", "local_file", "conversation"])]
+    paste: Option<PathBuf>,
+    /// Absolute path to a local Markdown/text file the owner already holds.
+    /// Unlike `--paste`/`--snapshot`/`--conversation`, this names the
+    /// material itself — Core reads and stores its original bytes directly,
+    /// content-addressed (§6.1); no separate runtime text file is written.
+    #[arg(long, conflicts_with_all = ["inbox", "snapshot", "paste", "conversation"])]
+    local_file: Option<PathBuf>,
+    /// Path to a file holding conversation content captured on a recall miss
+    /// (§6.3, store-on-miss). Same file-not-argument discipline as
+    /// `--snapshot`/`--paste`.
+    #[arg(long, conflicts_with_all = ["inbox", "snapshot", "paste", "local_file"])]
+    conversation: Option<PathBuf>,
+    /// The address the text was read from. `--snapshot` only.
     #[arg(long, requires = "snapshot")]
     url: Option<String>,
-    #[arg(long, requires = "snapshot")]
+    /// Optional for `--snapshot` (falls back to the address), `--paste`
+    /// (falls back to a fixed label), `--local-file` (falls back to the file
+    /// name), and `--conversation` (falls back to a fixed label). Unused for
+    /// a plain PDF or `--inbox`, whose titles are always the provider file
+    /// name.
+    #[arg(long)]
     title: Option<String>,
-    /// RFC 3339. Defaults to now.
-    #[arg(long, requires = "snapshot")]
+    /// RFC 3339. Defaults to now. Applies to `--snapshot`, `--paste`,
+    /// `--local-file`, and `--conversation`.
+    #[arg(long)]
     fetched_at: Option<String>,
     #[arg(long)]
     verified_backup: bool,
@@ -750,6 +784,15 @@ struct QueueArgs {
     /// records waiting to be reviewed.
     #[arg(long)]
     pending_drafts: bool,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
+}
+/// `mko topics` (D13, §6.3): read-only, no mutation lock. The Skill consults
+/// this before proposing a new topic, to prefer an existing label.
+#[derive(Args)]
+struct TopicsArgs {
+    #[arg(long)]
+    repo: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
 }
@@ -1046,6 +1089,9 @@ fn home() -> Result<(), MkoError> {
             file: None,
             inbox: true,
             snapshot: None,
+            paste: None,
+            local_file: None,
+            conversation: None,
             url: None,
             title: None,
             fetched_at: None,
@@ -1070,6 +1116,7 @@ fn home() -> Result<(), MkoError> {
                 unconfirmed: false,
                 tag: None,
                 layer: None,
+                topic: None,
                 repo: Some(context.repository_root),
                 format: OutputFormat::Human,
             })
@@ -1208,6 +1255,9 @@ fn legacy_home_action(
             file: None,
             inbox: true,
             snapshot: None,
+            paste: None,
+            local_file: None,
+            conversation: None,
             url: None,
             title: None,
             fetched_at: None,
@@ -1266,6 +1316,7 @@ fn find(arguments: FindArgs) -> Result<(), MkoError> {
                 || arguments.unconfirmed
                 || arguments.tag.is_some()
                 || arguments.layer.is_some()
+                || arguments.topic.is_some()
             {
                 return Err(MkoError::new(
                     "perspective_v3_required",
@@ -1311,6 +1362,7 @@ fn find(arguments: FindArgs) -> Result<(), MkoError> {
                 confirmation_filter,
                 arguments.tag.as_deref(),
                 layer,
+                arguments.topic.as_deref(),
             )?;
             let notes = if perspective.is_none() {
                 search_quick_notes_v2(&repository, &arguments.term)?
@@ -1782,6 +1834,7 @@ fn run(cli: Cli) -> Result<Exit, MkoError> {
         Some(Command::Inbox(arguments)) => inbox(arguments).map(|_| Exit::Success),
         Some(Command::Status(arguments)) => status(arguments).map(|_| Exit::Success),
         Some(Command::Queue(arguments)) => queue_v2(arguments).map(|_| Exit::Success),
+        Some(Command::Topics(arguments)) => topics_v2(arguments).map(|_| Exit::Success),
         Some(Command::Ask(arguments)) => ask_v2(arguments).map(|_| Exit::Success),
         Some(Command::Show(arguments)) => show_v2(arguments).map(|_| Exit::Success),
         Some(Command::ReviewOpen(arguments)) => review_open_v2(arguments).map(|_| Exit::Success),
@@ -2086,6 +2139,15 @@ fn add_v2(arguments: AddArgs, context: &ResolvedPersonalContext) -> Result<(), M
     if let Some(snapshot) = arguments.snapshot.as_deref() {
         return add_snapshot_v2(&arguments, snapshot, context);
     }
+    if let Some(paste) = arguments.paste.as_deref() {
+        return add_paste_v2(&arguments, paste, context);
+    }
+    if let Some(local_file) = arguments.local_file.as_deref() {
+        return add_local_file_v2(&arguments, local_file, context);
+    }
+    if let Some(conversation) = arguments.conversation.as_deref() {
+        return add_conversation_v2(&arguments, conversation, context);
+    }
     if arguments.temporary_source || arguments.verified_backup {
         return Err(MkoError::new(
             "option_unsupported",
@@ -2158,6 +2220,73 @@ fn add_snapshot_v2(
         text: &text,
         fetched_at,
     })?;
+    emit_text_evidence_add_result_v2(arguments, result)
+}
+
+/// Registers text the owner pasted directly. Same shape as
+/// `add_snapshot_v2`, minus the address: pasted text has none (§6.1).
+fn add_paste_v2(
+    arguments: &AddArgs,
+    paste: &Path,
+    context: &ResolvedPersonalContext,
+) -> Result<(), MkoError> {
+    let text = std::fs::read_to_string(paste)
+        .map_err(|error| MkoError::new("snapshot_unreadable", error.to_string()))?;
+    let captured_at = parse_fetched_at_v2(arguments.fetched_at.as_deref())?;
+    let result = register_pasted_text_v2(RegisterPastedTextRequestV2 {
+        repository_root: &context.repository_root,
+        title: arguments.title.as_deref().unwrap_or(""),
+        text: &text,
+        captured_at,
+    })?;
+    emit_text_evidence_add_result_v2(arguments, result)
+}
+
+/// Registers text captured from a conversation (store-on-miss, §6.3). Same
+/// shape as `add_paste_v2`.
+fn add_conversation_v2(
+    arguments: &AddArgs,
+    conversation: &Path,
+    context: &ResolvedPersonalContext,
+) -> Result<(), MkoError> {
+    let text = std::fs::read_to_string(conversation)
+        .map_err(|error| MkoError::new("snapshot_unreadable", error.to_string()))?;
+    let captured_at = parse_fetched_at_v2(arguments.fetched_at.as_deref())?;
+    let result = register_conversation_v2(RegisterConversationRequestV2 {
+        repository_root: &context.repository_root,
+        title: arguments.title.as_deref().unwrap_or(""),
+        text: &text,
+        captured_at,
+    })?;
+    emit_text_evidence_add_result_v2(arguments, result)
+}
+
+/// Registers a local Markdown/text file the owner already holds. Unlike
+/// `--paste`/`--snapshot`/`--conversation`, `local_file` names the material
+/// itself: Core reads and stores its original bytes directly (§6.1), with no
+/// separate runtime text file to write first.
+fn add_local_file_v2(
+    arguments: &AddArgs,
+    local_file: &Path,
+    context: &ResolvedPersonalContext,
+) -> Result<(), MkoError> {
+    let modified_at = parse_fetched_at_v2(arguments.fetched_at.as_deref())?;
+    let result = register_local_file_asset_v2(RegisterLocalFileRequestV2 {
+        repository_root: &context.repository_root,
+        path: local_file,
+        title: arguments.title.as_deref().unwrap_or(""),
+        modified_at,
+    })?;
+    emit_text_evidence_add_result_v2(arguments, result)
+}
+
+/// One outcome shape for every text-evidence origin (web snapshot, paste,
+/// local file, conversation): what a caller does next does not depend on
+/// which of them registered the Asset.
+fn emit_text_evidence_add_result_v2(
+    arguments: &AddArgs,
+    result: mko_core::asset_v2::AssetRegistrationResultV2,
+) -> Result<(), MkoError> {
     match arguments.format {
         OutputFormat::Human => {
             let outcome = match result.outcome {
@@ -2165,7 +2294,7 @@ fn add_snapshot_v2(
                 AssetRegistrationOutcomeV2::Existing => "이미 등록됨",
             };
             println!("{outcome}: {}", result.asset.title_fallback);
-            println!("다음: 이 페이지를 정리해 달라고 요청하세요.");
+            println!("다음: 이 내용을 정리해 달라고 요청하세요.");
             Ok(())
         }
         OutputFormat::JsonV2 => {
@@ -2733,6 +2862,30 @@ fn pending_drafts(context: &ResolvedPersonalContext) -> Result<QueueDraftsDataV2
             .collect(),
         scan_complete: report.scan_complete,
     })
+}
+
+fn topics_v2(arguments: TopicsArgs) -> Result<(), MkoError> {
+    let repository = setup_repository(arguments.repo)?;
+    let topics = list_topics_v2(&repository)?;
+    match arguments.format {
+        OutputFormat::Human => {
+            if topics.is_empty() {
+                println!("등록된 토픽이 없습니다.");
+            } else {
+                for topic in &topics {
+                    println!("{topic}");
+                }
+            }
+            Ok(())
+        }
+        OutputFormat::JsonV2 => {
+            crate::output::emit_json_v2(JsonV2Success::topics(TopicsDataV2 { topics }))
+        }
+        OutputFormat::JsonV1 => Err(MkoError::new(
+            "format_unsupported",
+            "mko topics supports human or json-v2 output",
+        )),
+    }
 }
 
 fn show_v2(arguments: ShowArgs) -> Result<(), MkoError> {
@@ -3789,6 +3942,10 @@ fn json_v2_command(cli: &Cli) -> Option<JsonV2Command> {
             format: OutputFormat::JsonV2,
             ..
         }) => Some(JsonV2Command::Find),
+        Command::Topics(TopicsArgs {
+            format: OutputFormat::JsonV2,
+            ..
+        }) => Some(JsonV2Command::Topics),
         Command::Ask(AskArgs {
             list: true,
             format: OutputFormat::JsonV2,
@@ -3965,6 +4122,7 @@ fn json_v2_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option
         ("setup", Some("apply")) => Some(JsonV2Command::SetupApply),
         ("add", _) => Some(JsonV2Command::Add),
         ("find", _) => Some(JsonV2Command::Find),
+        ("topics", _) => Some(JsonV2Command::Topics),
         ("queue", _) => Some(
             if args.iter().any(|argument| argument == "--pending-drafts") {
                 JsonV2Command::QueueDrafts

@@ -7,7 +7,8 @@
   "required": [
     "schema_version",
     "synthesis",
-    "units"
+    "units",
+    "topics"
   ],
   "properties": {
     "schema_version": {
@@ -23,6 +24,15 @@
       "maxItems": 4096,
       "items": {
         "$ref": "#/$defs/unit"
+      }
+    },
+    "topics": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
       }
     }
   },

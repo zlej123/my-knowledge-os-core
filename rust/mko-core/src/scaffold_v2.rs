@@ -12,6 +12,10 @@ const OWNED_DIRECTORIES: &[&str] = &[
     "assets/attempts",
     "assets/questions",
     "assets/snapshots",
+    // The minimal text-originals store (§6.1, Phase 2): local md/txt files
+    // are stored verbatim, content-addressed. Binaries wait for Phase 3's
+    // check-budget decision (§8).
+    "assets/originals",
     "sources",
     "knowledge",
     "notes",

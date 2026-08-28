@@ -711,6 +711,7 @@ fn search_projection(repository: &Path, query: &str) -> Result<Vec<SearchResult>
         SearchConfirmationFilterV2::Any,
         None,
         None,
+        None,
     )?
     .into_iter()
     .map(|item| SearchResult {

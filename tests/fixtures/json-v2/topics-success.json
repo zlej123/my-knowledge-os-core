@@ -1,0 +1,8 @@
+{
+  "schema_version": 2,
+  "command": "topics",
+  "result": "ok",
+  "data": {
+    "topics": ["개발>Rust", "투자>반도체"]
+  }
+}

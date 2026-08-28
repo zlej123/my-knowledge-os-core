@@ -110,6 +110,8 @@ fn seeded_fixture() -> Fixture {
         .collect::<Vec<_>>();
     tags.sort();
     tags.dedup();
+    let mut topics = knowledge.topics.clone();
+    topics.sort();
     write_projection_v2(
         root.path(),
         &ProjectionInputV2 {
@@ -122,6 +124,7 @@ fn seeded_fixture() -> Fixture {
             domain: "uncategorized".into(),
             perspectives: Vec::new(),
             tags,
+            topics,
             record_link: format!("knowledge/{}/current.yaml", knowledge_result.record_id),
             asset_link: format!("assets/registry/{}.json", asset.id),
             summary: mko_core::projection_v2::knowledge_projection_summary_v2(&knowledge),
@@ -373,6 +376,103 @@ fn find_tag_and_layer_filters_narrow_results() {
     let items = by_layer["data"]["items"].as_array().unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["title"], "External validity");
+}
+
+// The fixtures' Source and Knowledge responses both carry the topic
+// "example>topic" (§6.3); the filter matches it exactly, matches it by
+// hierarchical prefix, and excludes an unrelated topic.
+#[test]
+#[allow(deprecated)]
+fn find_topic_filter_matches_exactly_and_by_hierarchical_prefix() {
+    let fixture = seeded_fixture();
+
+    let exact = Command::cargo_bin("mko")
+        .unwrap()
+        .args([
+            "find",
+            "result",
+            "--topic",
+            "example>topic",
+            "--format",
+            "json-v2",
+            "--repo",
+        ])
+        .arg(fixture.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let exact: serde_json::Value = serde_json::from_slice(&exact).unwrap();
+    assert!(!exact["data"]["items"].as_array().unwrap().is_empty());
+
+    let prefix = Command::cargo_bin("mko")
+        .unwrap()
+        .args([
+            "find", "result", "--topic", "example", "--format", "json-v2", "--repo",
+        ])
+        .arg(fixture.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let prefix: serde_json::Value = serde_json::from_slice(&prefix).unwrap();
+    assert!(!prefix["data"]["items"].as_array().unwrap().is_empty());
+
+    let no_match = Command::cargo_bin("mko")
+        .unwrap()
+        .args([
+            "find",
+            "result",
+            "--topic",
+            "unrelated-topic",
+            "--format",
+            "json-v2",
+            "--repo",
+        ])
+        .arg(fixture.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let no_match: serde_json::Value = serde_json::from_slice(&no_match).unwrap();
+    assert!(no_match["data"]["items"].as_array().unwrap().is_empty());
+}
+
+#[test]
+#[allow(deprecated)]
+fn mko_topics_lists_the_fixtures_shared_topic_in_json_and_human_output() {
+    let fixture = seeded_fixture();
+
+    let output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["topics", "--format", "json-v2", "--repo"])
+        .arg(fixture.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let envelope: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(envelope["command"], "topics");
+    assert_eq!(envelope["result"], "ok");
+    assert_eq!(
+        envelope["data"]["topics"],
+        serde_json::json!(["example>topic"])
+    );
+
+    let human = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["topics", "--repo"])
+        .arg(fixture.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(String::from_utf8(human).unwrap().contains("example>topic"));
 }
 
 #[test]

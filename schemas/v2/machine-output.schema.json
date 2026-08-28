@@ -25,6 +25,9 @@
       "$ref": "#/$defs/find_success"
     },
     {
+      "$ref": "#/$defs/topics_success"
+    },
+    {
       "$ref": "#/$defs/source_prepare_success"
     },
     {
@@ -74,6 +77,7 @@
         "setup.apply",
         "add",
         "find",
+        "topics",
         "source.prepare",
         "source.write",
         "knowledge.write",
@@ -741,6 +745,48 @@
         },
         "data": {
           "$ref": "#/$defs/find_data"
+        }
+      }
+    },
+    "topics_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "topics"
+      ],
+      "properties": {
+        "topics": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      }
+    },
+    "topics_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "topics"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/topics_data"
         }
       }
     },

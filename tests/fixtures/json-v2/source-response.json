@@ -36,5 +36,6 @@
   "knowledge_recommendation": {
     "outcome": "recommend",
     "reasons": ["The document contains a reusable grounded result."]
-  }
+  },
+  "topics": ["example>topic"]
 }

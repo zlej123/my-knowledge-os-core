@@ -24,8 +24,8 @@ use mko_core::{
     model_v2::{KnowledgeResponseV2, PreparedMetadataV2, SourceResponseV2},
     prepared_v2::{
         PreparePdfAssetRequestV2, PreparedPdfResultV2, PreparedPersistenceOutcomeV2,
-        cleanup_prepared_sessions_v2, prepare_pdf_asset_v2, prepare_snapshot_asset_v2,
-        read_prepared_content_v2,
+        cleanup_prepared_sessions_v2, prepare_local_file_asset_v2, prepare_pdf_asset_v2,
+        prepare_snapshot_asset_v2, read_prepared_content_v2,
     },
     queue_v2::{ReviewCardTargetStateV2, derive_queue_v2, show_review_card_v2},
     records_v2::{
@@ -182,38 +182,45 @@ pub fn prepare_source_json_v2(
     confirm_download: bool,
     worker_executable: &Path,
 ) -> Result<(), MkoError> {
-    // A snapshot has no provider file to inspect, fingerprint, or extract from:
-    // its text is already in the knowledge base and its hash is its identity.
-    // Routing on the origin is what makes "give me this link" reach the same
-    // drafting flow as a PDF.
+    // Every non-PDF origin has no provider file to inspect, fingerprint, or
+    // extract from: its text (or original) is already in the knowledge base
+    // and its hash is its identity. Routing on the origin is what makes "give
+    // me this link/paste/file/conversation" reach the same drafting flow as a
+    // PDF. Exhaustive on purpose (Phase 2): a binary `if WebSnapshot {..}
+    // else {assume PDF}` silently mis-routed every new origin into the
+    // PDF/Inbox path before this match existed.
     let metadata = PreparedMetadataV2 {
         title: None,
         authors: Vec::new(),
         created_at: None,
     };
-    if read_asset_v2(repository, asset_id)?.origin == AssetOriginV2::WebSnapshot {
-        let result = prepare_snapshot_asset_v2(repository, asset_id, metadata)?;
-        return emit_prepared_session_v2(result);
+    match read_asset_v2(repository, asset_id)?.origin {
+        AssetOriginV2::WebSnapshot | AssetOriginV2::PastedText | AssetOriginV2::Conversation => {
+            let result = prepare_snapshot_asset_v2(repository, asset_id, metadata)?;
+            emit_prepared_session_v2(result)
+        }
+        AssetOriginV2::LocalFile => {
+            let result = prepare_local_file_asset_v2(repository, asset_id, metadata)?;
+            emit_prepared_session_v2(result)
+        }
+        AssetOriginV2::ProviderPdf => {
+            let result = prepare_pdf_asset_v2(
+                PreparePdfAssetRequestV2 {
+                    repository_root: repository,
+                    provider_root: provider,
+                    asset_id,
+                    metadata,
+                    hydration_confirmation: if confirm_download {
+                        HydrationConfirmationV2::Confirmed
+                    } else {
+                        HydrationConfirmationV2::NotConfirmed
+                    },
+                },
+                worker_executable,
+            )?;
+            emit_prepared_session_v2(result)
+        }
     }
-    let result = prepare_pdf_asset_v2(
-        PreparePdfAssetRequestV2 {
-            repository_root: repository,
-            provider_root: provider,
-            asset_id,
-            metadata: PreparedMetadataV2 {
-                title: None,
-                authors: Vec::new(),
-                created_at: None,
-            },
-            hydration_confirmation: if confirm_download {
-                HydrationConfirmationV2::Confirmed
-            } else {
-                HydrationConfirmationV2::NotConfirmed
-            },
-        },
-        worker_executable,
-    )?;
-    emit_prepared_session_v2(result)
 }
 
 /// One envelope for both origins: what a caller does next with a prepared

@@ -27,5 +27,6 @@
       "evidence_refs": [],
       "tags": []
     }
-  ]
+  ],
+  "topics": ["example>topic"]
 }
