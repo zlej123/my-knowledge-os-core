@@ -702,3 +702,211 @@ fn image_add_prepare_write_and_find_by_origin_flow() {
     let non_matching: serde_json::Value = serde_json::from_slice(&non_matching).unwrap();
     assert!(non_matching["data"]["items"].as_array().unwrap().is_empty());
 }
+
+// A video's transcript arrives in a file, not an argument — the same
+// discipline as `--snapshot` (Phase 4, §6). Same model as a web page: no
+// original video bytes are ever fetched or stored.
+#[test]
+#[allow(deprecated)]
+fn a_video_transcript_the_agent_read_becomes_registered_evidence() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    let provider = root.path().join("Personal Inbox");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    fs::create_dir_all(&provider).unwrap();
+    let transcript = root.path().join("transcript.txt");
+    fs::write(&transcript, "The speaker said this.").unwrap();
+
+    let output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["add", "--video-transcript"])
+        .arg(&transcript)
+        .args([
+            "--url",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "--title",
+            "Example video",
+            "--format",
+            "json-v2",
+        ])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(report["command"], "add");
+    assert_eq!(report["data"]["outcome"], "created");
+    assert_eq!(
+        report["data"]["logical_locator"],
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    );
+    assert!(
+        report["data"]["asset_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("personal-asset-")
+    );
+}
+
+// `--video-transcript` without its address would produce evidence nobody can
+// trace, exactly as `--snapshot` without `--url` would.
+#[test]
+#[allow(deprecated)]
+fn a_video_transcript_without_an_address_is_refused() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    let provider = root.path().join("Personal Inbox");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    fs::create_dir_all(&provider).unwrap();
+    let transcript = root.path().join("transcript.txt");
+    fs::write(&transcript, "The speaker said this.").unwrap();
+
+    Command::cargo_bin("mko")
+        .unwrap()
+        .args(["add", "--video-transcript"])
+        .arg(&transcript)
+        .args(["--title", "Example video", "--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains(
+            "video_transcript_arguments_incomplete",
+        ));
+}
+
+// Registration through prepare and write-draft, then found by `--origin
+// video` — the same round trip Phase 3 proved for `image`/`document`,
+// completing the origin-form vocabulary (§6). A video transcript needs no
+// `--extracted-text` at prepare: unlike an image or document, the transcript
+// text supplied at registration already *is* the evidence.
+#[test]
+#[allow(deprecated)]
+fn video_add_prepare_write_and_find_by_origin_flow() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    let provider = root.path().join("Personal Inbox");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    fs::create_dir_all(&provider).unwrap();
+    let transcript = root.path().join("transcript.txt");
+    fs::write(
+        &transcript,
+        "The speaker said quarterly revenue increased by twelve percent.",
+    )
+    .unwrap();
+
+    let add_output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["add", "--video-transcript"])
+        .arg(&transcript)
+        .args([
+            "--url",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "--title",
+            "Earnings call video",
+            "--format",
+            "json-v2",
+        ])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let add_output: serde_json::Value = serde_json::from_slice(&add_output).unwrap();
+    let asset_id = add_output["data"]["asset_id"].as_str().unwrap();
+
+    let prepared = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["source", "prepare", "--asset-id"])
+        .arg(asset_id)
+        .args(["--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let prepared: serde_json::Value = serde_json::from_slice(&prepared).unwrap();
+    let bundle_path = prepared["data"]["bundle_path"].as_str().unwrap();
+    let bundle: serde_json::Value =
+        serde_json::from_slice(&fs::read(bundle_path).unwrap()).unwrap();
+    let block_id = bundle["bundle"]["content_blocks"][0]["id"]
+        .as_str()
+        .unwrap();
+    let locator = bundle["bundle"]["content_blocks"][0]["locator"]
+        .as_str()
+        .unwrap();
+
+    let response = serde_json::json!({
+        "schema_version": 2,
+        "title": "Earnings call video",
+        "authors": [],
+        "publication_date": null,
+        "one_sentence_summary": "A video reporting a revenue increase.",
+        "general_summary": "The video reports quarterly revenue increased by twelve percent.",
+        "key_claims": [{
+            "text": "Quarterly revenue increased by twelve percent.",
+            "evidence_refs": [{
+                "block_id": block_id,
+                "locator": locator,
+                "text_span_utf8": null,
+                "table_range": null,
+            }],
+        }],
+        "limitations": [],
+        "tags": ["revenue"],
+        "knowledge_recommendation": {"outcome": "reference_only", "reasons": ["Single data point."]},
+        "topics": [],
+    });
+    let response_path = root.path().join("source-response.json");
+    fs::write(&response_path, serde_json::to_vec(&response).unwrap()).unwrap();
+    Command::cargo_bin("mko")
+        .unwrap()
+        .args(["source", "write-draft", "--bundle"])
+        .arg(bundle_path)
+        .arg("--response")
+        .arg(&response_path)
+        .args(["--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success();
+
+    let matching = Command::cargo_bin("mko")
+        .unwrap()
+        .args([
+            "find", "revenue", "--origin", "video", "--format", "json-v2",
+        ])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let matching: serde_json::Value = serde_json::from_slice(&matching).unwrap();
+    assert_eq!(matching["data"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(matching["data"]["items"][0]["asset_id"], asset_id);
+
+    // The same query with an origin filter that cannot match a video (`web`)
+    // returns nothing, proving the filter actually narrows.
+    let non_matching = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["find", "revenue", "--origin", "web", "--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let non_matching: serde_json::Value = serde_json::from_slice(&non_matching).unwrap();
+    assert!(non_matching["data"]["items"].as_array().unwrap().is_empty());
+}

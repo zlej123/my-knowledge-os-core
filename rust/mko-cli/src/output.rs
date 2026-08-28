@@ -97,6 +97,9 @@ pub(crate) fn json_v2_next_action(code: &str) -> NextActionV2 {
         | "snapshot_unreadable"
         | "snapshot_arguments_incomplete"
         | "snapshot_timestamp_invalid"
+        // Phase 4 (§6): a video transcript is the same "bring different
+        // material" shape as a web snapshot's equivalent codes.
+        | "video_transcript_arguments_incomplete"
         // Phase 2 origins (§6): the same "bring different material" answer as
         // a web snapshot's equivalent codes — a local file that is not text,
         // empty, or unreadable is not fixed by retrying the same read.

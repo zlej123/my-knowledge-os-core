@@ -86,8 +86,8 @@ use mko_core::{
     setup_v2::{SetupPersonalV2Request, setup_personal_v2},
     snapshot_v2::{
         RegisterConversationRequestV2, RegisterPastedTextRequestV2, RegisterSnapshotRequestV2,
-        parse_fetched_at_v2, register_conversation_v2, register_pasted_text_v2,
-        register_web_snapshot_v2,
+        RegisterVideoTranscriptRequestV2, parse_fetched_at_v2, register_conversation_v2,
+        register_pasted_text_v2, register_video_transcript_v2, register_web_snapshot_v2,
     },
     source::{
         RepairSourceStateRequest, WriteSourceRequest, repair_source_state, write_source_draft,
@@ -412,8 +412,7 @@ struct FindArgs {
     /// Matches a record by its input form: `pasted-text | local-file | image
     /// | document | video | web | conversation` (§6). A display/filter
     /// vocabulary derived from the Asset's origin and media type, not the
-    /// Core's internal origin enum. `video` is accepted but matches nothing
-    /// until Phase 4. Arrives with the forms it filters in Phase 3.
+    /// Core's internal origin enum.
     #[arg(long, value_enum)]
     origin: Option<FindOriginArg>,
     #[arg(long)]
@@ -664,8 +663,8 @@ struct SetupApplyArgs {
 #[derive(Args)]
 struct AddArgs {
     #[arg(
-        required_unless_present_any = ["inbox", "snapshot", "paste", "local_file", "conversation"],
-        conflicts_with_all = ["inbox", "snapshot", "paste", "local_file", "conversation"],
+        required_unless_present_any = ["inbox", "snapshot", "paste", "local_file", "conversation", "video_transcript"],
+        conflicts_with_all = ["inbox", "snapshot", "paste", "local_file", "conversation", "video_transcript"],
     )]
     file: Option<PathBuf>,
     #[arg(long)]
@@ -673,12 +672,12 @@ struct AddArgs {
     /// Path to a file holding text an agent read from the web. The text arrives
     /// in a file, not an argument: a page body on a command line reaches
     /// process listings and shell history.
-    #[arg(long, conflicts_with_all = ["inbox", "paste", "local_file", "conversation"])]
+    #[arg(long, group = "url_source", conflicts_with_all = ["inbox", "paste", "local_file", "conversation", "video_transcript"])]
     snapshot: Option<PathBuf>,
     /// Path to a file holding text the owner pasted. Text arrives in a file,
     /// not an argument — same file-not-argument discipline as `--snapshot`
     /// (§6, Phase 2).
-    #[arg(long, conflicts_with_all = ["inbox", "snapshot", "local_file", "conversation"])]
+    #[arg(long, conflicts_with_all = ["inbox", "snapshot", "local_file", "conversation", "video_transcript"])]
     paste: Option<PathBuf>,
     /// Absolute path to a local file the owner already holds: Markdown/text
     /// (`.md`/`.markdown`/`.txt`), an image (`.png`/`.jpg`/`.jpeg`/`.webp`/
@@ -689,25 +688,32 @@ struct AddArgs {
     /// file is written for the original. An image or document's evidence
     /// text is supplied separately, at the prepare step (§6.2, `mko source
     /// prepare --extracted-text`).
-    #[arg(long, conflicts_with_all = ["inbox", "snapshot", "paste", "conversation"])]
+    #[arg(long, conflicts_with_all = ["inbox", "snapshot", "paste", "conversation", "video_transcript"])]
     local_file: Option<PathBuf>,
     /// Path to a file holding conversation content captured on a recall miss
     /// (§6.3, store-on-miss). Same file-not-argument discipline as
     /// `--snapshot`/`--paste`.
-    #[arg(long, conflicts_with_all = ["inbox", "snapshot", "paste", "local_file"])]
+    #[arg(long, conflicts_with_all = ["inbox", "snapshot", "paste", "local_file", "video_transcript"])]
     conversation: Option<PathBuf>,
-    /// The address the text was read from. `--snapshot` only.
-    #[arg(long, requires = "snapshot")]
+    /// Path to a file holding the transcript of a video (e.g. YouTube) the
+    /// agent read or transcribed itself (Phase 4, §6). Same model as
+    /// `--snapshot` — no original video bytes are ever fetched or stored,
+    /// only the transcript text, in a file, never an argument.
+    #[arg(long, group = "url_source", conflicts_with_all = ["inbox", "snapshot", "paste", "local_file", "conversation"])]
+    video_transcript: Option<PathBuf>,
+    /// The address the text was read from. `--snapshot` or `--video-transcript`.
+    #[arg(long, requires = "url_source")]
     url: Option<String>,
     /// Optional for `--snapshot` (falls back to the address), `--paste`
     /// (falls back to a fixed label), `--local-file` (falls back to the file
-    /// name), and `--conversation` (falls back to a fixed label). Unused for
-    /// a plain PDF or `--inbox`, whose titles are always the provider file
-    /// name.
+    /// name), and `--conversation` (falls back to a fixed label). Required
+    /// alongside `--url` for `--video-transcript`, matching `--snapshot`'s
+    /// own stricter CLI-level requirement. Unused for a plain PDF or
+    /// `--inbox`, whose titles are always the provider file name.
     #[arg(long)]
     title: Option<String>,
     /// RFC 3339. Defaults to now. Applies to `--snapshot`, `--paste`,
-    /// `--local-file`, and `--conversation`.
+    /// `--local-file`, `--conversation`, and `--video-transcript`.
     #[arg(long)]
     fetched_at: Option<String>,
     #[arg(long)]
@@ -1139,6 +1145,7 @@ fn home() -> Result<(), MkoError> {
             paste: None,
             local_file: None,
             conversation: None,
+            video_transcript: None,
             url: None,
             title: None,
             fetched_at: None,
@@ -1306,6 +1313,7 @@ fn legacy_home_action(
             paste: None,
             local_file: None,
             conversation: None,
+            video_transcript: None,
             url: None,
             title: None,
             fetched_at: None,
@@ -2199,6 +2207,9 @@ fn add_v2(arguments: AddArgs, context: &ResolvedPersonalContext) -> Result<(), M
     if let Some(conversation) = arguments.conversation.as_deref() {
         return add_conversation_v2(&arguments, conversation, context);
     }
+    if let Some(video_transcript) = arguments.video_transcript.as_deref() {
+        return add_video_transcript_v2(&arguments, video_transcript, context);
+    }
     if arguments.temporary_source || arguments.verified_backup {
         return Err(MkoError::new(
             "option_unsupported",
@@ -2308,6 +2319,35 @@ fn add_conversation_v2(
         title: arguments.title.as_deref().unwrap_or(""),
         text: &text,
         captured_at,
+    })?;
+    emit_text_evidence_add_result_v2(arguments, result)
+}
+
+/// Registers the transcript of a video (e.g. YouTube) the agent read or
+/// transcribed. Same shape as `add_snapshot_v2` — same address-plus-title
+/// requirement, same file-not-argument discipline — because a video is the
+/// same model as a web page (Phase 4, §6): the Core does not fetch or
+/// transcribe, and keeps no original video bytes.
+fn add_video_transcript_v2(
+    arguments: &AddArgs,
+    video_transcript: &Path,
+    context: &ResolvedPersonalContext,
+) -> Result<(), MkoError> {
+    let (Some(url), Some(title)) = (arguments.url.as_deref(), arguments.title.as_deref()) else {
+        return Err(MkoError::new(
+            "video_transcript_arguments_incomplete",
+            "--video-transcript needs --url and --title so the evidence can be traced and named",
+        ));
+    };
+    let text = std::fs::read_to_string(video_transcript)
+        .map_err(|error| MkoError::new("snapshot_unreadable", error.to_string()))?;
+    let fetched_at = parse_fetched_at_v2(arguments.fetched_at.as_deref())?;
+    let result = register_video_transcript_v2(RegisterVideoTranscriptRequestV2 {
+        repository_root: &context.repository_root,
+        url,
+        title,
+        text: &text,
+        fetched_at,
     })?;
     emit_text_evidence_add_result_v2(arguments, result)
 }

@@ -186,7 +186,7 @@ pub fn prepare_source_json_v2(
     // Every non-PDF origin has no provider file to inspect, fingerprint, or
     // extract from: its text (or original) is already in the knowledge base
     // and its hash is its identity. Routing on the origin is what makes "give
-    // me this link/paste/file/conversation" reach the same drafting flow as a
+    // me this link/paste/file/conversation/video" reach the same drafting flow as a
     // PDF. Exhaustive on purpose (Phase 2): a binary `if WebSnapshot {..}
     // else {assume PDF}` silently mis-routed every new origin into the
     // PDF/Inbox path before this match existed.
@@ -206,7 +206,10 @@ pub fn prepare_source_json_v2(
         ));
     }
     match origin {
-        AssetOriginV2::WebSnapshot | AssetOriginV2::PastedText | AssetOriginV2::Conversation => {
+        AssetOriginV2::WebSnapshot
+        | AssetOriginV2::PastedText
+        | AssetOriginV2::Conversation
+        | AssetOriginV2::VideoTranscript => {
             let result = prepare_snapshot_asset_v2(repository, asset_id, metadata)?;
             emit_prepared_session_v2(result)
         }

@@ -483,6 +483,14 @@ pub(crate) fn validate_asset_record_v2(asset: &AssetRecordV2) -> Result<(), MkoE
                 && asset.provider.provider_type == "conversation"
                 && asset.provider.logical_locator.is_empty()
         }
+        // A video transcript has an address to record (§6), exactly like a
+        // web snapshot — so it is held to the same locator contract, reused
+        // rather than duplicated.
+        AssetOriginV2::VideoTranscript => {
+            asset.media_type == "text/plain"
+                && asset.provider.provider_type == "video-transcript"
+                && validate_snapshot_locator(&asset.provider.logical_locator)
+        }
         AssetOriginV2::LocalFile => {
             crate::local_file_v2::is_known_local_file_media_type(&asset.media_type)
                 && asset.provider.provider_type == "local-file"

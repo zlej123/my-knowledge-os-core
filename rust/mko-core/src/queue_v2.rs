@@ -139,8 +139,8 @@ pub enum SearchConfirmationFilterV2 {
 /// vocabulary derived from an Asset's `origin` and, for `LocalFile`, its
 /// `media_type` — deliberately distinct from `AssetOriginV2`, whose variant
 /// names never leak into this filter (`LocalFile` alone maps to three
-/// different forms depending on media type). `Video` is accepted as a value
-/// but matches nothing until Phase 4 introduces a video origin.
+/// different forms depending on media type). `Video` maps to
+/// `AssetOriginV2::VideoTranscript` (Phase 4).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SearchOriginFormV2 {
     PastedText,
@@ -159,10 +159,7 @@ fn origin_form_matches(asset: &AssetRecordV2, needle: Option<SearchOriginFormV2>
         SearchOriginFormV2::PastedText => asset.origin == AssetOriginV2::PastedText,
         SearchOriginFormV2::Web => asset.origin == AssetOriginV2::WebSnapshot,
         SearchOriginFormV2::Conversation => asset.origin == AssetOriginV2::Conversation,
-        // No video origin exists yet (Phase 4); the value is accepted so a
-        // caller can pass it without Core rejecting it, but it matches no
-        // Asset registered by this Core version.
-        SearchOriginFormV2::Video => false,
+        SearchOriginFormV2::Video => asset.origin == AssetOriginV2::VideoTranscript,
         SearchOriginFormV2::LocalFile => {
             asset.origin == AssetOriginV2::LocalFile && asset.media_type == "text/plain"
         }

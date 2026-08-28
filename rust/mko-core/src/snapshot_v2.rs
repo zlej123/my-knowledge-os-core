@@ -1,6 +1,7 @@
 //! Text with no original file behind it, kept as immutable evidence: a web
-//! page the agent read, text the owner pasted, or a conversation captured on
-//! a recall miss (§6.1, §6.3).
+//! page the agent read, text the owner pasted, a conversation captured on a
+//! recall miss (§6.1, §6.3), or a video transcript the agent read or
+//! transcribed (Phase 4, §6).
 //!
 //! A PDF can be returned to: the file is in the provider and its fingerprint
 //! identifies it. None of these can — a web page changes and dies, a paste and
@@ -70,6 +71,20 @@ pub struct RegisterConversationRequestV2<'a> {
     pub captured_at: DateTime<Utc>,
 }
 
+/// A video (e.g. YouTube) the agent read or transcribed. Same model as a web
+/// page (Phase 4, §6): the Core does not fetch or transcribe, has an address
+/// to record, and keeps no original bytes — only the transcript text the
+/// agent supplies.
+pub struct RegisterVideoTranscriptRequestV2<'a> {
+    pub repository_root: &'a Path,
+    /// The video's address. Recorded, but not the identity.
+    pub url: &'a str,
+    pub title: &'a str,
+    /// The transcript, as the agent read or transcribed it.
+    pub text: &'a str,
+    pub fetched_at: DateTime<Utc>,
+}
+
 /// Reads the moment a page was fetched, defaulting to now.
 ///
 /// Parsing lives here rather than in the caller so that what a snapshot's
@@ -130,6 +145,27 @@ pub fn register_conversation_v2(
         text: request.text,
         captured_at: request.captured_at,
         default_title: "(제목 없는 대화)",
+    })
+}
+
+/// Registers a video transcript the agent read or transcribed (Phase 4,
+/// §6). Same TEXT-fingerprint identity and locator contract as a web
+/// snapshot (§6.1): the transcript text is the evidence, no original video
+/// bytes are ever fetched or stored, and the dormant
+/// `ContentBlockV2::Transcript` blocks are deliberately not used here — this
+/// is snapshot-model registration, not a structured transcript (§10, D2).
+pub fn register_video_transcript_v2(
+    request: RegisterVideoTranscriptRequestV2<'_>,
+) -> Result<AssetRegistrationResultV2, MkoError> {
+    register_text_evidence_v2(TextEvidenceRequestV2 {
+        repository_root: request.repository_root,
+        origin: AssetOriginV2::VideoTranscript,
+        provider_type: "video-transcript",
+        locator: request.url,
+        title: request.title,
+        text: request.text,
+        captured_at: request.fetched_at,
+        default_title: "",
     })
 }
 

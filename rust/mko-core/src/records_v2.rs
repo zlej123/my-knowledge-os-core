@@ -82,6 +82,15 @@ pub enum AssetOriginV2 {
     /// Text captured from a conversation — e.g. store-on-miss (§6.3).
     /// TEXT-fingerprint identity, exactly like `WebSnapshot`.
     Conversation,
+    /// A transcript of a video (e.g. YouTube), read or transcribed by the
+    /// agent and fingerprinted from the transcript text itself (Phase 4,
+    /// §6). Same model as `WebSnapshot`: a video has an address to record
+    /// but no original bytes the Core keeps — no bytes are ever fetched or
+    /// stored, only the transcript. Registers through the same
+    /// `register_text_evidence_v2` path as every other text-fingerprint
+    /// origin (§6.1); deliberately not routed through the dormant
+    /// `ContentBlockV2::Transcript` blocks (§10, D2: keeping the Core thin).
+    VideoTranscript,
 }
 
 impl AssetOriginV2 {

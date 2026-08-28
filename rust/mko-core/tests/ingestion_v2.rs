@@ -33,7 +33,8 @@ use mko_core::{
     scaffold_v2::scaffold_personal_kb_v2,
     snapshot_v2::{
         RegisterConversationRequestV2, RegisterPastedTextRequestV2, RegisterSnapshotRequestV2,
-        register_conversation_v2, register_pasted_text_v2, register_web_snapshot_v2,
+        RegisterVideoTranscriptRequestV2, register_conversation_v2, register_pasted_text_v2,
+        register_video_transcript_v2, register_web_snapshot_v2,
     },
 };
 use tempfile::tempdir;
@@ -1241,10 +1242,37 @@ fn origin_filter_maps_display_forms_to_asset_origin_and_media_type() {
         assert_eq!(&matches[0].asset_id, expected_id);
     }
 
-    // `video` is accepted but matches nothing until Phase 4.
-    let no_video = search_records_by_perspective_v2(
+    // `video` maps to `VideoTranscript` (Phase 4) — the same shape the other
+    // text-fingerprint origins were proven above, now completing the
+    // vocabulary.
+    let video = register_video_transcript_v2(RegisterVideoTranscriptRequestV2 {
+        repository_root: root.path(),
+        url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        title: "video",
+        text: "video evidence text",
+        fetched_at: Utc::now(),
+    })
+    .unwrap();
+    let prepared_video =
+        prepare_snapshot_asset_v2(root.path(), &video.asset.id, no_metadata()).unwrap();
+    write_source_record_v2(
+        WriteSourceRecordRequestV2 {
+            repository_root: root.path(),
+            asset: &video.asset,
+            bundle: &prepared_video.bundle,
+            response: &source_response_with_claim(
+                "video evidence text",
+                evidence_ref_for(&prepared_video.bundle),
+                Vec::new(),
+            ),
+            expected_revision: None,
+        },
+        &clock("2026-08-28T00:00:00Z"),
+    )
+    .unwrap();
+    let video_matches = search_records_by_perspective_v2(
         root.path(),
-        "evidence",
+        "video evidence text",
         None,
         SearchConfirmationFilterV2::Any,
         None,
@@ -1253,5 +1281,21 @@ fn origin_filter_maps_display_forms_to_asset_origin_and_media_type() {
         Some(SearchOriginFormV2::Video),
     )
     .unwrap();
-    assert!(no_video.is_empty());
+    assert_eq!(video_matches.len(), 1);
+    assert_eq!(&video_matches[0].asset_id, &video.asset.id);
+
+    // The same term filtered to `web` (a different origin) must not surface
+    // the video transcript — the mapping actually narrows, not just accepts.
+    let not_web = search_records_by_perspective_v2(
+        root.path(),
+        "video evidence text",
+        None,
+        SearchConfirmationFilterV2::Any,
+        None,
+        None,
+        None,
+        Some(SearchOriginFormV2::Web),
+    )
+    .unwrap();
+    assert!(not_web.is_empty());
 }

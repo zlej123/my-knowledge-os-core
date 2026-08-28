@@ -293,11 +293,14 @@ fn prepare_snapshot_inner(
     let asset = read_asset_v2(repository_root, asset_id)?;
     if !matches!(
         asset.origin,
-        AssetOriginV2::WebSnapshot | AssetOriginV2::PastedText | AssetOriginV2::Conversation
+        AssetOriginV2::WebSnapshot
+            | AssetOriginV2::PastedText
+            | AssetOriginV2::Conversation
+            | AssetOriginV2::VideoTranscript
     ) {
         return Err(MkoError::new(
             "asset_binding_invalid",
-            "this Asset is not a web snapshot, paste, or captured conversation",
+            "this Asset is not a web snapshot, paste, captured conversation, or video transcript",
         ));
     }
     let text = read_snapshot_text_v2(repository_root, asset_id)?;
@@ -686,9 +689,10 @@ fn validate_asset(asset: &AssetRecordV2) -> Result<(), MkoError> {
     // that the identity is derived from the fingerprint of what was stored.
     let media_type_ok = match asset.origin {
         AssetOriginV2::ProviderPdf => asset.media_type == "application/pdf",
-        AssetOriginV2::WebSnapshot | AssetOriginV2::PastedText | AssetOriginV2::Conversation => {
-            asset.media_type == "text/plain"
-        }
+        AssetOriginV2::WebSnapshot
+        | AssetOriginV2::PastedText
+        | AssetOriginV2::Conversation
+        | AssetOriginV2::VideoTranscript => asset.media_type == "text/plain",
         // The agent-read text a LocalFile prepare call builds a bundle from
         // is text/plain evidence regardless of which local-file media type
         // produced it (§6.2) — what varies per media type is the *original*,
