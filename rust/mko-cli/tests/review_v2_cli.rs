@@ -57,7 +57,7 @@ fn queue_and_show_render_stable_core_owned_human_views() {
         .arg(environment.root.path())
         .assert()
         .success()
-        .stdout(predicates::str::contains("검토 대기열 (1개)"))
+        .stdout(predicates::str::contains("미확인 목록 (1개)"))
         .stdout(predicates::str::contains("Example paper"))
         .stdout(predicates::str::contains(&item.item_id));
 

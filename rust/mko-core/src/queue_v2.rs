@@ -1940,6 +1940,105 @@ mod tests {
         )));
     }
 
+    fn sample_knowledge_revision(authored_by: AuthoredByV2) -> KnowledgeRevisionV2 {
+        let response: KnowledgeResponseV2 = serde_json::from_slice(include_bytes!(
+            "../../../tests/fixtures/json-v2/knowledge-response.json"
+        ))
+        .unwrap();
+        KnowledgeRevisionV2 {
+            schema_version: 2,
+            record_type: KnowledgeRevisionRecordTypeV2::Knowledge,
+            record_id: format!("personal-knowledge-{}", "1".repeat(64)),
+            asset_id: format!("personal-asset-{}", "2".repeat(64)),
+            asset_fingerprint: format!("sha256:{}", "2".repeat(64)),
+            evidence_basis: EvidenceBasisV2 {
+                bundle_id: format!("prepared-content-sha256-{}", "3".repeat(64)),
+                content_digest: format!("sha256:{}", "3".repeat(64)),
+                asset_fingerprint: format!("sha256:{}", "2".repeat(64)),
+                extractor_name: "test".into(),
+                extractor_version: "1".into(),
+            },
+            domain_policy: DomainPolicyV2::Standard,
+            perspectives: Vec::new(),
+            authored_by,
+            response,
+        }
+    }
+
+    /// A revision written before `authored_by` existed carries no such key at
+    /// all in its canonical JSON — Phase 0 does not rewrite revision files.
+    /// `parse_revision` must still accept those exact bytes and, walking
+    /// them through its canonical-bytes round-trip check, reproduce them
+    /// byte-for-byte: the default `Ai` value must stay elided on
+    /// re-serialization, not silently written back in.
+    #[test]
+    fn parse_revision_accepts_and_round_trips_a_pre_phase_0_revision_missing_authored_by() {
+        let revision = sample_knowledge_revision(AuthoredByV2::Ai);
+        let json_bytes = canonical_json_bytes(&revision).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&json_bytes).contains("authored_by"),
+            "a pre-Phase-0 revision never carried this key: {}",
+            String::from_utf8_lossy(&json_bytes)
+        );
+        let mut bytes = b"# Knowledge revision\n\n    ".to_vec();
+        bytes.extend_from_slice(&json_bytes);
+        bytes.push(b'\n');
+
+        let parsed = parse_revision(
+            &ReviewTargetTypeV2::Knowledge,
+            &revision.record_id,
+            None,
+            &bytes,
+        )
+        .unwrap();
+
+        let RevisionV2::Knowledge(parsed) = parsed else {
+            panic!("expected a Knowledge revision");
+        };
+        assert_eq!(parsed.authored_by, AuthoredByV2::Ai);
+        assert_eq!(
+            canonical_json_bytes(&parsed).unwrap(),
+            json_bytes,
+            "re-serializing the parsed revision must reproduce the original bytes exactly"
+        );
+    }
+
+    /// The mirror case: a revision carrying an explicit `"authored_by":
+    /// "human"` key must also parse and round-trip byte-identically, so the
+    /// field is never dropped or silently normalized away for a value other
+    /// than the default.
+    #[test]
+    fn parse_revision_round_trips_a_revision_with_authored_by_human() {
+        let revision = sample_knowledge_revision(AuthoredByV2::Human);
+        let json_bytes = canonical_json_bytes(&revision).unwrap();
+        assert!(
+            String::from_utf8_lossy(&json_bytes).contains("\"authored_by\":\"human\""),
+            "a human-authored revision must carry the explicit key: {}",
+            String::from_utf8_lossy(&json_bytes)
+        );
+        let mut bytes = b"# Knowledge revision\n\n    ".to_vec();
+        bytes.extend_from_slice(&json_bytes);
+        bytes.push(b'\n');
+
+        let parsed = parse_revision(
+            &ReviewTargetTypeV2::Knowledge,
+            &revision.record_id,
+            None,
+            &bytes,
+        )
+        .unwrap();
+
+        let RevisionV2::Knowledge(parsed) = parsed else {
+            panic!("expected a Knowledge revision");
+        };
+        assert_eq!(parsed.authored_by, AuthoredByV2::Human);
+        assert_eq!(
+            canonical_json_bytes(&parsed).unwrap(),
+            json_bytes,
+            "re-serializing the parsed revision must reproduce the original bytes exactly"
+        );
+    }
+
     #[test]
     fn resurfacing_order_is_deferred_then_least_opened_then_questions_then_recency() {
         let timestamp = |value: &str| value.parse::<DateTime<Utc>>().unwrap();

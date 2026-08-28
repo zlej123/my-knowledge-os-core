@@ -2554,10 +2554,17 @@ fn confirm(arguments: ConfirmArgs) -> Result<(), MkoError> {
 fn migrate(arguments: MigrateArgs) -> Result<(), MkoError> {
     let repository = setup_repository(arguments.repo)?;
     let result = migrate_v2(&repository, &SystemClock)?;
-    println!(
-        "{} → {} 계약으로 이전했습니다.",
-        result.from_contract_version, result.to_contract_version
-    );
+    if result.resumed {
+        println!(
+            "계약은 이미 {}(으)로 최신입니다: 중단되었던 이전 작업을 이어서 마쳤습니다.",
+            result.to_contract_version
+        );
+    } else {
+        println!(
+            "{} → {} 계약으로 이전했습니다.",
+            result.from_contract_version, result.to_contract_version
+        );
+    }
     println!(
         "생성 파일 {}개를 새 어휘로 갱신했습니다:",
         result.dashboard.generated_files.len()

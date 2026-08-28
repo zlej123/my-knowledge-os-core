@@ -113,14 +113,42 @@ fn migration_refuses_a_dirty_git_tree() {
 }
 
 #[test]
-fn migration_refuses_a_kb_that_is_not_on_the_migratable_contract() {
+fn migrating_an_already_current_kb_completes_idempotently_without_a_clean_tree_gate() {
     let root = tempdir().unwrap();
     let repository = root.path().join("kb");
     scaffold_personal_kb_v2(&repository).unwrap();
     git_commit_all(&repository, "freeze current-contract KB");
+    // Dirty the tree: resuming/repeating an already-current migration must
+    // not gate on git cleanliness at all, because there is no contract
+    // change left to roll back.
+    fs::write(repository.join("uncommitted.txt"), b"draft notes").unwrap();
 
-    // The freshly scaffolded KB is already on the current contract, so there
-    // is nothing to migrate from.
+    // The freshly scaffolded KB is already on the current contract. There is
+    // nothing to migrate from, but the call must still succeed as a resumed,
+    // idempotent completion rather than being refused.
+    let result = migrate_v2(&repository, &clock()).unwrap();
+
+    assert!(result.resumed);
+    assert_eq!(result.to_contract_version, CONTRACT_VERSION_V2);
+}
+
+#[test]
+fn migration_refuses_a_kb_declaring_an_unsupported_contract_version() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    let config_path = repository.join("knowledge-os.yaml");
+    let text = fs::read_to_string(&config_path).unwrap();
+    assert!(text.contains(&format!("contract_version: {CONTRACT_VERSION_V2}")));
+    let unsupported = text.replace(
+        &format!("contract_version: {CONTRACT_VERSION_V2}"),
+        "contract_version: 0.2.0",
+    );
+    fs::write(&config_path, unsupported).unwrap();
+    git_commit_all(&repository, "freeze KB on an unsupported contract");
+
+    // Neither current nor the one migratable prior contract: a genuine
+    // refusal, not a resumed completion.
     let error = migrate_v2(&repository, &clock()).unwrap_err();
 
     assert_eq!(error.code(), "kb_contract_not_migratable");
@@ -151,15 +179,84 @@ fn migration_stamps_the_new_contract_and_retires_the_review_queue_view() {
     // path must now accept it.
     KnowledgeConfigV2::read(&repository).unwrap();
 
-    // Migrating an already-migrated KB again is a clean, typed refusal, not a
-    // silent no-op or a panic. Commit the migration's own writes first so the
-    // second attempt is refused for being already current, not for a dirty
-    // tree left behind by the first run.
-    git(&repository, &["add", "."]);
-    git(
-        &repository,
-        &["commit", "--quiet", "-m", "post-migration state"],
+    // Migrating an already-migrated KB again is a resumed, idempotent
+    // completion, not a silent panic or a refusal that strands a KB whose
+    // first run crashed after this point. Deliberately do not commit the
+    // migration's own writes first: resuming must not gate on tree
+    // cleanliness at all.
+    let result = migrate_v2(&repository, &clock()).unwrap();
+    assert!(result.resumed);
+    assert_eq!(result.to_contract_version, CONTRACT_VERSION_V2);
+    assert!(
+        !repository.join(LEGACY_REVIEW_QUEUE_VIEW_PATH).exists(),
+        "resuming must not resurrect the retired view"
     );
+}
+
+/// Simulates a crash between the two phases of `migrate_v2`: the contract is
+/// already stamped current and the legacy view already retired (the
+/// in-lock work), but the dashboard/view regeneration that runs after the
+/// lock is released never happened, and the tree is left dirty exactly as an
+/// interrupted run would leave it. Re-running `mko migrate` must resume and
+/// complete rather than being refused by the clean-tree gate or by
+/// `read_for_migration` treating the now-current contract as unmigratable.
+#[test]
+fn migration_resumes_after_a_crash_between_the_stamp_and_the_dashboard_regeneration() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    downgrade_to_migratable_contract(&repository);
+    git_commit_all(&repository, "freeze pre-Phase-0 KB");
+
+    // Do the in-lock half of the migration by hand, then stop — standing in
+    // for a process that crashed right after this point.
+    let config_path = repository.join("knowledge-os.yaml");
+    let text = fs::read_to_string(&config_path).unwrap();
+    let stamped = text.replace(
+        "contract_version: 0.3.0",
+        &format!("contract_version: {CONTRACT_VERSION_V2}"),
+    );
+    fs::write(&config_path, stamped).unwrap();
+    fs::remove_file(repository.join(LEGACY_REVIEW_QUEUE_VIEW_PATH)).unwrap();
+    // Leave the stale (pre-migration-vocabulary) dashboard/view files
+    // unregenerated, and the tree uncommitted and dirty — exactly the state
+    // an interrupted run leaves behind.
+    assert!(!repository.join("views/unconfirmed.base").is_file());
+
+    let result = migrate_v2(&repository, &clock()).unwrap();
+
+    assert!(result.resumed);
+    assert_eq!(result.to_contract_version, CONTRACT_VERSION_V2);
+    assert!(
+        repository.join("views/unconfirmed.base").is_file(),
+        "resuming must finish the idempotent dashboard/view regeneration"
+    );
+    let unconfirmed = fs::read_to_string(repository.join("views/unconfirmed.base")).unwrap();
+    assert!(unconfirmed.contains("derived_state != \"confirmed\""));
+    KnowledgeConfigV2::read(&repository).unwrap();
+}
+
+/// `require_clean_git_tree` must see untracked files even when the
+/// repository (or the owner's global config) has set
+/// `status.showUntrackedFiles no`, which makes plain `git status
+/// --porcelain` silently omit them — otherwise the clean-tree gate can be
+/// bypassed by a config setting that has nothing to do with the migration.
+#[test]
+fn migration_refuses_a_dirty_tree_even_when_untracked_files_are_configured_hidden() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    downgrade_to_migratable_contract(&repository);
+    git_commit_all(&repository, "freeze pre-Phase-0 KB");
+    git(&repository, &["config", "status.showUntrackedFiles", "no"]);
+    fs::write(repository.join("untracked.txt"), b"draft notes").unwrap();
+
     let error = migrate_v2(&repository, &clock()).unwrap_err();
-    assert_eq!(error.code(), "kb_contract_not_migratable");
+
+    assert_eq!(error.code(), "kb_git_tree_dirty");
+    assert!(
+        fs::read_to_string(repository.join("knowledge-os.yaml"))
+            .unwrap()
+            .contains("contract_version: 0.3.0")
+    );
 }
