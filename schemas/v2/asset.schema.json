@@ -9,6 +9,16 @@
     "schema_version": { "const": 2 },
     "id": { "type": "string", "pattern": "^personal-asset-[a-f0-9]{64}$" },
     "record_type": { "const": "asset" },
+    "origin": {
+      "enum": [
+        "provider_pdf",
+        "web_snapshot",
+        "pasted_text",
+        "local_file",
+        "conversation",
+        "video_transcript"
+      ]
+    },
     "fingerprint": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
     "title_fallback": { "type": "string", "minLength": 1, "maxLength": 4096 },
     "media_type": { "type": "string", "minLength": 1, "maxLength": 255 },
@@ -18,7 +28,7 @@
       "required": ["provider_type", "logical_locator", "size_bytes", "modified_at"],
       "properties": {
         "provider_type": { "type": "string", "minLength": 1, "maxLength": 255 },
-        "logical_locator": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "logical_locator": { "type": "string", "minLength": 0, "maxLength": 4096 },
         "size_bytes": { "type": "integer", "minimum": 0 },
         "modified_at": {
           "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }]

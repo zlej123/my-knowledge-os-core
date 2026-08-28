@@ -3,6 +3,7 @@ use std::path::Path;
 use crate::{
     asset_v2::{inspect_inbox_pdf_assets_v2, read_asset_v2, registered_asset_ids_v2},
     attempt_v2::{StuckReasonV2, latest_preparation_attempts_v2},
+    clock::{Clock, SystemClock},
     config::KnowledgeConfig,
     config_v2::KnowledgeConfigV2,
     error::MkoError,
@@ -10,6 +11,7 @@ use crate::{
     json_v1::UserState,
     provider_scan::ElapsedClock,
     queue_v2::summarize_home_queue_v2,
+    recall_log_v2::recall_metrics_v2,
     status::status_from_inbox,
 };
 
@@ -58,6 +60,18 @@ pub struct V3HomeReport {
     /// False when provider discovery was incomplete, so a caller can say "this
     /// is what I could see" rather than "this is everything".
     pub scan_complete: bool,
+    /// Recent-window recall metrics (§5, D7): the design's success measure
+    /// lives on the first screen, so the owner sees whether recall is
+    /// actually happening without opening a separate report.
+    pub recall: RecallSummaryV2,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RecallSummaryV2 {
+    pub window_days: u32,
+    pub recall_count: u64,
+    pub zero_result_count: u64,
+    pub surfaced_total: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -192,6 +206,17 @@ pub fn inspect_home(
                     }
                 })
                 .collect();
+            // A corrupt or missing recall log must never take down the home
+            // screen (§5): fall back to an all-zero summary rather than
+            // propagating the error.
+            let recall = recall_metrics_v2(repository_root, SystemClock.now_utc())
+                .map(|metrics| RecallSummaryV2 {
+                    window_days: metrics.window_days,
+                    recall_count: metrics.recall_count,
+                    zero_result_count: metrics.zero_result_count,
+                    surfaced_total: metrics.surfaced_total,
+                })
+                .unwrap_or_default();
             Ok(HomeReport::V3(V3HomeReport {
                 new_material: inbox.new_count,
                 registered: inbox.registered_count,
@@ -200,6 +225,7 @@ pub fn inspect_home(
                 confirmed_knowledge: queue.confirmed_knowledge,
                 blocked: inbox.blocked_count.saturating_add(queue.blocked),
                 scan_complete: inbox.scan_complete,
+                recall,
             }))
         }
     }

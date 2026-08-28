@@ -87,6 +87,11 @@ pub struct ProjectionInputV2 {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub perspectives: Vec<PerspectiveV2>,
     pub tags: Vec<String>,
+    /// Threaded alongside `tags` (§6.3, decided): agent-proposed hierarchical
+    /// labels, normalized and deduped at write time. Defaulted and elided so
+    /// a projection generated before this field existed still parses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topics: Vec<String>,
     pub record_link: String,
     pub asset_link: String,
     /// The record's own one sentence, carried in frontmatter so the vault can
@@ -161,6 +166,8 @@ struct ProjectionInputWireV2 {
     #[serde(default)]
     perspectives: Vec<PerspectiveV2>,
     tags: Vec<String>,
+    #[serde(default)]
+    topics: Vec<String>,
     record_link: String,
     asset_link: String,
     #[serde(default)]
@@ -184,6 +191,7 @@ impl<'de> Deserialize<'de> for ProjectionInputV2 {
             domain: wire.domain,
             perspectives: wire.perspectives,
             tags: wire.tags,
+            topics: wire.topics,
             record_link: wire.record_link,
             asset_link: wire.asset_link,
             body_markdown: wire.body_markdown,
@@ -249,6 +257,8 @@ struct StoredProjectionMetadataV2 {
     #[serde(default)]
     perspectives: Vec<PerspectiveV2>,
     tags: Vec<String>,
+    #[serde(default)]
+    topics: Vec<String>,
     record_link: String,
     asset_link: String,
     projection_digest: String,
@@ -333,6 +343,7 @@ pub(crate) fn read_current_projection_input_v2(
         domain: metadata.domain,
         perspectives: metadata.perspectives,
         tags: metadata.tags,
+        topics: metadata.topics,
         record_link: metadata.record_link,
         asset_link: metadata.asset_link,
         body_markdown: String::new(),
@@ -633,8 +644,12 @@ fn append_projection_body(text: &mut String, body: &ProjectionBodyV2) {
     append_points(text, "LLM 분석 (문서의 주장 아님)", &body.analysis);
     append_points(text, "배경지식 (문서에 없는 내용)", &body.background);
     append_points(text, "한계", &body.limitations);
-    if let Some(locator) = &body.document_locator {
-        text.push_str(&format!("\n## 원본 문서\n\n- {}\n", normalize(locator)));
+    // PastedText and Conversation projections carry `Some("")` for their
+    // locator (asset_v2's empty-string convention, not `None`), so an empty
+    // or whitespace-only locator must render as absent rather than as a
+    // heading over a blank bullet.
+    if let Some(locator) = body.document_locator.as_deref().and_then(non_empty) {
+        text.push_str(&format!("\n## 원본 문서\n\n- {}\n", normalize(&locator)));
     }
 }
 
@@ -692,6 +707,18 @@ fn render_projection_unchecked(
         .unwrap_or_else(|| "null".into());
     let tags = serde_json::to_string(&tags)
         .map_err(|error| MkoError::new("projection_invalid", error.to_string()))?;
+    let topics = input
+        .topics
+        .iter()
+        .map(|topic| normalize(topic))
+        .collect::<Vec<_>>();
+    let topics_line = if topics.is_empty() {
+        String::new()
+    } else {
+        let topics = serde_json::to_string(&topics)
+            .map_err(|error| MkoError::new("projection_invalid", error.to_string()))?;
+        format!("topics: {topics}\n")
+    };
     let summary = normalize(&input.summary);
     let summary_line = if summary.is_empty() {
         String::new()
@@ -700,7 +727,7 @@ fn render_projection_unchecked(
     };
     let heading = title.replace('\n', " ");
     let text = format!(
-        "---\nprojection_schema_version: 2\nrecord_type: {}\nrecord_id: {}\ntitle: {}\n{}current_revision: {}\nreview_head_id: {}\nderived_state: {}\ndomain: {}\n{}tags: {}\nrecord_link: {}\nasset_link: {}\nprojection_digest: {}\n---\n\n# {}\n\n- Record: [[{}]]\n- Asset: [[{}]]\n- Current revision: `{}`\n",
+        "---\nprojection_schema_version: 2\nrecord_type: {}\nrecord_id: {}\ntitle: {}\n{}current_revision: {}\nreview_head_id: {}\nderived_state: {}\ndomain: {}\n{}tags: {}\n{}record_link: {}\nasset_link: {}\nprojection_digest: {}\n---\n\n# {}\n\n- Record: [[{}]]\n- Asset: [[{}]]\n- Current revision: `{}`\n",
         input.record_type.as_str(),
         json_string(&input.id)?,
         json_string(&title)?,
@@ -711,6 +738,7 @@ fn render_projection_unchecked(
         json_string(&domain)?,
         perspectives_line,
         tags,
+        topics_line,
         json_string(&record_link)?,
         json_string(&asset_link)?,
         json_string(&projection_digest)?,
@@ -904,6 +932,14 @@ fn validate_input(input: &ProjectionInputV2) -> Result<(), MkoError> {
         .any(|tag| tag.is_empty() || tag.chars().count() > 256)
     {
         return Err(projection_invalid("tags must be non-empty and bounded"));
+    }
+    if input.topics.len() > 256
+        || input
+            .topics
+            .iter()
+            .any(|topic| topic.is_empty() || topic.chars().count() > 256)
+    {
+        return Err(projection_invalid("topics must be non-empty and bounded"));
     }
     validate_logical_link(&input.record_link)?;
     validate_logical_link(&input.asset_link)

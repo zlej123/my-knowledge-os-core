@@ -73,7 +73,7 @@
 
       <section class="view" id="view-knowledge">
         <form class="searchbar" id="search-form">
-          <input id="search-input" aria-label="확인된 지식과 내 생각 검색" placeholder="확인된 지식과 내 생각에서 찾기" required maxlength="200">
+          <input id="search-input" aria-label="지식과 내 생각 검색" placeholder="지식과 내 생각에서 찾기" required maxlength="200">
           <select id="search-perspective" aria-label="관점 필터"><option value="">전체 관점</option><option value="investment">투자</option><option value="project">프로젝트</option><option value="technical">기술</option><option value="learning">학습</option><option value="life">생활</option></select>
           <button class="button primary" type="submit">찾기</button>
         </form>
@@ -151,8 +151,21 @@
       setText('#knowledge-heading',heading); setText('#knowledge-count',`${items.length}건`); const list=document.querySelector('#knowledge-list'); list.replaceChildren();
       if(!items.length){list.append(empty('표시할 지식이 없습니다.'));return;}
       items.forEach(item=>{
-        const card=element('article','card'); const state=item.record_type==='quick_note'?'내 생각':item.review_state==='deferred'?'나중에 보기':'확인된 지식';
-        card.append(badge(state,item.review_state==='deferred'?'amber':''),element('h3','',item.title),element('p','',compact(item.synthesis||item.body,300)));
+        const card=element('article','card');
+        // Search results (§4.2) carry `confirmation` — unconfirmed records are
+        // included by default now, so the badge must say which is which
+        // without the viewer opening the record. The resurface list has no
+        // `confirmation` field and keeps its own deferred/confirmed badge.
+        let state,tone;
+        if(item.record_type==='quick_note'){state='내 생각';tone='';}
+        else if(item.confirmation){
+          if(item.confirmation.status==='confirmed'){state=`확인됨 (${(item.confirmation.confirmed_at||'').slice(0,10)})`;tone='';}
+          else if(item.confirmation.status==='unconfirmed'){state='AI 작성 · 미확인';tone='amber';}
+          else {state='내 생각';tone='';}
+        }
+        else if(item.review_state==='deferred'){state='나중에 보기';tone='amber';}
+        else {state='확인된 지식';tone='';}
+        card.append(badge(state,tone),element('h3','',item.title),element('p','',compact(item.synthesis||item.body,300)));
         const meta=element('div','meta',item.current_revision||item.revision||item.record_id||item.knowledge_id); card.append(meta); list.append(card);
       });
     }

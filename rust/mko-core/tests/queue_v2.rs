@@ -15,10 +15,11 @@ use mko_core::{
         ProjectionInputV2, ProjectionRecordTypeV2, ProjectionStateV2, write_projection_v2,
     },
     queue_v2::{
-        ResurfacedKnowledgeStateV2, ReviewCardTargetStateV2, derive_queue_v2,
+        ConfirmationLabelV2, ResurfacedKnowledgeStateV2, ReviewCardTargetStateV2,
+        SearchConfirmationFilterV2, SearchLayerV2, SearchRecordTypeV2, derive_queue_v2,
         resurface_confirmed_knowledge_by_perspective_v2, resurface_confirmed_knowledge_v2,
-        resurface_knowledge_by_perspective_v2, search_confirmed_knowledge_by_perspective_v2,
-        search_confirmed_knowledge_v2, show_review_card_v2, summarize_home_queue_v2,
+        resurface_knowledge_by_perspective_v2, search_records_by_perspective_v2, search_records_v2,
+        show_review_card_v2, summarize_home_queue_v2,
     },
     records_v2::{
         AssetRecordV2, WriteKnowledgeRecordRequestV2, WriteSourceRecordRequestV2,
@@ -29,6 +30,7 @@ use mko_core::{
     scaffold_v2::scaffold_personal_kb_v2,
 };
 use tempfile::tempdir;
+use unicode_normalization::UnicodeNormalization;
 
 #[derive(Clone, Copy)]
 struct FixedClock(DateTime<Utc>);
@@ -85,15 +87,14 @@ fn approved_records_are_excluded_from_the_default_queue_but_remain_showable() {
 }
 
 #[test]
-fn search_returns_only_confirmed_knowledge_and_home_counts_it() {
+fn search_includes_unconfirmed_knowledge_labelled() {
     let environment = environment();
     let knowledge = write_knowledge(&environment);
 
-    assert!(
-        search_confirmed_knowledge_v2(environment.root.path(), "reported")
-            .unwrap()
-            .is_empty()
-    );
+    let before = search_records_v2(environment.root.path(), "reported").unwrap();
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].record_type, SearchRecordTypeV2::Knowledge);
+    assert_eq!(before[0].confirmation, ConfirmationLabelV2::Unconfirmed);
     assert_eq!(
         summarize_home_queue_v2(environment.root.path())
             .unwrap()
@@ -118,10 +119,16 @@ fn search_returns_only_confirmed_knowledge_and_home_counts_it() {
         ProjectionStateV2::Confirmed,
     );
 
-    let matches = search_confirmed_knowledge_v2(environment.root.path(), "reported").unwrap();
+    let matches = search_records_v2(environment.root.path(), "reported").unwrap();
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].title, "Reported result");
     assert_eq!(matches[0].current_revision, knowledge.revision);
+    assert_eq!(
+        matches[0].confirmation,
+        ConfirmationLabelV2::Confirmed {
+            at: "2026-07-23T01:00:00Z".parse().unwrap()
+        }
+    );
     // An excerpt is only useful if it leads somewhere: the path a result points
     // at must be the readable document that actually exists.
     let readable =
@@ -130,7 +137,7 @@ fn search_returns_only_confirmed_knowledge_and_home_counts_it() {
             .path()
             .join(mko_core::projection_v2::record_projection_relative_path_v2(
                 mko_core::projection_v2::ProjectionRecordTypeV2::Knowledge,
-                &matches[0].knowledge_id,
+                &matches[0].record_id,
             ));
     assert!(
         readable.is_file(),
@@ -141,6 +148,157 @@ fn search_returns_only_confirmed_knowledge_and_home_counts_it() {
     let summary = summarize_home_queue_v2(environment.root.path()).unwrap();
     assert_eq!(summary.review_pending, 0);
     assert_eq!(summary.confirmed_knowledge, 1);
+}
+
+#[test]
+fn search_confirmed_only_filter_excludes_unconfirmed() {
+    let environment = environment();
+    write_knowledge(&environment);
+
+    assert!(
+        search_records_by_perspective_v2(
+            environment.root.path(),
+            "reported",
+            None,
+            SearchConfirmationFilterV2::ConfirmedOnly,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .is_empty()
+    );
+    assert_eq!(
+        search_records_by_perspective_v2(
+            environment.root.path(),
+            "reported",
+            None,
+            SearchConfirmationFilterV2::UnconfirmedOnly,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+}
+
+#[test]
+fn search_normalizes_nfd_query_against_nfc_stored_text() {
+    let mut environment = environment();
+    environment.knowledge.units[0].title = "학습".into();
+    environment.knowledge.units[0].body = "학습률을 크게 개선하는 방법을 설명한다.".into();
+    write_knowledge(&environment);
+
+    let nfd_query: String = "학습률 개선".nfd().collect();
+    // The literal above may already be NFC on this toolchain; force genuine
+    // NFD so the assertion below actually exercises the bug this fixes
+    // (D10) rather than passing by accident.
+    assert_ne!(nfd_query, "학습률 개선".nfc().collect::<String>());
+
+    let matches = search_records_v2(environment.root.path(), &nfd_query).unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].title, "학습");
+}
+
+#[test]
+fn search_requires_all_whitespace_tokens_to_match() {
+    let environment = environment();
+    write_knowledge(&environment);
+
+    // "Reported result" / "The document reports an example result." — both
+    // tokens are present but nowhere adjacent, so substring-of-the-whole-
+    // query matching would have missed this; token-AND must not.
+    let matches = search_records_v2(environment.root.path(), "reported example").unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].title, "Reported result");
+
+    assert!(
+        search_records_v2(environment.root.path(), "reported nonexistentword")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn search_matches_source_records() {
+    let environment = environment();
+    let source = write_source(&environment, &environment.bundle, &environment.source, None);
+
+    let matches = search_records_v2(environment.root.path(), "reported example").unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].record_type, SearchRecordTypeV2::Source);
+    assert_eq!(matches[0].record_id, source.record_id);
+    assert_eq!(matches[0].layer, SearchLayerV2::SourceOwnWords);
+    assert_eq!(matches[0].confirmation, ConfirmationLabelV2::Unconfirmed);
+
+    // `perspective` is a human-confirmed Knowledge-only concept (§6.3): a
+    // perspective filter must never match a Source hit.
+    assert!(
+        search_records_by_perspective_v2(
+            environment.root.path(),
+            "reported example",
+            Some(PerspectiveV2::Technical),
+            SearchConfirmationFilterV2::Any,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[test]
+fn search_tag_and_layer_filters_narrow_results() {
+    let environment = environment();
+    write_knowledge(&environment);
+
+    let by_tag = search_records_by_perspective_v2(
+        environment.root.path(),
+        "result",
+        None,
+        SearchConfirmationFilterV2::Any,
+        Some("example"),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(by_tag.len(), 1);
+    assert_eq!(by_tag[0].title, "Reported result");
+    assert!(
+        search_records_by_perspective_v2(
+            environment.root.path(),
+            "result",
+            None,
+            SearchConfirmationFilterV2::Any,
+            Some("nonexistent-tag"),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .is_empty()
+    );
+
+    let by_layer = search_records_by_perspective_v2(
+        environment.root.path(),
+        "document",
+        None,
+        SearchConfirmationFilterV2::Any,
+        None,
+        Some(SearchLayerV2::CounterargumentOrUncertainty),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(by_layer.len(), 1);
+    assert_eq!(by_layer[0].title, "External validity");
 }
 
 #[test]
@@ -177,28 +335,43 @@ fn confirmed_perspective_is_searchable_and_resurfacing_prioritizes_open_question
         ProjectionStateV2::Confirmed,
     );
 
-    let matches = search_confirmed_knowledge_v2(environment.root.path(), "technical").unwrap();
+    let matches = search_records_v2(environment.root.path(), "technical").unwrap();
     assert_eq!(matches.len(), environment.knowledge.units.len());
     assert!(
         matches
             .iter()
             .all(|item| item.perspectives == vec![PerspectiveV2::Technical])
     );
+    assert!(
+        matches
+            .iter()
+            .all(|item| matches!(item.confirmation, ConfirmationLabelV2::Confirmed { .. }))
+    );
     assert_eq!(
-        search_confirmed_knowledge_by_perspective_v2(
+        search_records_by_perspective_v2(
             environment.root.path(),
             "reported",
             Some(PerspectiveV2::Technical),
+            SearchConfirmationFilterV2::Any,
+            None,
+            None,
+            None,
+            None,
         )
         .unwrap()
         .len(),
         1
     );
     assert!(
-        search_confirmed_knowledge_by_perspective_v2(
+        search_records_by_perspective_v2(
             environment.root.path(),
             "reported",
             Some(PerspectiveV2::Investment),
+            SearchConfirmationFilterV2::Any,
+            None,
+            None,
+            None,
+            None,
         )
         .unwrap()
         .is_empty()
@@ -555,6 +728,7 @@ fn self_consistent_projection_with_noncanonical_semantics_blocks_the_queue() {
             domain: "uncategorized".into(),
             perspectives: Vec::new(),
             tags: environment.source.tags.clone(),
+            topics: Vec::new(),
             summary: String::new(),
             body_markdown: String::new(),
             record_link: format!("sources/{}/current.yaml", source.record_id),
@@ -601,6 +775,12 @@ fn sync_projection(
     }
     tags.sort();
     tags.dedup();
+    let mut topics = if is_source {
+        environment.source.topics.clone()
+    } else {
+        environment.knowledge.topics.clone()
+    };
+    topics.sort();
     write_projection_v2(
         environment.root.path(),
         &ProjectionInputV2 {
@@ -642,6 +822,7 @@ fn sync_projection(
                 .map(|knowledge| knowledge.revision.perspectives.clone())
                 .unwrap_or_default(),
             tags,
+            topics,
             record_link: format!(
                 "{}/{}/current.yaml",
                 if is_source { "sources" } else { "knowledge" },

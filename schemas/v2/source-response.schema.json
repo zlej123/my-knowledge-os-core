@@ -14,7 +14,8 @@
     "key_claims",
     "limitations",
     "tags",
-    "knowledge_recommendation"
+    "knowledge_recommendation",
+    "topics"
   ],
   "properties": {
     "schema_version": { "const": 2 },
@@ -36,7 +37,12 @@
       "items": { "$ref": "#/$defs/limitation" }
     },
     "tags": { "$ref": "#/$defs/string_array" },
-    "knowledge_recommendation": { "$ref": "#/$defs/knowledge_recommendation" }
+    "knowledge_recommendation": { "$ref": "#/$defs/knowledge_recommendation" },
+    "topics": {
+      "type": "array",
+      "maxItems": 256,
+      "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+    }
   },
   "$defs": {
     "string_array": {

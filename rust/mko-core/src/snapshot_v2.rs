@@ -1,14 +1,19 @@
-//! Text an agent read from the web, kept as immutable evidence.
+//! Text with no original file behind it, kept as immutable evidence: a web
+//! page the agent read, text the owner pasted, a conversation captured on a
+//! recall miss (§6.1, §6.3), or a video transcript the agent read or
+//! transcribed (Phase 4, §6).
 //!
 //! A PDF can be returned to: the file is in the provider and its fingerprint
-//! identifies it. A web page cannot — it changes, and it dies. So the text
-//! itself is stored, and the Asset is identified by that text rather than by
-//! the address it came from. A note approved today can still be checked against
-//! what was actually read, a year after the page stops existing.
+//! identifies it. None of these can — a web page changes and dies, a paste and
+//! a conversation never had a file at all. So the text itself is stored, and
+//! the Asset is identified by that text rather than by any address it came
+//! from. A note approved today can still be checked against what was actually
+//! read, a year after the page stops existing.
 //!
 //! The Core does not fetch. The workspace has no network dependency and pins
-//! every crate exactly; the agent performs the request and hands the extracted
-//! text here, the same boundary the semantic path already uses.
+//! every crate exactly; the agent performs the request (or the owner pastes,
+//! or the conversation is captured) and hands the extracted text here, the
+//! same boundary the semantic path already uses.
 
 use std::{fs, path::Path};
 
@@ -46,6 +51,40 @@ pub struct RegisterSnapshotRequestV2<'a> {
     pub fetched_at: DateTime<Utc>,
 }
 
+/// Text the owner pasted directly, or text captured from a conversation
+/// (store-on-miss, §6.3). Neither has an address to return to, so both use
+/// the empty-string locator convention (§6.1, decided) rather than widening
+/// `logical_locator` to `Option`.
+pub struct RegisterPastedTextRequestV2<'a> {
+    pub repository_root: &'a Path,
+    pub title: &'a str,
+    /// The pasted text, verbatim.
+    pub text: &'a str,
+    pub captured_at: DateTime<Utc>,
+}
+
+pub struct RegisterConversationRequestV2<'a> {
+    pub repository_root: &'a Path,
+    pub title: &'a str,
+    /// The conversation content the agent captured, verbatim.
+    pub text: &'a str,
+    pub captured_at: DateTime<Utc>,
+}
+
+/// A video (e.g. YouTube) the agent read or transcribed. Same model as a web
+/// page (Phase 4, §6): the Core does not fetch or transcribe, has an address
+/// to record, and keeps no original bytes — only the transcript text the
+/// agent supplies.
+pub struct RegisterVideoTranscriptRequestV2<'a> {
+    pub repository_root: &'a Path,
+    /// The video's address. Recorded, but not the identity.
+    pub url: &'a str,
+    pub title: &'a str,
+    /// The transcript, as the agent read or transcribed it.
+    pub text: &'a str,
+    pub fetched_at: DateTime<Utc>,
+}
+
 /// Reads the moment a page was fetched, defaulting to now.
 ///
 /// Parsing lives here rather than in the caller so that what a snapshot's
@@ -62,18 +101,105 @@ pub fn parse_fetched_at_v2(value: Option<&str>) -> Result<DateTime<Utc>, MkoErro
 pub fn register_web_snapshot_v2(
     request: RegisterSnapshotRequestV2<'_>,
 ) -> Result<AssetRegistrationResultV2, MkoError> {
+    register_text_evidence_v2(TextEvidenceRequestV2 {
+        repository_root: request.repository_root,
+        origin: AssetOriginV2::WebSnapshot,
+        provider_type: "web-snapshot",
+        locator: request.url,
+        title: request.title,
+        text: request.text,
+        captured_at: request.fetched_at,
+        default_title: "",
+    })
+}
+
+/// Registers text the owner pasted directly. Same TEXT-fingerprint identity
+/// as a web snapshot (§6.1): the pasted text itself is the evidence, and
+/// pasting the same text twice returns the same Asset.
+pub fn register_pasted_text_v2(
+    request: RegisterPastedTextRequestV2<'_>,
+) -> Result<AssetRegistrationResultV2, MkoError> {
+    register_text_evidence_v2(TextEvidenceRequestV2 {
+        repository_root: request.repository_root,
+        origin: AssetOriginV2::PastedText,
+        provider_type: "pasted-text",
+        locator: "",
+        title: request.title,
+        text: request.text,
+        captured_at: request.captured_at,
+        default_title: "(제목 없는 붙여넣기)",
+    })
+}
+
+/// Registers text captured from a conversation (store-on-miss, §6.3). Same
+/// TEXT-fingerprint identity as a web snapshot (§6.1).
+pub fn register_conversation_v2(
+    request: RegisterConversationRequestV2<'_>,
+) -> Result<AssetRegistrationResultV2, MkoError> {
+    register_text_evidence_v2(TextEvidenceRequestV2 {
+        repository_root: request.repository_root,
+        origin: AssetOriginV2::Conversation,
+        provider_type: "conversation",
+        locator: "",
+        title: request.title,
+        text: request.text,
+        captured_at: request.captured_at,
+        default_title: "(제목 없는 대화)",
+    })
+}
+
+/// Registers a video transcript the agent read or transcribed (Phase 4,
+/// §6). Same TEXT-fingerprint identity and locator contract as a web
+/// snapshot (§6.1): the transcript text is the evidence, no original video
+/// bytes are ever fetched or stored, and the dormant
+/// `ContentBlockV2::Transcript` blocks are deliberately not used here — this
+/// is snapshot-model registration, not a structured transcript (§10, D2).
+pub fn register_video_transcript_v2(
+    request: RegisterVideoTranscriptRequestV2<'_>,
+) -> Result<AssetRegistrationResultV2, MkoError> {
+    register_text_evidence_v2(TextEvidenceRequestV2 {
+        repository_root: request.repository_root,
+        origin: AssetOriginV2::VideoTranscript,
+        provider_type: "video-transcript",
+        locator: request.url,
+        title: request.title,
+        text: request.text,
+        captured_at: request.fetched_at,
+        default_title: "",
+    })
+}
+
+/// The shared shape behind every text-fingerprint origin (§6.1): the text
+/// itself is the evidence and its hash is the identity, so registration only
+/// ever needs to validate, fingerprint, and store it — no provider file, no
+/// extractor.
+struct TextEvidenceRequestV2<'a> {
+    repository_root: &'a Path,
+    origin: AssetOriginV2,
+    provider_type: &'static str,
+    locator: &'a str,
+    title: &'a str,
+    text: &'a str,
+    captured_at: DateTime<Utc>,
+    /// Shown when both `title` and `locator` are empty.
+    default_title: &'static str,
+}
+
+fn register_text_evidence_v2(
+    request: TextEvidenceRequestV2<'_>,
+) -> Result<AssetRegistrationResultV2, MkoError> {
     KnowledgeConfigV2::read(request.repository_root)?;
     let bytes = request.text.as_bytes();
     if bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
         return Err(MkoError::new(
             "snapshot_too_large",
-            "the page text is larger than a snapshot may be",
+            "the text is larger than a snapshot may be",
         ));
     }
     if request.text.trim().is_empty() {
         return Err(MkoError::new(
             "snapshot_text_empty",
-            "the page produced no readable text",
+            "no readable text was supplied",
         ));
     }
 
@@ -86,15 +212,15 @@ pub fn register_web_snapshot_v2(
         schema_version: 2,
         id: format!("personal-asset-{hash}"),
         record_type: AssetRecordTypeV2::Asset,
-        origin: AssetOriginV2::WebSnapshot,
+        origin: request.origin,
         fingerprint,
-        title_fallback: bounded_title(request.title, request.url),
+        title_fallback: bounded_title(request.title, request.locator, request.default_title),
         media_type: "text/plain".into(),
         provider: AssetProviderBindingV2 {
-            provider_type: "web-snapshot".into(),
-            logical_locator: request.url.into(),
+            provider_type: request.provider_type.into(),
+            logical_locator: request.locator.into(),
             size_bytes: bytes.len() as u64,
-            modified_at: Some(request.fetched_at),
+            modified_at: Some(request.captured_at),
         },
     };
     // Refuse an unusable address here rather than writing a registry record
@@ -182,12 +308,16 @@ fn snapshot_path(repository_root: &Path, hash: &str) -> std::path::PathBuf {
 }
 
 /// A snapshot always has a name to show. A page that supplied none is named by
-/// its address, which is at least what the owner asked for.
-fn bounded_title(title: &str, url: &str) -> String {
-    let candidate = if title.trim().is_empty() {
-        url.trim()
-    } else {
+/// its address, which is at least what the owner asked for; a paste or a
+/// captured conversation has no address, so it falls back to a fixed label
+/// instead.
+fn bounded_title(title: &str, fallback_locator: &str, default_title: &str) -> String {
+    let candidate = if !title.trim().is_empty() {
         title.trim()
+    } else if !fallback_locator.trim().is_empty() {
+        fallback_locator.trim()
+    } else {
+        default_title
     };
     candidate.chars().take(MAX_SNAPSHOT_TITLE_CHARS).collect()
 }

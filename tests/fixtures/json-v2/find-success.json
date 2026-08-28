@@ -1,0 +1,48 @@
+{
+  "schema_version": 2,
+  "command": "find",
+  "result": "ok",
+  "data": {
+    "items": [
+      {
+        "record_type": "knowledge",
+        "record_id": "personal-knowledge-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "current_revision": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "asset_id": "personal-asset-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "title": "Reported result",
+        "body": "The document reports an example result.",
+        "tags": ["example"],
+        "perspectives": ["technical"],
+        "layer": "grounded_evidence",
+        "locators": ["page:2/table:1"],
+        "confirmation": {
+          "status": "confirmed",
+          "confirmed_at": "2026-07-23T01:00:00+00:00"
+        }
+      },
+      {
+        "record_type": "source",
+        "record_id": "personal-source-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "current_revision": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "asset_id": "personal-asset-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "title": "Example paper",
+        "body": "A bounded summary grounded in the prepared content.",
+        "tags": ["example"],
+        "perspectives": [],
+        "layer": "source_own_words",
+        "locators": ["page:1"],
+        "confirmation": {
+          "status": "unconfirmed",
+          "confirmed_at": null
+        }
+      }
+    ],
+    "notes": [
+      {
+        "note_id": "personal-note-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "text": "학습률을 낮췄더니 결과가 안정적이었다."
+      }
+    ],
+    "scan_complete": true
+  }
+}

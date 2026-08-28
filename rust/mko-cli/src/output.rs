@@ -96,15 +96,41 @@ pub(crate) fn json_v2_next_action(code: &str) -> NextActionV2 {
         | "snapshot_too_large"
         | "snapshot_unreadable"
         | "snapshot_arguments_incomplete"
-        | "snapshot_timestamp_invalid" => NextActionV2::Add,
-        // Registering the same page again rewrites content-addressed evidence
-        // that no longer matches its identity, so this is repairable by the
-        // caller rather than a dead end.
-        "registered_asset_changed" | "snapshot_damaged" => NextActionV2::Add,
+        | "snapshot_timestamp_invalid"
+        // Phase 4 (§6): a video transcript is the same "bring different
+        // material" shape as a web snapshot's equivalent codes.
+        | "video_transcript_arguments_incomplete"
+        // Phase 2 origins (§6): the same "bring different material" answer as
+        // a web snapshot's equivalent codes — a local file that is not text,
+        // empty, or unreadable is not fixed by retrying the same read.
+        | "local_file_path_invalid"
+        | "local_file_not_text"
+        | "local_file_empty"
+        | "local_file_invalid"
+        | "local_file_inside_repository"
+        | "local_file_unreadable"
+        // Phase 3 binary local-file forms (§6.2): a signature that does not
+        // match its extension, or supplied/missing agent-read text, is the
+        // same "bring different material" answer — not fixed by retrying the
+        // same prepare call unchanged.
+        | "local_file_signature_invalid"
+        | "local_file_extracted_text_required"
+        | "local_file_extracted_text_not_applicable"
+        | "local_file_extracted_text_empty"
+        | "extracted_text_unreadable"
+        | "extracted_text_invalid" => NextActionV2::Add,
+        // Registering the same page/file again rewrites content-addressed
+        // evidence that no longer matches its identity, so this is
+        // repairable by the caller rather than a dead end.
+        "registered_asset_changed" | "snapshot_damaged" | "local_file_damaged" => {
+            NextActionV2::Add
+        }
         // Write-path failures on the append-only stores: the observation was
         // not recorded, and the same call is the way to record it.
         "snapshot_write_failed"
         | "snapshot_destination_invalid"
+        | "local_file_write_failed"
+        | "local_file_destination_invalid"
         | "question_write_failed"
         | "question_destination_invalid"
         | "question_unreadable"
@@ -210,7 +236,6 @@ fn json_v1_failure_message(command: &JsonV1Command, code: &str) -> &'static str 
             "knowledge_not_found" => "No unreviewed knowledge note is available for review.",
             _ => "The knowledge note could not be reviewed.",
         },
-        JsonV1Command::KnowledgeSearch => "The knowledge base could not be searched.",
         JsonV1Command::KnowledgeShow => match code {
             "knowledge_not_found" => "No knowledge note was found for that asset.",
             _ => "The knowledge note could not be shown.",

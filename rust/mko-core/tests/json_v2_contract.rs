@@ -156,6 +156,18 @@ fn machine_envelope_goldens_validate_and_round_trip() {
         assert_eq!(serde_json::to_value(typed).unwrap(), value);
     }
 
+    let find = include_bytes!("../../../tests/fixtures/json-v2/find-success.json");
+    let find_value: Value = serde_json::from_slice(find).unwrap();
+    assert!(validator.is_valid(&find_value));
+    let find_typed: JsonV2Success = serde_json::from_slice(find).unwrap();
+    assert_eq!(serde_json::to_value(find_typed).unwrap(), find_value);
+
+    let topics = include_bytes!("../../../tests/fixtures/json-v2/topics-success.json");
+    let topics_value: Value = serde_json::from_slice(topics).unwrap();
+    assert!(validator.is_valid(&topics_value));
+    let topics_typed: JsonV2Success = serde_json::from_slice(topics).unwrap();
+    assert_eq!(serde_json::to_value(topics_typed).unwrap(), topics_value);
+
     let success = include_bytes!("../../../tests/fixtures/json-v2/queue-success.json");
     let success_value: Value = serde_json::from_slice(success).unwrap();
     assert!(validator.is_valid(&success_value));

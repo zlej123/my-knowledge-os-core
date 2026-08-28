@@ -117,6 +117,7 @@ fn source_response(general_summary: &str) -> SourceResponseV2 {
             outcome: KnowledgeRecommendationOutcomeV2::Recommend,
             reasons: vec!["Reusable concept.".into()],
         },
+        topics: Vec::new(),
     }
 }
 

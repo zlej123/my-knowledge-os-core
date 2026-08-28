@@ -1,0 +1,32 @@
+{
+  "fixture": "none",
+  "steps": [
+    {
+      "command": "mko find \"코사인 스케줄러 작년\" --format json-v2",
+      "result": {
+        "schema_version": 2,
+        "command": "find",
+        "result": "ok",
+        "data": {
+          "items": [],
+          "notes": [],
+          "scan_complete": true
+        }
+      }
+    },
+    {
+      "command": "mko add --conversation \"<RUNTIME>/conversation.txt\" --title \"코사인 스케줄러 회고\" --format json-v2",
+      "result": {
+        "schema_version": 2,
+        "command": "add",
+        "result": "ok",
+        "data": {
+          "asset_id": "personal-asset-2222222222222222222222222222222222222222222222222222222222222222",
+          "outcome": "created",
+          "registry_path": "assets/registry/personal-asset-2222222222222222222222222222222222222222222222222222222222222222.json",
+          "logical_locator": ""
+        }
+      }
+    }
+  ]
+}

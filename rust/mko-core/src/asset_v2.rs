@@ -469,6 +469,33 @@ pub(crate) fn validate_asset_record_v2(asset: &AssetRecordV2) -> Result<(), MkoE
                 && asset.provider.provider_type == "web-snapshot"
                 && validate_snapshot_locator(&asset.provider.logical_locator)
         }
+        // Neither paste nor a captured conversation has an address to return
+        // to, so both use the empty-string locator convention rather than
+        // widening `logical_locator` to `Option` — that would break every
+        // serialized Asset record on disk (D-decided in the Phase 2 design).
+        AssetOriginV2::PastedText => {
+            asset.media_type == "text/plain"
+                && asset.provider.provider_type == "pasted-text"
+                && asset.provider.logical_locator.is_empty()
+        }
+        AssetOriginV2::Conversation => {
+            asset.media_type == "text/plain"
+                && asset.provider.provider_type == "conversation"
+                && asset.provider.logical_locator.is_empty()
+        }
+        // A video transcript has an address to record (§6), exactly like a
+        // web snapshot — so it is held to the same locator contract, reused
+        // rather than duplicated.
+        AssetOriginV2::VideoTranscript => {
+            asset.media_type == "text/plain"
+                && asset.provider.provider_type == "video-transcript"
+                && validate_snapshot_locator(&asset.provider.logical_locator)
+        }
+        AssetOriginV2::LocalFile => {
+            crate::local_file_v2::is_known_local_file_media_type(&asset.media_type)
+                && asset.provider.provider_type == "local-file"
+                && validate_local_file_locator(&asset.provider.logical_locator)
+        }
     };
     if !(identity_ok && origin_ok) {
         return Err(MkoError::new(
@@ -490,6 +517,18 @@ fn validate_snapshot_locator(locator: &str) -> bool {
         && !locator
             .chars()
             .any(|character| character.is_control() || character == ' ')
+}
+
+/// A local file's locator is the absolute path it was read from — never a
+/// path inside a provider (`register_local_file_asset_v2` deliberately does
+/// not route through `inspect_provider_file`/`validated_disjoint_roots`,
+/// which are Google Drive Inbox-specific). It reaches owner-facing output and
+/// the vault, so it is bounded and carries no control characters.
+pub(crate) fn validate_local_file_locator(locator: &str) -> bool {
+    !locator.is_empty()
+        && locator.len() <= MAX_SNAPSHOT_LOCATOR_BYTES
+        && Path::new(locator).is_absolute()
+        && !locator.chars().any(|character| character.is_control())
 }
 
 pub(crate) fn require_hydration_confirmation(

@@ -9,7 +9,7 @@
           "checks": [
             {
               "code": "product_version",
-              "message": "0.4.0",
+              "message": "0.4.4",
               "path": null,
               "recovery": null,
               "status": "healthy"

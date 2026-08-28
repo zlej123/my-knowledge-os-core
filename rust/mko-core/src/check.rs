@@ -25,11 +25,14 @@ use crate::{
     front_matter::parse_markdown,
     hooks::PRE_COMMIT_SCRIPT,
     knowledge::{KnowledgeRecord, validate_knowledge_asset_contract, validate_knowledge_record},
+    local_file_v2::{MAX_LOCAL_ORIGINAL_BYTES, media_spec_for_extension, media_spec_for_path},
     model::{AssetRecord, AssetStatus, ReviewStatus, SourceRecord, SourceStatus},
     path_policy::validate_portable_relative_path,
     pdf::{EXTRACTOR_NAME, EXTRACTOR_VERSION},
     prepare::{PROCESSOR_VERSION, PROMPT_VERSION},
+    records_v2::AssetRecordV2,
     revision::calculate_source_revision,
+    revision_v2::sha256_digest,
     secret,
     version::KNOWLEDGE_CONTRACT_VERSION,
 };
@@ -40,6 +43,20 @@ const MAX_CHECK_FILES: usize = 20_000;
 const MAX_GIT_LIST_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_RUNTIME_LOCKS: usize = 4_096;
 const MAX_RUNTIME_LOCK_BYTES: u64 = 16 * 1024;
+/// Prefix every original the binary originals store (Phase 3, §8's named
+/// budget decision) files under.
+const ORIGINALS_PREFIX: &str = "assets/originals/";
+
+/// A file under `assets/originals/` is exempt from the text-oriented scans
+/// (secret scan, conflict-marker scan) and from the text-oriented byte
+/// budget (`MAX_CHECK_FILE_BYTES` per file, `MAX_CHECK_TOTAL_BYTES`
+/// aggregate) that a normal screenshot or docx original would otherwise
+/// blow through on the very first commit. `inspect_originals` below applies
+/// the budget that actually fits binary evidence instead: a per-form size
+/// ceiling and content-addressed integrity, not a text scan.
+fn is_originals_path(path: &str) -> bool {
+    path.starts_with(ORIGINALS_PREFIX)
+}
 
 #[derive(Clone, Debug)]
 pub struct CheckRequest {
@@ -116,6 +133,7 @@ pub fn check_repository(request: CheckRequest) -> Result<CheckReport, MkoError> 
     };
     files.sort_by(|left, right| left.path.cmp(&right.path));
     inspect_files(&repository_root, &files, &mut issues);
+    inspect_originals(&files, &mut issues);
     inspect_locks(&repository_root, &mut issues);
     inspect_hook(&repository_root, &files, &mut issues);
     sort_and_deduplicate(&mut issues);
@@ -146,23 +164,31 @@ fn inspect_files(repository_root: &Path, files: &[RepositoryFile], issues: &mut 
                 Some(format!("rename either {other} or {}", file.path)),
             ));
         }
-        for finding in secret::scan(Path::new(&file.path), &file.bytes) {
-            issues.push(issue(
-                "secret_detected",
-                Some(&file.path),
-                Some(&finding.rule),
-                "content matches a protected credential rule; the value is redacted",
-                None,
-            ));
-        }
-        if has_conflict_marker(&file.bytes) {
-            issues.push(issue(
-                "git_conflict",
-                Some(&file.path),
-                None,
-                "file contains Git conflict markers",
-                Some("resolve the conflict and stage the resolved file".into()),
-            ));
+        // Originals are binary evidence (image/document bytes, or plain-text
+        // bytes that are themselves the evidence) — a text-oriented secret
+        // or conflict-marker scan over them is both meaningless and, for a
+        // multi-megabyte binary, exactly the byte budget §8 named as the
+        // risk. `inspect_originals` validates them on their own terms
+        // instead (per-form size ceiling, content-addressed integrity).
+        if !is_originals_path(&file.path) {
+            for finding in secret::scan(Path::new(&file.path), &file.bytes) {
+                issues.push(issue(
+                    "secret_detected",
+                    Some(&file.path),
+                    Some(&finding.rule),
+                    "content matches a protected credential rule; the value is redacted",
+                    None,
+                ));
+            }
+            if has_conflict_marker(&file.bytes) {
+                issues.push(issue(
+                    "git_conflict",
+                    Some(&file.path),
+                    None,
+                    "file contains Git conflict markers",
+                    Some("resolve the conflict and stage the resolved file".into()),
+                ));
+            }
         }
         if file.path.starts_with("assets/registry/") && file.path.ends_with(".md") {
             match parse_utf8_markdown::<AssetRecord>(file) {
@@ -342,6 +368,110 @@ fn inspect_files(repository_root: &Path, files: &[RepositoryFile], issues: &mut 
             }
         }
     }
+}
+
+/// Validates the binary originals store (Phase 3, §8's named budget
+/// decision): for each `assets/originals/<hash>.<ext>` entry, its size must
+/// sit within its form's ceiling and its filename hash must match its actual
+/// content hash (content-addressed integrity — a tampered or truncated
+/// original is provably not what it claims to be). An originals entry not
+/// referenced by any Asset registry record is reported as an orphan: no new
+/// severity tier exists on `CheckIssue` today, so — like every other check
+/// finding — it surfaces as an ordinary issue, with wording that says
+/// "orphaned" rather than "damaged" so a reader can tell the two apart.
+///
+/// "Referenced" means (hash, extension), not hash alone: `read_original_bytes_v2`
+/// derives the extension it will read from the record's own
+/// `provider.logical_locator` (via `media_spec_for_path`), so a stray file
+/// that merely shares a registered asset's content hash under a *different*
+/// extension (e.g. a same-bytes `.docx` dropped next to a registered `.png`)
+/// is never the file that record's reads resolve to, and must still be
+/// flagged as orphaned. A registry record whose own `media_type` disagrees
+/// with the extension its locator implies contributes no known pair at all —
+/// `read_original_bytes_v2` refuses to read it either, under any extension.
+fn inspect_originals(files: &[RepositoryFile], issues: &mut Vec<CheckIssue>) {
+    let mut known_originals = BTreeSet::<(String, &'static str)>::new();
+    for file in files {
+        if file.path.starts_with("assets/registry/")
+            && file.path.ends_with(".json")
+            && let Ok(record) = serde_json::from_slice::<AssetRecordV2>(&file.bytes)
+            && let Some(hash) = record.fingerprint.strip_prefix("sha256:")
+        {
+            let spec = media_spec_for_path(Path::new(&record.provider.logical_locator));
+            if spec.media_type == record.media_type {
+                known_originals.insert((hash.to_owned(), spec.extension));
+            }
+        }
+    }
+    for file in files {
+        let Some(name) = file.path.strip_prefix(ORIGINALS_PREFIX) else {
+            continue;
+        };
+        if name.is_empty() || name.contains('/') {
+            // A nested path or the directory entry itself; the portable-path
+            // scan already reports anything actually wrong with it.
+            continue;
+        }
+        let Some((hash, extension)) = name.split_once('.') else {
+            issues.push(issue(
+                "asset_original_invalid",
+                Some(&file.path),
+                None,
+                "original filename must be <hash>.<ext>",
+                None,
+            ));
+            continue;
+        };
+        if !valid_lower_hex_64(hash) {
+            issues.push(issue(
+                "asset_original_invalid",
+                Some(&file.path),
+                None,
+                "original filename hash is not a lowercase SHA-256 hex digest",
+                None,
+            ));
+            continue;
+        }
+        let spec = media_spec_for_extension(extension);
+        if file.bytes.len() as u64 > spec.max_bytes {
+            issues.push(issue(
+                "asset_original_too_large",
+                Some(&file.path),
+                None,
+                "original exceeds its per-form size ceiling",
+                None,
+            ));
+            continue;
+        }
+        let actual_hash = sha256_digest(&file.bytes);
+        let actual_hash = actual_hash.strip_prefix("sha256:").unwrap_or(&actual_hash);
+        if actual_hash != hash {
+            issues.push(issue(
+                "asset_original_damaged",
+                Some(&file.path),
+                None,
+                "stored original bytes do not match the identity their filename claims",
+                Some("restore the original from Git history or the source device".into()),
+            ));
+            continue;
+        }
+        if !known_originals.contains(&(hash.to_owned(), spec.extension)) {
+            issues.push(issue(
+                "asset_original_orphaned",
+                Some(&file.path),
+                None,
+                "warning: original is not referenced by any Asset registry record",
+                None,
+            ));
+        }
+    }
+}
+
+fn valid_lower_hex_64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn validate_asset(path: &str, asset: &AssetRecord, issues: &mut Vec<CheckIssue>) {
@@ -585,6 +715,36 @@ fn collect_directory(
             let metadata = file
                 .metadata()
                 .map_err(|error| MkoError::new("check_failed", error.to_string()))?;
+            if is_originals_path(&relative) {
+                // Exempt from the text-oriented per-file and aggregate
+                // budgets (§8, decided): `inspect_originals` applies the
+                // per-form ceiling that actually fits binary evidence
+                // instead. Still bounded here, to the largest such ceiling,
+                // so a walk cannot be made to read an unbounded file.
+                if metadata.len() > MAX_LOCAL_ORIGINAL_BYTES {
+                    issues.push(limit_issue(
+                        Some(&relative),
+                        "original exceeds the largest originals-store size ceiling",
+                    ));
+                    continue;
+                }
+                let mut bytes = Vec::new();
+                file.take(MAX_LOCAL_ORIGINAL_BYTES + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|error| MkoError::new("check_failed", error.to_string()))?;
+                if bytes.len() as u64 > MAX_LOCAL_ORIGINAL_BYTES {
+                    issues.push(limit_issue(
+                        Some(&relative),
+                        "original changed beyond the largest originals-store size ceiling",
+                    ));
+                    continue;
+                }
+                files.push(RepositoryFile {
+                    path: relative,
+                    bytes,
+                });
+                continue;
+            }
             if metadata.len() > MAX_CHECK_FILE_BYTES {
                 issues.push(limit_issue(
                     Some(&relative),
@@ -711,6 +871,24 @@ fn staged_files(root: &Path) -> Result<(Vec<RepositoryFile>, Vec<CheckIssue>), M
             .trim()
             .parse::<u64>()
             .map_err(|_| MkoError::new("git_index_invalid", "invalid staged blob size"))?;
+        if is_originals_path(path) {
+            // Same exemption as the working-tree walk (§8, decided):
+            // `inspect_originals` applies the per-form ceiling instead of the
+            // text-oriented per-file/aggregate budget below.
+            if size > MAX_LOCAL_ORIGINAL_BYTES {
+                issues.push(limit_issue(
+                    Some(path),
+                    "staged original exceeds the largest originals-store size ceiling",
+                ));
+                continue;
+            }
+            let bytes = run_git_bounded(root, &["cat-file", "blob", &object], size + 1)?;
+            files.push(RepositoryFile {
+                path: path.into(),
+                bytes,
+            });
+            continue;
+        }
         if size > MAX_CHECK_FILE_BYTES {
             issues.push(limit_issue(
                 Some(path),

@@ -1,12 +1,22 @@
 use chrono::Utc;
 use mko_core::{
+    model_v2::PreparedMetadataV2,
+    prepared_v2::prepare_snapshot_asset_v2,
     scaffold_v2::scaffold_personal_kb_v2,
     snapshot_v2::{
-        MAX_SNAPSHOT_BYTES, RegisterSnapshotRequestV2, read_snapshot_text_v2,
-        register_web_snapshot_v2,
+        MAX_SNAPSHOT_BYTES, RegisterSnapshotRequestV2, RegisterVideoTranscriptRequestV2,
+        read_snapshot_text_v2, register_video_transcript_v2, register_web_snapshot_v2,
     },
 };
 use tempfile::tempdir;
+
+fn no_metadata() -> PreparedMetadataV2 {
+    PreparedMetadataV2 {
+        title: None,
+        authors: Vec::new(),
+        created_at: None,
+    }
+}
 
 // Identity is the text, not the address. Re-reading an unchanged page must not
 // create a second Asset; a page that changed must not overwrite the evidence an
@@ -312,4 +322,154 @@ fn a_damaged_snapshot_is_repaired_by_registering_the_same_page_again() {
         "The page said this.",
         "the evidence must be restored, not silently left damaged"
     );
+}
+
+// Phase 4 (§6, §10): a video transcript is registered snapshot-model, exactly
+// as a web page is — identity from the transcript text's fingerprint, no
+// original video bytes ever fetched or stored. Registering the same
+// transcript twice must return the same Asset, not a duplicate.
+#[test]
+fn a_video_transcript_is_identified_by_the_text_it_stored() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    let at = Utc::now();
+
+    let first = register_video_transcript_v2(RegisterVideoTranscriptRequestV2 {
+        repository_root: &repository,
+        url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        title: "Example video",
+        text: "The narrator said this.",
+        fetched_at: at,
+    })
+    .unwrap()
+    .asset;
+
+    let again = register_video_transcript_v2(RegisterVideoTranscriptRequestV2 {
+        repository_root: &repository,
+        url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s",
+        title: "Example video",
+        text: "The narrator said this.",
+        fetched_at: at,
+    })
+    .unwrap()
+    .asset;
+    assert_eq!(
+        again.id, first.id,
+        "the same transcript text is the same evidence, regardless of tracking params"
+    );
+
+    let changed = register_video_transcript_v2(RegisterVideoTranscriptRequestV2 {
+        repository_root: &repository,
+        url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        title: "Example video",
+        text: "The narrator says something else now.",
+        fetched_at: at,
+    })
+    .unwrap()
+    .asset;
+    assert_ne!(
+        changed.id, first.id,
+        "changed transcript text is new evidence"
+    );
+
+    assert_eq!(
+        read_snapshot_text_v2(&repository, &first.id).unwrap(),
+        "The narrator said this.",
+    );
+    assert_eq!(
+        first.provider.logical_locator, "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "the read timestamp's binding stays authoritative"
+    );
+    assert_eq!(
+        first.provider.modified_at,
+        Some(at),
+        "the fetched_at timestamp is recorded"
+    );
+    assert_eq!(first.media_type, "text/plain");
+}
+
+// The locator contract is shared with a web snapshot's (§6, reused via
+// `validate_snapshot_locator`): a `youtu.be` short link and a `watch?v=` long
+// link both pass, since both are plain http(s) addresses; a non-URL locator
+// is refused at registration, before a bad address can reach the registry.
+#[test]
+fn a_video_transcript_accepts_youtube_url_shapes_and_refuses_a_non_url_locator() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    scaffold_personal_kb_v2(&repository).unwrap();
+
+    let short_link = register_video_transcript_v2(RegisterVideoTranscriptRequestV2 {
+        repository_root: &repository,
+        url: "https://youtu.be/dQw4w9WgXcQ",
+        title: "Short link video",
+        text: "Transcript from a youtu.be short link.",
+        fetched_at: Utc::now(),
+    })
+    .unwrap()
+    .asset;
+    assert_eq!(
+        short_link.provider.logical_locator,
+        "https://youtu.be/dQw4w9WgXcQ"
+    );
+
+    let long_link = register_video_transcript_v2(RegisterVideoTranscriptRequestV2 {
+        repository_root: &repository,
+        url: "https://www.youtube.com/watch?v=abcdefghijk",
+        title: "Watch link video",
+        text: "Transcript from a watch link.",
+        fetched_at: Utc::now(),
+    })
+    .unwrap()
+    .asset;
+    assert_eq!(
+        long_link.provider.logical_locator,
+        "https://www.youtube.com/watch?v=abcdefghijk"
+    );
+
+    let error = register_video_transcript_v2(RegisterVideoTranscriptRequestV2 {
+        repository_root: &repository,
+        url: "not-a-url",
+        title: "Bad locator",
+        text: "Transcript text.",
+        fetched_at: Utc::now(),
+    })
+    .unwrap_err();
+    assert_eq!(error.code(), "asset_record_invalid");
+}
+
+// A video transcript is prepared through the same snapshot path a web page
+// uses (§10): its evidence is already text/plain, so nothing about prepare
+// needs to know it came from a video rather than a page.
+#[test]
+fn a_video_transcript_prepares_into_a_bundle_a_draft_can_cite() {
+    use mko_core::model_v2::{ContentBlockV2, PreparedTrustV2};
+
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    let asset = register_video_transcript_v2(RegisterVideoTranscriptRequestV2 {
+        repository_root: &repository,
+        url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        title: "Conference talk",
+        text: "The speaker explained the Error trait is now available in core.",
+        fetched_at: Utc::now(),
+    })
+    .unwrap()
+    .asset;
+
+    let prepared = prepare_snapshot_asset_v2(&repository, &asset.id, no_metadata()).unwrap();
+
+    assert_eq!(prepared.bundle.asset_id, asset.id);
+    assert_eq!(prepared.bundle.asset_fingerprint, asset.fingerprint);
+    assert_eq!(prepared.bundle.media_type, "text/plain");
+    assert_eq!(
+        prepared.bundle.trust,
+        PreparedTrustV2::UntrustedDocumentContent,
+        "a transcript the agent produced is data, exactly as a page is"
+    );
+    let ContentBlockV2::Text { text, .. } = &prepared.bundle.content_blocks[0] else {
+        panic!("a video transcript is text, so its blocks are text blocks");
+    };
+    assert!(text.contains("Error trait"), "{text}");
 }

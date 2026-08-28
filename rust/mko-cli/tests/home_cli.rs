@@ -60,6 +60,36 @@ mod macos {
         assert_eq!(snapshot(&repository), before);
     }
 
+    // The design's success measure lives on the first screen (§5, D7): the
+    // owner must see whether recall is actually happening without a
+    // separate report.
+    #[test]
+    #[allow(deprecated)]
+    fn home_surfaces_recall_metrics_from_a_prior_find() {
+        let root = tempdir().unwrap();
+        let repository = root.path().join("v3-kb");
+        let provider = root.path().join("provider");
+        scaffold_personal_kb_v2(&repository).unwrap();
+        fs::create_dir(&provider).unwrap();
+
+        let find = Command::new(assert_cmd::cargo::cargo_bin("mko"))
+            .args(["find", "sampling"])
+            .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+            .env("HOME", root.path())
+            .current_dir(&repository)
+            .output()
+            .unwrap();
+        assert!(find.status.success());
+
+        let output = run_home_and_quit(&repository, &provider, root.path());
+        assert!(output.status.success());
+        let screen = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            screen.contains("최근 30일 recall 1회"),
+            "recall metric missing from home: {screen}"
+        );
+    }
+
     // The count is useless if it stops at the report: this is the screen the
     // owner actually reads when they come back to unfinished work.
     #[test]
@@ -292,6 +322,7 @@ mod macos {
                 outcome: mko_core::model_v2::KnowledgeRecommendationOutcomeV2::Recommend,
                 reasons: vec!["Reusable concept.".into()],
             },
+            topics: Vec::new(),
         };
         let written = mko_core::records_v2::write_source_record_v2(
             mko_core::records_v2::WriteSourceRecordRequestV2 {
@@ -396,11 +427,10 @@ mod macos {
 
         assert!(output.status.success());
         let screen = String::from_utf8_lossy(&output.stdout);
-        assert!(screen.contains("확인된 지식에서 찾지 못했습니다."));
-        assert!(
-            screen.contains("아직 확인된 지식이 없습니다"),
-            "an empty shelf must be named as such: {screen}"
-        );
+        // Search now covers unconfirmed records too (§4.2, D10), so an empty
+        // result no longer names "confirmed knowledge" as the scope — it
+        // means nothing on file matches at all.
+        assert!(screen.contains("찾지 못했습니다."));
         assert!(
             screen.contains("`mko`"),
             "the owner needs somewhere to go: {screen}"

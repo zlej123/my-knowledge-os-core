@@ -746,3 +746,44 @@ under a label); the contract-version wall with no migrator; fail-closed
 prepared-session cleanup that can brick prepare; the 24-hour session TTL vs
 the owner's actual cadence. Each is recorded with its mechanism in the review
 transcripts and in the sections above; none is started.
+
+## `.hwp` 5.x extraction — deferred from Phase 3 (2026-08-28)
+
+**Idea.** Register `.hwp` 5.x files (Hancom Office's binary format, still
+common for Korean government and institutional documents) as a local-file
+origin alongside the `.docx`/`.hwpx` documents Phase 3 does support, with the
+agent supplying converted text exactly as for those forms.
+
+**Recorded 2026-08-28.** `docs/superpowers/specs/2026-08-28-frictionless-knowledge-design.md`
+§7 required Phase 3 to open with a feasibility check on the owner's machines
+before committing to `.hwp` in scope. That check ran the same day, on the
+primary machine: no honest extraction path exists — `pyhwp`, LibreOffice,
+Hancom Office, and `pandoc` are all absent from the machine, and no macOS
+built-in (Preview, Quick Look, TextEdit) reads HWP 5.x. Real HWP 5.x files
+were confirmed present on the machine, so the need itself is real, not
+hypothetical — this is an occurrence, not an anticipation. `.hwpx` (a ZIP of
+XML, the format's later revision) is a different story and *is* in Phase 3
+scope: it is agent-readable with no additional install, unlike `.hwp` 5.x's
+proprietary binary layout.
+
+**Why it is not scheduled.** D2 requires an honest extraction path — the
+agent reads the format, or converts it, and the Core records what was read
+(approach A); the Core itself never parses formats (approach B was rejected
+project-wide, not only for `.hwp`, precisely because it does not scale to
+formats like this one). Registering the original bytes alone, with no way for
+the agent to produce trustworthy converted text, would leave every `.hwp`
+Asset stuck at "registered, never prepared" — debt on the home screen, the
+exact failure mode D1's badge-not-gate redesign exists to prevent elsewhere.
+Shipping the original-bytes sidecar for a format nothing can honestly read
+out of is worse than not shipping it.
+
+**Revisit when.** The cheapest path if the owner wants `.hwp` support later is
+`pip3 install pyhwp`, which provides `hwp5txt` — a single-maintainer
+open-source project, so its usual OSS caveats apply (maintenance cadence,
+correctness on newer HWP sub-versions, no vendor support). If installed, the
+Skill workflow would ask the agent to shell out to `hwp5txt` to produce the
+converted text and register `.hwp` through the same local-file path `.docx`
+already uses — no Core change required beyond adding `.hwp` to the
+recognized-extension table in `local_file_v2.rs` with its own signature check
+and size ceiling. Revisit on the owner's explicit request, or when a real
+`.hwp` file actually blocks a capture (the occurrence rule).

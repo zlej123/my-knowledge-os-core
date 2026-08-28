@@ -32,26 +32,28 @@ use mko_core::{
     hooks::install_hooks,
     inbox::{InboxScanRequest, InboxScanResult, scan_inbox},
     json_v1::{
-        AddData, AddPayload, CheckData, ConceptMatchData, DiagnosticData, DoctorCheckData,
-        DoctorCheckStatus, DoctorData, DraftOutcome, JsonV1Command, JsonV1Success,
-        KnowledgeConceptSummary, KnowledgeListData, KnowledgePendingItemData, KnowledgeReviewData,
-        KnowledgeReviewDecision, KnowledgeReviewItemData, KnowledgeReviewStatusData,
-        KnowledgeSearchData, KnowledgeShowData, KnowledgeWriteData, KnowledgeWriteOutcome,
-        NextAction, PrepareData, Recovery, RecoveryKind, SuccessResult, UserState, WriteDraftData,
+        AddData, AddPayload, CheckData, DiagnosticData, DoctorCheckData, DoctorCheckStatus,
+        DoctorData, DraftOutcome, JsonV1Command, JsonV1Success, KnowledgeConceptSummary,
+        KnowledgeListData, KnowledgePendingItemData, KnowledgeReviewData, KnowledgeReviewDecision,
+        KnowledgeReviewItemData, KnowledgeReviewStatusData, KnowledgeShowData, KnowledgeWriteData,
+        KnowledgeWriteOutcome, NextAction, PrepareData, Recovery, RecoveryKind, SuccessResult,
+        UserState, WriteDraftData,
     },
     json_v2::{
         AddBatchDataV2, AddBatchItemErrorV2, AddBatchItemV2, AddBatchWarningV2, AddDataV2,
         AddOutcomeV2, AddSingleDataV2, AskedQuestionV2, DashboardCanonicalStateDataV2,
         DashboardDataV2, DashboardFileDataV2, DashboardFileKindDataV2, DashboardFileStateDataV2,
         DashboardProjectionStateDataV2, DoctorCheckDataV2, DoctorCheckStatusV2, DoctorDataV2,
-        HandshakeDataV2, JsonV2Command, JsonV2Success, NextActionV2, PendingDraftReasonV2,
-        PendingDraftV2, QuestionsAppendDataV2, QuestionsListDataV2, QueueDraftsDataV2,
-        SetupApplyDataV2,
+        FindConfirmationStatusV2, FindConfirmationV2, FindDataV2, FindLayerV2, FindMatchV2,
+        FindNoteV2, FindRecordTypeV2, HandshakeDataV2, JsonV2Command, JsonV2Success, NextActionV2,
+        PendingDraftReasonV2, PendingDraftV2, QuestionsAppendDataV2, QuestionsListDataV2,
+        QueueDraftsDataV2, SetupApplyDataV2, TopicsDataV2,
     },
     knowledge::{
-        ConceptKind, ConceptMatch, KnowledgeSearchQuery, WriteKnowledgeRequest, approve_knowledge,
+        ConceptKind, KnowledgeSearchQuery, WriteKnowledgeRequest, approve_knowledge,
         list_knowledge, list_unreviewed_knowledge, search_knowledge, write_knowledge_note,
     },
+    local_file_v2::{RegisterLocalFileRequestV2, register_local_file_asset_v2},
     migrate_v2::migrate_v2,
     model::AssetStatus,
     pdf::{ExtractionWorkerResponse, extract_pdf_pages_from_reader, worker_executable},
@@ -60,13 +62,16 @@ use mko_core::{
     provider_scan::MonotonicElapsedClock,
     question_v2::{QuestionRecordV2, append_question_v2, questions_for_asset_v2},
     queue_v2::{
-        KnowledgeSearchLayerV2, ResurfacedKnowledgeStateV2, resurface_knowledge_by_perspective_v2,
-        search_confirmed_knowledge_by_perspective_v2, summarize_home_queue_v2,
+        ConfirmationLabelV2, ResurfacedKnowledgeStateV2, SearchConfirmationFilterV2, SearchLayerV2,
+        SearchMatchV2, SearchOriginFormV2, SearchRecordTypeV2, list_topics_v2,
+        resurface_knowledge_by_perspective_v2, search_records_by_perspective_v2,
+        summarize_home_queue_v2,
     },
     quick_note_v2::{
-        QuickNotePublicationOutcomeV2, prepare_quick_note_v2, publish_quick_note_v2,
+        QuickNotePublicationOutcomeV2, QuickNoteV2, prepare_quick_note_v2, publish_quick_note_v2,
         search_quick_notes_v2,
     },
+    recall_log_v2::append_recall_log_v2,
     records_v2::RecordWriteOutcomeV2,
     registry::{
         AssetOperationRequest, CaptureRequest, accept_changed_asset, capture_asset, inspect_asset,
@@ -79,7 +84,11 @@ use mko_core::{
     },
     setup_plan_v2::{apply_setup_plan_v2_tty, create_setup_plan_v2},
     setup_v2::{SetupPersonalV2Request, setup_personal_v2},
-    snapshot_v2::{RegisterSnapshotRequestV2, parse_fetched_at_v2, register_web_snapshot_v2},
+    snapshot_v2::{
+        RegisterConversationRequestV2, RegisterPastedTextRequestV2, RegisterSnapshotRequestV2,
+        RegisterVideoTranscriptRequestV2, parse_fetched_at_v2, register_conversation_v2,
+        register_pasted_text_v2, register_video_transcript_v2, register_web_snapshot_v2,
+    },
     source::{
         RepairSourceStateRequest, WriteSourceRequest, repair_source_state, write_source_draft,
     },
@@ -315,6 +324,8 @@ enum Command {
     Status(StatusArgs),
     #[command(hide = true)]
     Queue(QueueArgs),
+    #[command(hide = true)]
+    Topics(TopicsArgs),
     /// Records a question asked about registered material, or lists what was
     /// asked before. Answers are never stored — see `question_v2`.
     Ask(AskArgs),
@@ -381,8 +392,156 @@ struct FindArgs {
     term: String,
     #[arg(long, value_enum)]
     perspective: Option<PerspectiveArg>,
+    /// Only records a human has confirmed. Mutually exclusive with
+    /// `--unconfirmed`; by default search includes both (§4.2).
+    #[arg(long, conflicts_with = "unconfirmed")]
+    confirmed: bool,
+    /// Only records no human has confirmed yet.
+    #[arg(long, conflicts_with = "confirmed")]
+    unconfirmed: bool,
+    /// Absorbed from the removed `mko knowledge search` (D10).
+    #[arg(long)]
+    tag: Option<String>,
+    #[arg(long, value_enum)]
+    layer: Option<FindLayerArg>,
+    /// Matches a record when any of its topics equals this value
+    /// case-insensitively, or is a hierarchical child of it (e.g. `투자`
+    /// matches `투자>반도체`). Arrives with `topics` in Phase 2 (§6.3).
+    #[arg(long)]
+    topic: Option<String>,
+    /// Matches a record by its input form: `pasted-text | local-file | image
+    /// | document | video | web | conversation` (§6). A display/filter
+    /// vocabulary derived from the Asset's origin and media type, not the
+    /// Core's internal origin enum.
+    #[arg(long, value_enum)]
+    origin: Option<FindOriginArg>,
     #[arg(long)]
     repo: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum FindOriginArg {
+    PastedText,
+    LocalFile,
+    Image,
+    Document,
+    Video,
+    Web,
+    Conversation,
+}
+
+impl From<FindOriginArg> for SearchOriginFormV2 {
+    fn from(value: FindOriginArg) -> Self {
+        match value {
+            FindOriginArg::PastedText => Self::PastedText,
+            FindOriginArg::LocalFile => Self::LocalFile,
+            FindOriginArg::Image => Self::Image,
+            FindOriginArg::Document => Self::Document,
+            FindOriginArg::Video => Self::Video,
+            FindOriginArg::Web => Self::Web,
+            FindOriginArg::Conversation => Self::Conversation,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum FindLayerArg {
+    GroundedEvidence,
+    LlmAnalysis,
+    CounterargumentUncertainty,
+    SourceOwnWords,
+}
+
+impl From<FindLayerArg> for SearchLayerV2 {
+    fn from(value: FindLayerArg) -> Self {
+        match value {
+            FindLayerArg::GroundedEvidence => Self::GroundedEvidence,
+            FindLayerArg::LlmAnalysis => Self::LlmAnalysis,
+            FindLayerArg::CounterargumentUncertainty => Self::CounterargumentOrUncertainty,
+            FindLayerArg::SourceOwnWords => Self::SourceOwnWords,
+        }
+    }
+}
+
+fn find_layer_data(layer: SearchLayerV2) -> FindLayerV2 {
+    match layer {
+        SearchLayerV2::GroundedEvidence => FindLayerV2::GroundedEvidence,
+        SearchLayerV2::LlmAnalysis => FindLayerV2::LlmAnalysis,
+        SearchLayerV2::CounterargumentOrUncertainty => FindLayerV2::CounterargumentOrUncertainty,
+        SearchLayerV2::SourceOwnWords => FindLayerV2::SourceOwnWords,
+    }
+}
+
+fn find_record_type_data(record_type: SearchRecordTypeV2) -> FindRecordTypeV2 {
+    match record_type {
+        SearchRecordTypeV2::Source => FindRecordTypeV2::Source,
+        SearchRecordTypeV2::Knowledge => FindRecordTypeV2::Knowledge,
+    }
+}
+
+fn find_confirmation_data(label: ConfirmationLabelV2) -> FindConfirmationV2 {
+    match label {
+        ConfirmationLabelV2::Confirmed { at } => FindConfirmationV2 {
+            status: FindConfirmationStatusV2::Confirmed,
+            confirmed_at: Some(at.to_rfc3339()),
+        },
+        ConfirmationLabelV2::Unconfirmed => FindConfirmationV2 {
+            status: FindConfirmationStatusV2::Unconfirmed,
+            confirmed_at: None,
+        },
+    }
+}
+
+fn find_match_data(item: SearchMatchV2) -> FindMatchV2 {
+    FindMatchV2 {
+        record_type: find_record_type_data(item.record_type),
+        record_id: item.record_id,
+        current_revision: item.current_revision,
+        asset_id: item.asset_id,
+        title: item.title,
+        body: item.body,
+        tags: item.tags,
+        perspectives: item
+            .perspectives
+            .iter()
+            .map(PerspectiveV2::as_str)
+            .map(str::to_owned)
+            .collect(),
+        layer: find_layer_data(item.layer),
+        locators: item.locators,
+        confirmation: find_confirmation_data(item.confirmation),
+    }
+}
+
+fn find_note_data(note: QuickNoteV2) -> FindNoteV2 {
+    FindNoteV2 {
+        note_id: note.id,
+        text: note.text,
+    }
+}
+
+fn confirmation_label_text(label: &ConfirmationLabelV2) -> String {
+    match label {
+        // Matches the vocabulary `mko queue`/`mko confirm` already use for
+        // this state (cli_v2::state_label's `미확인`), prefixed with
+        // authorship per §4.2's example labelling.
+        ConfirmationLabelV2::Confirmed { at } => {
+            format!("확인됨 ({})", at.format("%Y-%m-%d"))
+        }
+        ConfirmationLabelV2::Unconfirmed => "AI 작성 · 미확인".to_owned(),
+    }
+}
+
+fn find_layer_label(layer: SearchLayerV2) -> &'static str {
+    match layer {
+        SearchLayerV2::GroundedEvidence => "문서 근거",
+        SearchLayerV2::LlmAnalysis => "LLM 분석",
+        SearchLayerV2::CounterargumentOrUncertainty => "반론·불확실성",
+        SearchLayerV2::SourceOwnWords => "원문 요약",
+    }
 }
 
 #[derive(Args)]
@@ -445,7 +604,6 @@ enum SourceCommand {
 enum KnowledgeCommand {
     Write(KnowledgeWriteArgs),
     Review(KnowledgeReviewArgs),
-    Search(KnowledgeSearchArgs),
     Show(KnowledgeShowArgs),
     List(KnowledgeListArgs),
 }
@@ -505,8 +663,8 @@ struct SetupApplyArgs {
 #[derive(Args)]
 struct AddArgs {
     #[arg(
-        required_unless_present_any = ["inbox", "snapshot"],
-        conflicts_with_all = ["inbox", "snapshot"],
+        required_unless_present_any = ["inbox", "snapshot", "paste", "local_file", "conversation", "video_transcript"],
+        conflicts_with_all = ["inbox", "snapshot", "paste", "local_file", "conversation", "video_transcript"],
     )]
     file: Option<PathBuf>,
     #[arg(long)]
@@ -514,15 +672,49 @@ struct AddArgs {
     /// Path to a file holding text an agent read from the web. The text arrives
     /// in a file, not an argument: a page body on a command line reaches
     /// process listings and shell history.
-    #[arg(long, conflicts_with = "inbox")]
+    #[arg(long, group = "url_source", conflicts_with_all = ["inbox", "paste", "local_file", "conversation", "video_transcript"])]
     snapshot: Option<PathBuf>,
-    /// The address the text was read from.
-    #[arg(long, requires = "snapshot")]
+    /// Path to a file holding text the owner pasted. Text arrives in a file,
+    /// not an argument — same file-not-argument discipline as `--snapshot`
+    /// (§6, Phase 2).
+    #[arg(long, conflicts_with_all = ["inbox", "snapshot", "local_file", "conversation", "video_transcript"])]
+    paste: Option<PathBuf>,
+    /// Absolute path to a local file the owner already holds: Markdown/text
+    /// (`.md`/`.markdown`/`.txt`), an image (`.png`/`.jpg`/`.jpeg`/`.webp`/
+    /// `.heic`), or a document (`.docx`/`.hwpx` — `.hwp` is not supported,
+    /// see `docs/BACKLOG.md`). Unlike `--paste`/`--snapshot`/`--conversation`,
+    /// this names the material itself — Core reads and stores its original
+    /// bytes directly, content-addressed (§6.1); no separate runtime text
+    /// file is written for the original. An image or document's evidence
+    /// text is supplied separately, at the prepare step (§6.2, `mko source
+    /// prepare --extracted-text`).
+    #[arg(long, conflicts_with_all = ["inbox", "snapshot", "paste", "conversation", "video_transcript"])]
+    local_file: Option<PathBuf>,
+    /// Path to a file holding conversation content captured on a recall miss
+    /// (§6.3, store-on-miss). Same file-not-argument discipline as
+    /// `--snapshot`/`--paste`.
+    #[arg(long, conflicts_with_all = ["inbox", "snapshot", "paste", "local_file", "video_transcript"])]
+    conversation: Option<PathBuf>,
+    /// Path to a file holding the transcript of a video (e.g. YouTube) the
+    /// agent read or transcribed itself (Phase 4, §6). Same model as
+    /// `--snapshot` — no original video bytes are ever fetched or stored,
+    /// only the transcript text, in a file, never an argument.
+    #[arg(long, group = "url_source", conflicts_with_all = ["inbox", "snapshot", "paste", "local_file", "conversation"])]
+    video_transcript: Option<PathBuf>,
+    /// The address the text was read from. `--snapshot` or `--video-transcript`.
+    #[arg(long, requires = "url_source")]
     url: Option<String>,
-    #[arg(long, requires = "snapshot")]
+    /// Optional for `--snapshot` (falls back to the address), `--paste`
+    /// (falls back to a fixed label), `--local-file` (falls back to the file
+    /// name), and `--conversation` (falls back to a fixed label). Required
+    /// alongside `--url` for `--video-transcript`, matching `--snapshot`'s
+    /// own stricter CLI-level requirement. Unused for a plain PDF or
+    /// `--inbox`, whose titles are always the provider file name.
+    #[arg(long)]
     title: Option<String>,
-    /// RFC 3339. Defaults to now.
-    #[arg(long, requires = "snapshot")]
+    /// RFC 3339. Defaults to now. Applies to `--snapshot`, `--paste`,
+    /// `--local-file`, `--conversation`, and `--video-transcript`.
+    #[arg(long)]
     fetched_at: Option<String>,
     #[arg(long)]
     verified_backup: bool,
@@ -640,6 +832,15 @@ struct QueueArgs {
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
 }
+/// `mko topics` (D13, §6.3): read-only, no mutation lock. The Skill consults
+/// this before proposing a new topic, to prefer an existing label.
+#[derive(Args)]
+struct TopicsArgs {
+    #[arg(long)]
+    repo: Option<PathBuf>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
+}
 #[derive(Args)]
 struct ShowArgs {
     stable_id: String,
@@ -684,25 +885,6 @@ struct MigrateArgs {
     #[arg(long)]
     repo: Option<PathBuf>,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum ConceptKindArg {
-    Definition,
-    Formula,
-    Concept,
-    Result,
-    Theorem,
-}
-impl From<ConceptKindArg> for ConceptKind {
-    fn from(value: ConceptKindArg) -> Self {
-        match value {
-            ConceptKindArg::Definition => ConceptKind::Definition,
-            ConceptKindArg::Formula => ConceptKind::Formula,
-            ConceptKindArg::Concept => ConceptKind::Concept,
-            ConceptKindArg::Result => ConceptKind::Result,
-            ConceptKindArg::Theorem => ConceptKind::Theorem,
-        }
-    }
-}
 #[derive(Args)]
 struct KnowledgeWriteArgs {
     #[arg(
@@ -734,22 +916,6 @@ struct KnowledgeReviewArgs {
     repo: Option<PathBuf>,
     #[arg(long)]
     asset_id: Option<String>,
-    #[arg(long, value_enum)]
-    format: Option<OutputFormat>,
-}
-#[derive(Args)]
-struct KnowledgeSearchArgs {
-    #[arg(
-        long,
-        required_unless_present = "format",
-        required_if_eq("format", "human")
-    )]
-    repo: Option<PathBuf>,
-    term: String,
-    #[arg(long, value_enum)]
-    kind: Option<ConceptKindArg>,
-    #[arg(long)]
-    tag: Option<String>,
     #[arg(long, value_enum)]
     format: Option<OutputFormat>,
 }
@@ -811,6 +977,14 @@ struct PrepareArgs {
     confirm_download: bool,
     #[arg(long)]
     clear_stale_lock: bool,
+    /// Path to a file holding the agent-read text for an image or document
+    /// local file (OCR output, a converted document body) — Phase 3, §6.2.
+    /// Text arrives in a file, not an argument, matching every other
+    /// evidence-bearing flag in this CLI. Applies only when the Asset is a
+    /// LocalFile whose original carries no text of its own; every other
+    /// Asset's text is already in the knowledge base.
+    #[arg(long)]
+    extracted_text: Option<PathBuf>,
     #[arg(long, value_enum)]
     format: Option<OutputFormat>,
 }
@@ -968,6 +1142,10 @@ fn home() -> Result<(), MkoError> {
             file: None,
             inbox: true,
             snapshot: None,
+            paste: None,
+            local_file: None,
+            conversation: None,
+            video_transcript: None,
             url: None,
             title: None,
             fetched_at: None,
@@ -988,7 +1166,14 @@ fn home() -> Result<(), MkoError> {
             find(FindArgs {
                 term: term.trim().to_owned(),
                 perspective: None,
+                confirmed: false,
+                unconfirmed: false,
+                tag: None,
+                layer: None,
+                topic: None,
+                origin: None,
                 repo: Some(context.repository_root),
+                format: OutputFormat::Human,
             })
         }
         (HomeReport::V3(_), "3") => remember(RememberArgs {
@@ -1036,6 +1221,16 @@ fn render_home(report: &HomeReport) {
             println!(
                 "새 자료 {} · 정리 중 {} · 확인된 지식 {} · 문제 {}",
                 report.new_material, report.in_progress, report.confirmed_knowledge, report.blocked
+            );
+            // The design's success measure lives on the first screen (§5,
+            // D7): whether recall is actually happening, measured, not just
+            // hoped for.
+            println!(
+                "최근 {}일 recall {}회 · 빈 결과 {}회 · 제시한 기록 {}건",
+                report.recall.window_days,
+                report.recall.recall_count,
+                report.recall.zero_result_count,
+                report.recall.surfaced_total
             );
             println!(
                 "추천: {}",
@@ -1115,6 +1310,10 @@ fn legacy_home_action(
             file: None,
             inbox: true,
             snapshot: None,
+            paste: None,
+            local_file: None,
+            conversation: None,
+            video_transcript: None,
             url: None,
             title: None,
             fetched_at: None,
@@ -1129,19 +1328,18 @@ fn legacy_home_action(
 }
 
 /// Finding nothing is a normal outcome, but ending there hides the reason.
-/// Confirmed knowledge is the only thing search covers in Phase 0 (search
-/// stays confirmed-only here; unconfirmed-inclusive search is Phase 1a), so
-/// when the shelf is empty or everything is still unconfirmed, say which it
-/// is. This is a search-scope explainer, not a review-debt nudge: it points
-/// at the command-reachable queue rather than at a "continue reviewing" home
-/// action, because home does not offer one (§4.2).
+/// Search now covers unconfirmed records too (§4.2, D10), so a zero-result
+/// no longer means "search only looks at confirmed knowledge" — it means
+/// nothing on file matches. What is still worth naming here: material
+/// waiting for a human look (which does not narrow search, but is still
+/// unfinished work), and material stuck on a real problem. This is not a
+/// review-debt nudge: it points at the command-reachable queue rather than
+/// at a "continue reviewing" home action, because home does not offer one
+/// (§4.2).
 fn report_search_dead_end(repository: &Path) {
     let Ok(summary) = summarize_home_queue_v2(repository) else {
         return;
     };
-    if summary.confirmed_knowledge == 0 {
-        println!("아직 확인된 지식이 없습니다. 검색은 확인된 지식만 찾습니다.");
-    }
     let waiting = summary.review_pending + summary.changes_requested;
     if waiting > 0 {
         println!("아직 확인하지 않은 항목이 {waiting}개 있습니다.");
@@ -1159,14 +1357,27 @@ fn report_search_dead_end(repository: &Path) {
 }
 
 fn find(arguments: FindArgs) -> Result<(), MkoError> {
-    let repository = setup_repository(arguments.repo)?;
+    let repository = setup_repository(arguments.repo.clone())?;
     let perspective = arguments.perspective.map(Into::into);
     match detect_repository_generation(&repository)? {
         RepositoryGeneration::LegacyV1 => {
-            if perspective.is_some() {
+            if arguments.format != OutputFormat::Human {
+                return Err(MkoError::new(
+                    "format_unsupported",
+                    "mko find supports only human output for a legacy v0.1 Personal KB",
+                ));
+            }
+            if perspective.is_some()
+                || arguments.confirmed
+                || arguments.unconfirmed
+                || arguments.tag.is_some()
+                || arguments.layer.is_some()
+                || arguments.topic.is_some()
+                || arguments.origin.is_some()
+            {
                 return Err(MkoError::new(
                     "perspective_v3_required",
-                    "관점 필터는 v3 Personal KB에서 사용할 수 있습니다",
+                    "관점·확인 상태·태그·계층 필터는 v3 Personal KB에서 사용할 수 있습니다",
                 ));
             }
             let matches = search_knowledge(
@@ -1184,65 +1395,123 @@ fn find(arguments: FindArgs) -> Result<(), MkoError> {
                     println!("{} · {}", concept.title, concept.name);
                 }
             }
+            Ok(())
         }
         RepositoryGeneration::V3 => {
-            let matches = search_confirmed_knowledge_by_perspective_v2(
+            if arguments.format == OutputFormat::JsonV1 {
+                return Err(MkoError::new(
+                    "format_unsupported",
+                    "mko find supports human or json-v2 output",
+                ));
+            }
+            let confirmation_filter = if arguments.confirmed {
+                SearchConfirmationFilterV2::ConfirmedOnly
+            } else if arguments.unconfirmed {
+                SearchConfirmationFilterV2::UnconfirmedOnly
+            } else {
+                SearchConfirmationFilterV2::Any
+            };
+            let layer = arguments.layer.map(SearchLayerV2::from);
+            let origin = arguments.origin.map(SearchOriginFormV2::from);
+            let matches = search_records_by_perspective_v2(
                 &repository,
                 &arguments.term,
                 perspective,
+                confirmation_filter,
+                arguments.tag.as_deref(),
+                layer,
+                arguments.topic.as_deref(),
+                origin,
             )?;
             let notes = if perspective.is_none() {
                 search_quick_notes_v2(&repository, &arguments.term)?
             } else {
                 Vec::new()
             };
-            if matches.is_empty() && notes.is_empty() {
-                println!("확인된 지식에서 찾지 못했습니다.");
-                report_search_dead_end(&repository);
-            } else {
-                for item in matches {
-                    println!(
-                        "[{}] {}",
-                        match item.layer {
-                            KnowledgeSearchLayerV2::GroundedEvidence => "문서 근거",
-                            KnowledgeSearchLayerV2::LlmAnalysis => "LLM 분석",
-                            KnowledgeSearchLayerV2::CounterargumentOrUncertainty => {
-                                "반론·불확실성"
+
+            // Recall is unconditional and measured (D7): every v3 `mko find`
+            // execution logs, regardless of format or result count. A
+            // logging failure must never swallow the results themselves —
+            // it is surfaced separately, on stderr, so it never corrupts a
+            // json-v2 stdout envelope.
+            let surfaced = matches
+                .iter()
+                .map(|item| item.record_id.clone())
+                .chain(notes.iter().map(|note| note.id.clone()))
+                .collect::<Vec<_>>();
+            let log_error = append_recall_log_v2(
+                &repository,
+                &arguments.term,
+                surfaced.len() as u64,
+                &surfaced,
+                &SystemClock,
+            )
+            .err();
+
+            let result = match arguments.format {
+                OutputFormat::JsonV2 => emit_json_v2(JsonV2Success::find(FindDataV2 {
+                    items: matches.into_iter().map(find_match_data).collect(),
+                    notes: notes.into_iter().map(find_note_data).collect(),
+                    scan_complete: true,
+                })),
+                _ => {
+                    if matches.is_empty() && notes.is_empty() {
+                        println!("찾지 못했습니다.");
+                        report_search_dead_end(&repository);
+                    } else {
+                        for item in matches {
+                            println!(
+                                "[{}] {} · {}",
+                                find_layer_label(item.layer),
+                                item.title,
+                                confirmation_label_text(&item.confirmation)
+                            );
+                            println!("  {}", compact_excerpt(&item.body, 140));
+                            if !item.perspectives.is_empty() {
+                                println!(
+                                    "  관점: {}",
+                                    item.perspectives
+                                        .iter()
+                                        .map(PerspectiveV2::as_str)
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                );
                             }
-                        },
-                        item.title
-                    );
-                    println!("  {}", compact_excerpt(&item.body, 140));
-                    if !item.perspectives.is_empty() {
-                        println!(
-                            "  관점: {}",
-                            item.perspectives
-                                .iter()
-                                .map(PerspectiveV2::as_str)
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        );
+                            if !item.locators.is_empty() {
+                                println!("  근거: {}", item.locators.join(", "));
+                            }
+                            // A 140-character excerpt is a pointer, not an
+                            // answer. The projection is the readable
+                            // document, so name it.
+                            println!(
+                                "  전체 보기: {}",
+                                mko_core::projection_v2::record_projection_relative_path_v2(
+                                    match item.record_type {
+                                        SearchRecordTypeV2::Source =>
+                                            mko_core::projection_v2::ProjectionRecordTypeV2::Source,
+                                        SearchRecordTypeV2::Knowledge =>
+                                            mko_core::projection_v2::ProjectionRecordTypeV2::Knowledge,
+                                    },
+                                    &item.record_id,
+                                )
+                            );
+                        }
+                        for note in notes {
+                            println!("[내 생각] {}", compact_excerpt(&note.text, 140));
+                        }
                     }
-                    if !item.locators.is_empty() {
-                        println!("  근거: {}", item.locators.join(", "));
-                    }
-                    // A 140-character excerpt is a pointer, not an answer. The
-                    // projection is the readable document, so name it.
-                    println!(
-                        "  전체 보기: {}",
-                        mko_core::projection_v2::record_projection_relative_path_v2(
-                            mko_core::projection_v2::ProjectionRecordTypeV2::Knowledge,
-                            &item.knowledge_id,
-                        )
-                    );
+                    Ok(())
                 }
-                for note in notes {
-                    println!("[내 생각] {}", compact_excerpt(&note.text, 140));
-                }
+            };
+            if let Some(error) = log_error {
+                eprintln!(
+                    "주의: recall 기록에 실패했지만 검색 결과는 반환했습니다 ({})",
+                    error.code()
+                );
             }
+            result
         }
     }
-    Ok(())
 }
 
 fn remember(arguments: RememberArgs) -> Result<(), MkoError> {
@@ -1624,6 +1893,7 @@ fn run(cli: Cli) -> Result<Exit, MkoError> {
         Some(Command::Inbox(arguments)) => inbox(arguments).map(|_| Exit::Success),
         Some(Command::Status(arguments)) => status(arguments).map(|_| Exit::Success),
         Some(Command::Queue(arguments)) => queue_v2(arguments).map(|_| Exit::Success),
+        Some(Command::Topics(arguments)) => topics_v2(arguments).map(|_| Exit::Success),
         Some(Command::Ask(arguments)) => ask_v2(arguments).map(|_| Exit::Success),
         Some(Command::Show(arguments)) => show_v2(arguments).map(|_| Exit::Success),
         Some(Command::ReviewOpen(arguments)) => review_open_v2(arguments).map(|_| Exit::Success),
@@ -1639,9 +1909,6 @@ fn run(cli: Cli) -> Result<Exit, MkoError> {
         Some(Command::Knowledge {
             command: KnowledgeCommand::Review(arguments),
         }) => knowledge_review(arguments).map(|_| Exit::Success),
-        Some(Command::Knowledge {
-            command: KnowledgeCommand::Search(arguments),
-        }) => knowledge_search(arguments).map(|_| Exit::Success),
         Some(Command::Knowledge {
             command: KnowledgeCommand::Show(arguments),
         }) => knowledge_show(arguments).map(|_| Exit::Success),
@@ -1931,6 +2198,18 @@ fn add_v2(arguments: AddArgs, context: &ResolvedPersonalContext) -> Result<(), M
     if let Some(snapshot) = arguments.snapshot.as_deref() {
         return add_snapshot_v2(&arguments, snapshot, context);
     }
+    if let Some(paste) = arguments.paste.as_deref() {
+        return add_paste_v2(&arguments, paste, context);
+    }
+    if let Some(local_file) = arguments.local_file.as_deref() {
+        return add_local_file_v2(&arguments, local_file, context);
+    }
+    if let Some(conversation) = arguments.conversation.as_deref() {
+        return add_conversation_v2(&arguments, conversation, context);
+    }
+    if let Some(video_transcript) = arguments.video_transcript.as_deref() {
+        return add_video_transcript_v2(&arguments, video_transcript, context);
+    }
     if arguments.temporary_source || arguments.verified_backup {
         return Err(MkoError::new(
             "option_unsupported",
@@ -2003,6 +2282,104 @@ fn add_snapshot_v2(
         text: &text,
         fetched_at,
     })?;
+    emit_text_evidence_add_result_v2(arguments, result)
+}
+
+/// Registers text the owner pasted directly. Same shape as
+/// `add_snapshot_v2`, minus the address: pasted text has none (§6.1).
+fn add_paste_v2(
+    arguments: &AddArgs,
+    paste: &Path,
+    context: &ResolvedPersonalContext,
+) -> Result<(), MkoError> {
+    let text = std::fs::read_to_string(paste)
+        .map_err(|error| MkoError::new("snapshot_unreadable", error.to_string()))?;
+    let captured_at = parse_fetched_at_v2(arguments.fetched_at.as_deref())?;
+    let result = register_pasted_text_v2(RegisterPastedTextRequestV2 {
+        repository_root: &context.repository_root,
+        title: arguments.title.as_deref().unwrap_or(""),
+        text: &text,
+        captured_at,
+    })?;
+    emit_text_evidence_add_result_v2(arguments, result)
+}
+
+/// Registers text captured from a conversation (store-on-miss, §6.3). Same
+/// shape as `add_paste_v2`.
+fn add_conversation_v2(
+    arguments: &AddArgs,
+    conversation: &Path,
+    context: &ResolvedPersonalContext,
+) -> Result<(), MkoError> {
+    let text = std::fs::read_to_string(conversation)
+        .map_err(|error| MkoError::new("snapshot_unreadable", error.to_string()))?;
+    let captured_at = parse_fetched_at_v2(arguments.fetched_at.as_deref())?;
+    let result = register_conversation_v2(RegisterConversationRequestV2 {
+        repository_root: &context.repository_root,
+        title: arguments.title.as_deref().unwrap_or(""),
+        text: &text,
+        captured_at,
+    })?;
+    emit_text_evidence_add_result_v2(arguments, result)
+}
+
+/// Registers the transcript of a video (e.g. YouTube) the agent read or
+/// transcribed. Same shape as `add_snapshot_v2` — same address-plus-title
+/// requirement, same file-not-argument discipline — because a video is the
+/// same model as a web page (Phase 4, §6): the Core does not fetch or
+/// transcribe, and keeps no original video bytes.
+fn add_video_transcript_v2(
+    arguments: &AddArgs,
+    video_transcript: &Path,
+    context: &ResolvedPersonalContext,
+) -> Result<(), MkoError> {
+    let (Some(url), Some(title)) = (arguments.url.as_deref(), arguments.title.as_deref()) else {
+        return Err(MkoError::new(
+            "video_transcript_arguments_incomplete",
+            "--video-transcript needs --url and --title so the evidence can be traced and named",
+        ));
+    };
+    let text = std::fs::read_to_string(video_transcript)
+        .map_err(|error| MkoError::new("snapshot_unreadable", error.to_string()))?;
+    let fetched_at = parse_fetched_at_v2(arguments.fetched_at.as_deref())?;
+    let result = register_video_transcript_v2(RegisterVideoTranscriptRequestV2 {
+        repository_root: &context.repository_root,
+        url,
+        title,
+        text: &text,
+        fetched_at,
+    })?;
+    emit_text_evidence_add_result_v2(arguments, result)
+}
+
+/// Registers a local file the owner already holds — text, an image, or a
+/// document (Phase 3, §6.1); `local_file_v2::register_local_file_asset_v2`
+/// discriminates the form by extension. Unlike
+/// `--paste`/`--snapshot`/`--conversation`, `local_file` names the material
+/// itself: Core reads and stores its original bytes directly, with no
+/// separate runtime text file to write first for the original.
+fn add_local_file_v2(
+    arguments: &AddArgs,
+    local_file: &Path,
+    context: &ResolvedPersonalContext,
+) -> Result<(), MkoError> {
+    let modified_at = parse_fetched_at_v2(arguments.fetched_at.as_deref())?;
+    let result = register_local_file_asset_v2(RegisterLocalFileRequestV2 {
+        repository_root: &context.repository_root,
+        path: local_file,
+        title: arguments.title.as_deref().unwrap_or(""),
+        modified_at,
+    })?;
+    emit_text_evidence_add_result_v2(arguments, result)
+}
+
+/// One outcome shape for every text-evidence origin (web snapshot, paste,
+/// local file, conversation): what a caller does next does not depend on
+/// which of them registered the Asset.
+fn emit_text_evidence_add_result_v2(
+    arguments: &AddArgs,
+    result: mko_core::asset_v2::AssetRegistrationResultV2,
+) -> Result<(), MkoError> {
     match arguments.format {
         OutputFormat::Human => {
             let outcome = match result.outcome {
@@ -2010,7 +2387,7 @@ fn add_snapshot_v2(
                 AssetRegistrationOutcomeV2::Existing => "이미 등록됨",
             };
             println!("{outcome}: {}", result.asset.title_fallback);
-            println!("다음: 이 페이지를 정리해 달라고 요청하세요.");
+            println!("다음: 이 내용을 정리해 달라고 요청하세요.");
             Ok(())
         }
         OutputFormat::JsonV2 => {
@@ -2078,16 +2455,50 @@ fn provider_logical_locator(provider_root: &Path, file: &Path) -> Result<String,
     Ok(components.join("/"))
 }
 
+/// Snapshot-scale cap (`MAX_SNAPSHOT_BYTES` in `snapshot_v2.rs`): agent-read
+/// text supplied via `--extracted-text` is comparable evidence to a captured
+/// web snapshot, not an unbounded stream.
+const MAX_EXTRACTED_TEXT_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Reads the agent-read text for an image or document local file
+/// (`--extracted-text`) from a file, never a command-line argument — the
+/// same file-not-argument discipline `--paste`/`--snapshot`/`--conversation`
+/// already follow, and for the same reason. Unlike those three (unchanged
+/// here; see the Phase 3 plan doc for that as a recorded follow-up), this
+/// reader is bounded and no-follow, matching the discipline
+/// `read_bounded_nofollow`/`read_regular_nofollow` establish elsewhere in
+/// the codebase: `extracted_text_unreadable` for an I/O failure,
+/// `extracted_text_invalid` for a missing/symlinked/oversized/non-UTF-8
+/// file.
+fn read_extracted_text_file_v2(path: &Path) -> Result<String, MkoError> {
+    let bytes =
+        crate::cli_v2::read_bounded_nofollow(path, MAX_EXTRACTED_TEXT_BYTES, "extracted_text")?;
+    String::from_utf8(bytes)
+        .map_err(|error| MkoError::new("extracted_text_invalid", error.to_string()))
+}
+
 fn prepare(arguments: PrepareArgs) -> Result<(), MkoError> {
     if arguments.format == Some(OutputFormat::JsonV2) {
         let context = resolve_context(arguments.repo.clone())?;
+        let extracted_text = arguments
+            .extracted_text
+            .as_deref()
+            .map(read_extracted_text_file_v2)
+            .transpose()?;
         return crate::cli_v2::prepare_source_json_v2(
             &context.repository_root,
             &context.provider_root,
             &arguments.asset_id,
             arguments.confirm_download,
+            extracted_text.as_deref(),
             &worker_executable()?,
         );
+    }
+    if arguments.extracted_text.is_some() {
+        return Err(MkoError::new(
+            "format_unsupported",
+            "--extracted-text requires --format json-v2",
+        ));
     }
     if !format_is_json_v1(arguments.format) {
         return prepare_legacy(arguments);
@@ -2580,6 +2991,30 @@ fn pending_drafts(context: &ResolvedPersonalContext) -> Result<QueueDraftsDataV2
     })
 }
 
+fn topics_v2(arguments: TopicsArgs) -> Result<(), MkoError> {
+    let repository = setup_repository(arguments.repo)?;
+    let topics = list_topics_v2(&repository)?;
+    match arguments.format {
+        OutputFormat::Human => {
+            if topics.is_empty() {
+                println!("등록된 토픽이 없습니다.");
+            } else {
+                for topic in &topics {
+                    println!("{topic}");
+                }
+            }
+            Ok(())
+        }
+        OutputFormat::JsonV2 => {
+            crate::output::emit_json_v2(JsonV2Success::topics(TopicsDataV2 { topics }))
+        }
+        OutputFormat::JsonV1 => Err(MkoError::new(
+            "format_unsupported",
+            "mko topics supports human or json-v2 output",
+        )),
+    }
+}
+
 fn show_v2(arguments: ShowArgs) -> Result<(), MkoError> {
     let repository = setup_repository(arguments.repo)?;
     match arguments.format {
@@ -2677,41 +3112,6 @@ fn knowledge_write_outcome(result: &str) -> Result<KnowledgeWriteOutcome, MkoErr
             "knowledge_write_result_invalid",
             "knowledge write returned an unknown result",
         )),
-    }
-}
-
-fn knowledge_search(arguments: KnowledgeSearchArgs) -> Result<(), MkoError> {
-    let json_v1 = format_is_json_v1(arguments.format);
-    let repository = if json_v1 {
-        resolve_context(arguments.repo.clone())?.repository_root
-    } else {
-        arguments.repo.clone().unwrap()
-    };
-    let query = KnowledgeSearchQuery {
-        term: arguments.term.clone(),
-        kind: arguments.kind.map(Into::into),
-        tag: arguments.tag.clone(),
-    };
-    let matches = search_knowledge(&repository, &query)?;
-    if json_v1 {
-        emit_json_v1(JsonV1Success::KnowledgeSearch {
-            schema_version: 1,
-            result: SuccessResult::Ok,
-            data: KnowledgeSearchData {
-                matches: matches.iter().map(concept_match_data).collect(),
-            },
-        })
-    } else {
-        for concept in &matches {
-            println!(
-                "{} {} {} {}",
-                concept.asset_id,
-                concept.title,
-                concept.name,
-                concept_kind_label(&concept.kind)
-            );
-        }
-        Ok(())
     }
 }
 
@@ -2897,17 +3297,6 @@ fn knowledge_review(arguments: KnowledgeReviewArgs) -> Result<(), MkoError> {
         })
     } else {
         Ok(())
-    }
-}
-
-fn concept_match_data(concept: &ConceptMatch) -> ConceptMatchData {
-    ConceptMatchData {
-        asset_id: concept.asset_id.clone(),
-        title: concept.title.clone(),
-        name: concept.name.clone(),
-        kind: concept.kind.clone(),
-        locator: concept.locator.clone(),
-        knowledge_path: concept.knowledge_path.clone(),
     }
 }
 
@@ -3676,6 +4065,14 @@ fn json_v2_command(cli: &Cli) -> Option<JsonV2Command> {
             format: OutputFormat::JsonV2,
             ..
         }) => Some(JsonV2Command::Add),
+        Command::Find(FindArgs {
+            format: OutputFormat::JsonV2,
+            ..
+        }) => Some(JsonV2Command::Find),
+        Command::Topics(TopicsArgs {
+            format: OutputFormat::JsonV2,
+            ..
+        }) => Some(JsonV2Command::Topics),
         Command::Ask(AskArgs {
             list: true,
             format: OutputFormat::JsonV2,
@@ -3787,13 +4184,6 @@ fn json_v1_command(cli: &Cli) -> Option<JsonV1Command> {
         } => Some(JsonV1Command::KnowledgeReview),
         Command::Knowledge {
             command:
-                KnowledgeCommand::Search(KnowledgeSearchArgs {
-                    format: Some(OutputFormat::JsonV1),
-                    ..
-                }),
-        } => Some(JsonV1Command::KnowledgeSearch),
-        Command::Knowledge {
-            command:
                 KnowledgeCommand::Show(KnowledgeShowArgs {
                     format: Some(OutputFormat::JsonV1),
                     ..
@@ -3832,7 +4222,6 @@ fn json_v1_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option
         ("source", Some("write-draft")) => Some(JsonV1Command::SourceWriteDraft),
         ("knowledge", Some("write")) => Some(JsonV1Command::KnowledgeWrite),
         ("knowledge", Some("review")) => Some(JsonV1Command::KnowledgeReview),
-        ("knowledge", Some("search")) => Some(JsonV1Command::KnowledgeSearch),
         ("knowledge", Some("show")) => Some(JsonV1Command::KnowledgeShow),
         ("knowledge", Some("list")) => Some(JsonV1Command::KnowledgeList),
         _ => None,
@@ -3859,6 +4248,8 @@ fn json_v2_command_from_invalid_arguments(args: &[std::ffi::OsString]) -> Option
         ("setup", Some("plan")) => Some(JsonV2Command::SetupPlan),
         ("setup", Some("apply")) => Some(JsonV2Command::SetupApply),
         ("add", _) => Some(JsonV2Command::Add),
+        ("find", _) => Some(JsonV2Command::Find),
+        ("topics", _) => Some(JsonV2Command::Topics),
         ("queue", _) => Some(
             if args.iter().any(|argument| argument == "--pending-drafts") {
                 JsonV2Command::QueueDrafts

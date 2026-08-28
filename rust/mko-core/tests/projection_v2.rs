@@ -315,6 +315,7 @@ fn projection(title: &str) -> ProjectionInputV2 {
         domain: "research".into(),
         perspectives: Vec::new(),
         tags: vec!["example".into(), "paper".into()],
+        topics: Vec::new(),
         record_link: format!("sources/personal-source-{}/current.yaml", "a".repeat(64)),
         asset_link: format!("assets/registry/personal-asset-{}.yaml", "c".repeat(64)),
         summary: String::new(),
@@ -408,6 +409,7 @@ fn background_reads_as_background_and_never_as_what_the_document_said() {
                 Vec::new(),
             ),
         ],
+        topics: Vec::new(),
     };
 
     let body = mko_core::projection_v2::knowledge_projection_body_v2(&response, None);

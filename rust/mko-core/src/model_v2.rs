@@ -252,6 +252,13 @@ pub struct SourceResponseV2 {
     pub limitations: Vec<SourceLimitationV2>,
     pub tags: Vec<String>,
     pub knowledge_recommendation: KnowledgeRecommendationV2,
+    /// Free-form hierarchical labels the agent proposes at write time (e.g.
+    /// `투자>반도체`), stored as proposed and requiring no human confirmation
+    /// (D3, §6.3). Defaulted and elided when empty so a revision written
+    /// before this field existed still round-trips to its original,
+    /// content-addressed bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topics: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -310,6 +317,13 @@ pub struct KnowledgeResponseV2 {
     pub schema_version: u32,
     pub synthesis: String,
     pub units: Vec<KnowledgeUnitV2>,
+    /// Free-form hierarchical labels the agent proposes at write time (e.g.
+    /// `투자>반도체`), stored as proposed and requiring no human confirmation
+    /// (D3, §6.3). Defaulted and elided when empty so a revision written
+    /// before this field existed still round-trips to its original,
+    /// content-addressed bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topics: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

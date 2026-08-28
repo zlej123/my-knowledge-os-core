@@ -80,6 +80,7 @@ fn source_and_knowledge_writes_return_strict_v2_envelopes_and_join_one_queue_ite
             outcome: KnowledgeRecommendationOutcomeV2::Recommend,
             reasons: vec!["Reusable concept.".into()],
         },
+        topics: Vec::new(),
     };
     let source_path = root.path().join("source-response.json");
     fs::write(&source_path, serde_json::to_vec(&source).unwrap()).unwrap();
@@ -115,6 +116,7 @@ fn source_and_knowledge_writes_return_strict_v2_envelopes_and_join_one_queue_ite
             evidence_refs: vec![evidence],
             tags: vec!["example".into()],
         }],
+        topics: Vec::new(),
     };
     let knowledge_path = root.path().join("knowledge-response.json");
     fs::write(&knowledge_path, serde_json::to_vec(&knowledge).unwrap()).unwrap();

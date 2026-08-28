@@ -19,6 +19,7 @@ use crate::{
         KnowledgeUnitKindV2, LimitationBasisV2, PreparedContentV2, ReviewTargetTypeV2,
         SourceResponseV2,
     },
+    prepared_v2::normalize_single_line,
     projection_v2::{
         ProjectionInputV2, ProjectionRecordTypeV2, ProjectionStateV2, ProjectionWriteOutcomeV2,
         ProjectionWriteResultV2, knowledge_projection_body_v2, knowledge_projection_summary_v2,
@@ -63,6 +64,33 @@ pub enum AssetOriginV2 {
     /// There is no provider file to return to, so the stored text is the
     /// evidence.
     WebSnapshot,
+    /// Text the owner pasted directly, fingerprinted from the text itself —
+    /// the same TEXT-fingerprint identity as `WebSnapshot`, because there is
+    /// no original file and no address to return to (§6.1).
+    PastedText,
+    /// A local file the owner already holds: Markdown/text (Phase 2), or an
+    /// image or docx/hwpx document (Phase 3). Identified by the **original
+    /// bytes'** fingerprint (§6.1) regardless of form. `media_type`
+    /// discriminates text from image from document — deliberately not a
+    /// separate `AssetOriginV2` variant per form (Phase 3, decided): every
+    /// form's extension, signature, and size rule lives in one small table
+    /// (`local_file_v2`) rather than a new origin variant threaded through
+    /// every match site. The original is stored verbatim, content-addressed,
+    /// in `assets/originals/` (Phase 2's text-originals store, extended to
+    /// bounded binaries in Phase 3).
+    LocalFile,
+    /// Text captured from a conversation — e.g. store-on-miss (§6.3).
+    /// TEXT-fingerprint identity, exactly like `WebSnapshot`.
+    Conversation,
+    /// A transcript of a video (e.g. YouTube), read or transcribed by the
+    /// agent and fingerprinted from the transcript text itself (Phase 4,
+    /// §6). Same model as `WebSnapshot`: a video has an address to record
+    /// but no original bytes the Core keeps — no bytes are ever fetched or
+    /// stored, only the transcript. Registers through the same
+    /// `register_text_evidence_v2` path as every other text-fingerprint
+    /// origin (§6.1); deliberately not routed through the dormant
+    /// `ContentBlockV2::Transcript` blocks (§10, D2: keeping the Core thin).
+    VideoTranscript,
 }
 
 impl AssetOriginV2 {
@@ -255,6 +283,8 @@ pub fn write_source_record_v2(
     KnowledgeConfigV2::read(request.repository_root)?;
     validate_asset_and_bundle(request.asset, request.bundle)?;
     validate_source_response(request.bundle, request.response)?;
+    let mut response = request.response.clone();
+    response.topics = normalize_topics(&response.topics)?;
 
     let record_id = source_record_id_v2(&request.asset.id)?;
     let evidence_basis = evidence_basis(request.bundle);
@@ -268,7 +298,7 @@ pub fn write_source_record_v2(
         // Every current caller writes through the agent-drafted prepare
         // pipeline (see json_v2's Source write command).
         authored_by: AuthoredByV2::Ai,
-        response: request.response.clone(),
+        response: response.clone(),
     };
     let bytes = render_revision_markdown("Source", &revision)?;
     publish_record_and_projection(
@@ -280,16 +310,19 @@ pub fn write_source_record_v2(
         &bytes,
         request.expected_revision,
         "v2 source write",
-        request.response.title.clone(),
-        request.response.tags.clone(),
-        "uncategorized".into(),
-        Vec::new(),
-        request.asset.id.clone(),
-        source_projection_body_v2(
-            request.response,
-            Some(request.asset.provider.logical_locator.clone()),
-        ),
-        source_projection_summary_v2(request.response),
+        ProjectionMetadataV2 {
+            title: response.title.clone(),
+            tags: response.tags.clone(),
+            domain: "uncategorized".into(),
+            perspectives: Vec::new(),
+            asset_id: request.asset.id.clone(),
+            body: source_projection_body_v2(
+                &response,
+                Some(request.asset.provider.logical_locator.clone()),
+            ),
+            summary: source_projection_summary_v2(&response),
+            topics: response.topics.clone(),
+        },
         clock,
     )
 }
@@ -302,6 +335,8 @@ pub fn write_knowledge_record_v2(
     validate_asset_and_bundle(request.asset, request.bundle)?;
     let domain_policy = config.domain_policies.default.clone();
     validate_knowledge_response(request.bundle, request.response, &domain_policy)?;
+    let mut response = request.response.clone();
+    response.topics = normalize_topics(&response.topics)?;
 
     let record_id = knowledge_record_id_v2(&request.asset.id)?;
     let evidence_basis = evidence_basis(request.bundle);
@@ -317,11 +352,10 @@ pub fn write_knowledge_record_v2(
         // Every current caller writes through the agent-drafted prepare
         // pipeline (see json_v2's Knowledge write command).
         authored_by: AuthoredByV2::Ai,
-        response: request.response.clone(),
+        response: response.clone(),
     };
     let bytes = render_revision_markdown("Knowledge", &revision)?;
-    let tags = request
-        .response
+    let tags = response
         .units
         .iter()
         .flat_map(|unit| unit.tags.iter().cloned())
@@ -337,16 +371,19 @@ pub fn write_knowledge_record_v2(
         &bytes,
         request.expected_revision,
         "v2 knowledge write",
-        request.asset.title_fallback.clone(),
-        tags,
-        "uncategorized".into(),
-        Vec::new(),
-        request.asset.id.clone(),
-        knowledge_projection_body_v2(
-            request.response,
-            Some(request.asset.provider.logical_locator.clone()),
-        ),
-        knowledge_projection_summary_v2(request.response),
+        ProjectionMetadataV2 {
+            title: request.asset.title_fallback.clone(),
+            tags,
+            domain: "uncategorized".into(),
+            perspectives: Vec::new(),
+            asset_id: request.asset.id.clone(),
+            body: knowledge_projection_body_v2(
+                &response,
+                Some(request.asset.provider.logical_locator.clone()),
+            ),
+            summary: knowledge_projection_summary_v2(&response),
+            topics: response.topics.clone(),
+        },
         clock,
     )
 }
@@ -454,13 +491,16 @@ pub(crate) fn replace_knowledge_perspectives_v2(
         &bytes,
         Some(&current.pointer.revision),
         "v2 perspective confirmation",
-        asset.title_fallback,
-        tags,
-        primary_perspective(&perspectives),
-        perspectives.clone(),
-        asset.id,
-        body,
-        knowledge_projection_summary_v2(&revision.response),
+        ProjectionMetadataV2 {
+            title: asset.title_fallback,
+            tags,
+            domain: primary_perspective(&perspectives),
+            perspectives: perspectives.clone(),
+            asset_id: asset.id,
+            body,
+            summary: knowledge_projection_summary_v2(&revision.response),
+            topics: revision.response.topics.clone(),
+        },
         clock,
     )
 }
@@ -564,6 +604,41 @@ fn validate_bundle_self_digest(bundle: &PreparedContentV2) -> Result<(), MkoErro
         }
     }
     Ok(())
+}
+
+/// Bounded, deterministic normalization of agent-proposed topics (§6.3).
+///
+/// Each label is trimmed, whitespace-collapsed, and NFC-normalized —
+/// case-preserving, reusing `prepared_v2::normalize_single_line` (the same
+/// pattern `PreparedMetadataV2` already applies to a title or author line).
+/// Storage keeps the case the agent wrote; deduplication (here, and at every
+/// comparison site — filter, reuse-lookup) is case-insensitive, keeping the
+/// first-seen casing for a deterministic result.
+const MAX_TOPICS: usize = 256;
+const MAX_TOPIC_CHARS: usize = 256;
+
+fn normalize_topics(topics: &[String]) -> Result<Vec<String>, MkoError> {
+    if topics.len() > MAX_TOPICS {
+        return Err(MkoError::new(
+            "topics_too_many",
+            "too many topics were proposed for one revision",
+        ));
+    }
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::with_capacity(topics.len());
+    for topic in topics {
+        let value = normalize_single_line(topic)?;
+        if value.is_empty() || value.chars().count() > MAX_TOPIC_CHARS {
+            return Err(MkoError::new(
+                "topic_invalid",
+                "a topic must be non-empty and bounded",
+            ));
+        }
+        if seen.insert(value.to_lowercase()) {
+            normalized.push(value);
+        }
+    }
+    Ok(normalized)
 }
 
 fn validate_source_response(
@@ -811,13 +886,7 @@ fn publish_record_and_projection(
     bytes: &[u8],
     expected_revision: Option<&str>,
     command: &str,
-    title: String,
-    mut tags: Vec<String>,
-    domain: String,
-    perspectives: Vec<PerspectiveV2>,
-    asset_id: String,
-    body: String,
-    summary: String,
+    mut metadata: ProjectionMetadataV2,
     clock: &dyn Clock,
 ) -> Result<RecordWriteResultV2, MkoError> {
     let candidate_revision = sha256_digest(bytes);
@@ -827,22 +896,15 @@ fn publish_record_and_projection(
         clock,
         StaleRepositoryLockPolicy::Preserve,
     )?;
-    tags.sort();
-    tags.dedup();
+    metadata.tags.sort();
+    metadata.tags.dedup();
+    metadata.topics.sort();
     let projection_input = expected_projection_input(
         repository_root,
         &record_type,
         &record_id,
         &candidate_revision,
-        ProjectionMetadataV2 {
-            title,
-            tags,
-            domain,
-            perspectives,
-            asset_id,
-            body,
-            summary,
-        },
+        metadata,
     )?;
     // Rendering is deliberately completed before canonical publication. This
     // guarantees that deterministic projection-shape errors cannot leave a
@@ -982,6 +1044,9 @@ struct ProjectionMetadataV2 {
     /// projection and the expected one are identical.
     body: String,
     summary: String,
+    /// Threaded alongside `tags` into the projection front matter (§6.3,
+    /// decided): the same seam, extended in the same pass.
+    topics: Vec<String>,
 }
 
 fn expected_projection_input(
@@ -1034,6 +1099,7 @@ fn expected_projection_input(
         domain: metadata.domain,
         perspectives: metadata.perspectives,
         tags: metadata.tags,
+        topics: metadata.topics,
         summary: metadata.summary,
         body_markdown: metadata.body,
         record_link: format!("{collection}/{record_id}/current.yaml"),

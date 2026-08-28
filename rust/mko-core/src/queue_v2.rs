@@ -13,6 +13,7 @@ use std::os::windows::fs::OpenOptionsExt;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::{
     asset_v2::read_asset_v2,
@@ -21,7 +22,7 @@ use crate::{
     front_matter::parse_markdown,
     json_v2::{QueueDataV2, QueueItemStateV2, QueueItemTypeV2, QueueItemV2, QueueNextActionV2},
     judgment_v2::{JudgmentAnnotationV2, prepare_judgment_v2},
-    model_v2::{KnowledgeUnitKindV2, ReviewTargetTypeV2},
+    model_v2::{KnowledgeUnitKindV2, KnowledgeUnitV2, ReviewTargetTypeV2},
     projection_v2::{
         ProjectionInputV2, ProjectionRecordTypeV2, ProjectionSnapshotStatusV2, ProjectionStateV2,
         projection_relative_path_v2, projection_snapshot_status_v2,
@@ -108,9 +109,75 @@ pub struct HomeQueueSummaryV2 {
     pub recorded_asset_ids: BTreeSet<String>,
 }
 
+/// A stable display label for whether a human has confirmed the exact
+/// revision returned by search.
+///
+/// Deliberately not the full six-state review machinery (§4.2): search
+/// callers need only "has a human confirmed this exact revision", not the
+/// distinction between deferred, changes-requested, blocked, and so on. Any
+/// state other than confirmed displays as `Unconfirmed`.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct KnowledgeSearchMatchV2 {
-    pub knowledge_id: String,
+pub enum ConfirmationLabelV2 {
+    Confirmed { at: DateTime<Utc> },
+    Unconfirmed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchRecordTypeV2 {
+    Source,
+    Knowledge,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchConfirmationFilterV2 {
+    Any,
+    ConfirmedOnly,
+    UnconfirmedOnly,
+}
+
+/// `--origin` filter vocabulary (§6, Phase 3, decided): a **display/filter**
+/// vocabulary derived from an Asset's `origin` and, for `LocalFile`, its
+/// `media_type` — deliberately distinct from `AssetOriginV2`, whose variant
+/// names never leak into this filter (`LocalFile` alone maps to three
+/// different forms depending on media type). `Video` maps to
+/// `AssetOriginV2::VideoTranscript` (Phase 4).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchOriginFormV2 {
+    PastedText,
+    LocalFile,
+    Image,
+    Document,
+    Video,
+    Web,
+    Conversation,
+}
+
+fn origin_form_matches(asset: &AssetRecordV2, needle: Option<SearchOriginFormV2>) -> bool {
+    use crate::records_v2::AssetOriginV2;
+    let Some(needle) = needle else { return true };
+    match needle {
+        SearchOriginFormV2::PastedText => asset.origin == AssetOriginV2::PastedText,
+        SearchOriginFormV2::Web => asset.origin == AssetOriginV2::WebSnapshot,
+        SearchOriginFormV2::Conversation => asset.origin == AssetOriginV2::Conversation,
+        SearchOriginFormV2::Video => asset.origin == AssetOriginV2::VideoTranscript,
+        SearchOriginFormV2::LocalFile => {
+            asset.origin == AssetOriginV2::LocalFile && asset.media_type == "text/plain"
+        }
+        SearchOriginFormV2::Image => {
+            asset.origin == AssetOriginV2::LocalFile && asset.media_type.starts_with("image/")
+        }
+        SearchOriginFormV2::Document => {
+            asset.origin == AssetOriginV2::LocalFile
+                && crate::local_file_v2::local_file_media_kind(&asset.media_type)
+                    == Some(crate::local_file_v2::LocalFileMediaKindV2::Document)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchMatchV2 {
+    pub record_type: SearchRecordTypeV2,
+    pub record_id: String,
     pub current_revision: String,
     pub asset_id: String,
     pub title: String,
@@ -118,14 +185,17 @@ pub struct KnowledgeSearchMatchV2 {
     pub tags: Vec<String>,
     pub perspectives: Vec<PerspectiveV2>,
     pub locators: Vec<String>,
-    pub layer: KnowledgeSearchLayerV2,
+    pub layer: SearchLayerV2,
+    pub confirmation: ConfirmationLabelV2,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum KnowledgeSearchLayerV2 {
+pub enum SearchLayerV2 {
     GroundedEvidence,
     LlmAnalysis,
     CounterargumentOrUncertainty,
+    /// A Source hit: the document's own summary, never LLM analysis.
+    SourceOwnWords,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -239,100 +309,285 @@ pub fn summarize_home_queue_v2(repository_root: &Path) -> Result<HomeQueueSummar
     Ok(summary)
 }
 
-pub fn search_confirmed_knowledge_v2(
-    repository_root: &Path,
-    term: &str,
-) -> Result<Vec<KnowledgeSearchMatchV2>, MkoError> {
-    search_confirmed_knowledge_by_perspective_v2(repository_root, term, None)
-}
-
-pub fn search_confirmed_knowledge_by_perspective_v2(
-    repository_root: &Path,
-    term: &str,
-    perspective: Option<PerspectiveV2>,
-) -> Result<Vec<KnowledgeSearchMatchV2>, MkoError> {
-    let needle = term.trim().to_lowercase();
-    if needle.is_empty() {
+/// Splits a raw query into deterministic, case-folded AND-tokens.
+///
+/// Stored text is NFC-normalized at write time, but a query typed on macOS is
+/// often NFD; without normalizing the query too, canonically identical
+/// Korean text can fail to match (D10). Whitespace-token AND matching is the
+/// minimum for Korean recall: "학습률 개선" must find "…학습률을 크게
+/// 개선하는…" (§5).
+fn normalize_query_tokens_v2(term: &str) -> Result<Vec<String>, MkoError> {
+    let normalized = term.nfc().collect::<String>().to_lowercase();
+    let tokens = normalized
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if tokens.is_empty() {
         return Err(MkoError::new(
-            "knowledge_search_invalid",
+            "find_query_invalid",
             "search term must not be empty",
         ));
     }
+    Ok(tokens)
+}
+
+fn tokens_match_all(haystack: &str, tokens: &[String]) -> bool {
+    tokens.iter().all(|token| haystack.contains(token.as_str()))
+}
+
+fn normalize_tag_needle_v2(tag: Option<&str>) -> Result<Option<String>, MkoError> {
+    let Some(tag) = tag else {
+        return Ok(None);
+    };
+    let normalized = tag.trim().nfc().collect::<String>().to_lowercase();
+    if normalized.is_empty() {
+        return Err(MkoError::new(
+            "find_query_invalid",
+            "tag filter must not be empty",
+        ));
+    }
+    Ok(Some(normalized))
+}
+
+fn tag_matches(tags: &[String], needle: Option<&str>) -> bool {
+    match needle {
+        None => true,
+        Some(needle) => tags
+            .iter()
+            .any(|tag| tag.nfc().collect::<String>().to_lowercase() == needle),
+    }
+}
+
+/// Same normalization topics get at write time (§6.3): trim, collapse
+/// whitespace, NFC, then case-fold for a case-insensitive comparison. Storage
+/// keeps the agent's casing; only the comparison is case-insensitive.
+fn normalize_topic_needle_v2(topic: Option<&str>) -> Result<Option<String>, MkoError> {
+    let Some(topic) = topic else {
+        return Ok(None);
+    };
+    let collapsed = topic.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = collapsed.nfc().collect::<String>().to_lowercase();
+    if normalized.is_empty() {
+        return Err(MkoError::new(
+            "find_query_invalid",
+            "topic filter must not be empty",
+        ));
+    }
+    Ok(Some(normalized))
+}
+
+/// A record matches a topic filter when any of its topics equals the filter
+/// case-insensitively, or is a hierarchical child of it — `투자` matches
+/// `투자>반도체` (§6, §6.3).
+fn topic_matches(topics: &[String], needle: Option<&str>) -> bool {
+    match needle {
+        None => true,
+        Some(needle) => topics.iter().any(|topic| {
+            let topic = topic.nfc().collect::<String>().to_lowercase();
+            topic == needle || topic.starts_with(&format!("{needle}>"))
+        }),
+    }
+}
+
+fn knowledge_unit_haystack(unit: &KnowledgeUnitV2, perspectives: &[PerspectiveV2]) -> String {
+    let mut haystack = unit.title.to_lowercase();
+    haystack.push(' ');
+    haystack.push_str(&unit.body.to_lowercase());
+    for tag in &unit.tags {
+        haystack.push(' ');
+        haystack.push_str(&tag.to_lowercase());
+    }
+    for perspective in perspectives {
+        haystack.push(' ');
+        haystack.push_str(perspective.as_str());
+    }
+    haystack
+}
+
+fn source_haystack(response: &crate::model_v2::SourceResponseV2) -> String {
+    let mut haystack = response.title.to_lowercase();
+    haystack.push(' ');
+    haystack.push_str(&response.one_sentence_summary.to_lowercase());
+    haystack.push(' ');
+    haystack.push_str(&response.general_summary.to_lowercase());
+    for claim in &response.key_claims {
+        haystack.push(' ');
+        haystack.push_str(&claim.text.to_lowercase());
+    }
+    for tag in &response.tags {
+        haystack.push(' ');
+        haystack.push_str(&tag.to_lowercase());
+    }
+    haystack
+}
+
+fn confirmation_label_for_target(target: &ScannedTarget) -> ConfirmationLabelV2 {
+    if target.state == Some(ReviewCardTargetStateV2::Confirmed)
+        && let Some(at) = target
+            .history
+            .as_ref()
+            .and_then(|history| history.current_reviewed_at)
+    {
+        return ConfirmationLabelV2::Confirmed { at };
+    }
+    ConfirmationLabelV2::Unconfirmed
+}
+
+fn confirmation_allows(filter: SearchConfirmationFilterV2, target: &ScannedTarget) -> bool {
+    let confirmed = target.state == Some(ReviewCardTargetStateV2::Confirmed);
+    match filter {
+        SearchConfirmationFilterV2::Any => true,
+        SearchConfirmationFilterV2::ConfirmedOnly => confirmed,
+        SearchConfirmationFilterV2::UnconfirmedOnly => !confirmed,
+    }
+}
+
+/// The single Core search entry point behind `mko find` (D10): Source and
+/// Knowledge records, unconfirmed-inclusive by default (§4.2), each labelled
+/// with a stable confirmation badge. Deterministic substring/token matching
+/// only — no semantic search engine in the Core.
+pub fn search_records_v2(
+    repository_root: &Path,
+    term: &str,
+) -> Result<Vec<SearchMatchV2>, MkoError> {
+    search_records_by_perspective_v2(
+        repository_root,
+        term,
+        None,
+        SearchConfirmationFilterV2::Any,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn search_records_by_perspective_v2(
+    repository_root: &Path,
+    term: &str,
+    perspective: Option<PerspectiveV2>,
+    confirmation: SearchConfirmationFilterV2,
+    tag: Option<&str>,
+    layer: Option<SearchLayerV2>,
+    topic: Option<&str>,
+    origin: Option<SearchOriginFormV2>,
+) -> Result<Vec<SearchMatchV2>, MkoError> {
+    let tokens = normalize_query_tokens_v2(term)?;
+    let tag_needle = normalize_tag_needle_v2(tag)?;
+    let topic_needle = normalize_topic_needle_v2(topic)?;
     let groups = derive_groups(repository_root)?;
     let mut matches = groups
         .values()
         .flatten()
-        .filter(|target| {
-            target.record_type == ReviewTargetTypeV2::Knowledge
-                && target.state == Some(ReviewCardTargetStateV2::Confirmed)
-        })
-        .flat_map(|target| {
-            let RevisionV2::Knowledge(revision) = &target.revision else {
-                return Vec::new();
-            };
-            if perspective
-                .as_ref()
-                .is_some_and(|selected| !revision.perspectives.contains(selected))
-            {
-                return Vec::new();
+        .filter(|target| confirmation_allows(confirmation, target))
+        .filter(|target| origin_form_matches(&target.asset, origin))
+        .flat_map(|target| match &target.revision {
+            RevisionV2::Knowledge(revision) => {
+                if perspective
+                    .as_ref()
+                    .is_some_and(|selected| !revision.perspectives.contains(selected))
+                {
+                    return Vec::new();
+                }
+                if !topic_matches(&revision.response.topics, topic_needle.as_deref()) {
+                    return Vec::new();
+                }
+                let label = confirmation_label_for_target(target);
+                revision
+                    .response
+                    .units
+                    .iter()
+                    .filter(|unit| layer.is_none_or(|wanted| wanted == search_layer(&unit.kind)))
+                    .filter(|unit| tag_matches(&unit.tags, tag_needle.as_deref()))
+                    .filter(|unit| {
+                        tokens_match_all(
+                            &knowledge_unit_haystack(unit, &revision.perspectives),
+                            &tokens,
+                        )
+                    })
+                    .map(|unit| SearchMatchV2 {
+                        record_type: SearchRecordTypeV2::Knowledge,
+                        record_id: target.record_id.clone(),
+                        current_revision: target.pointer.revision.clone(),
+                        asset_id: target.asset.id.clone(),
+                        title: unit.title.clone(),
+                        body: unit.body.clone(),
+                        tags: unit.tags.clone(),
+                        perspectives: revision.perspectives.clone(),
+                        locators: unit
+                            .evidence_refs
+                            .iter()
+                            .map(|evidence| evidence.locator.clone())
+                            .collect(),
+                        layer: search_layer(&unit.kind),
+                        confirmation: label.clone(),
+                    })
+                    .collect::<Vec<_>>()
             }
-            revision
-                .response
-                .units
-                .iter()
-                .filter(|unit| {
-                    unit.title.to_lowercase().contains(&needle)
-                        || unit.body.to_lowercase().contains(&needle)
-                        || unit
-                            .tags
-                            .iter()
-                            .any(|tag| tag.to_lowercase().contains(&needle))
-                        || revision
-                            .perspectives
-                            .iter()
-                            .any(|perspective| perspective.as_str().contains(&needle))
-                })
-                .map(|unit| KnowledgeSearchMatchV2 {
-                    knowledge_id: target.record_id.clone(),
+            RevisionV2::Source(revision) => {
+                // `perspective` is a human-confirmed Knowledge-only concept
+                // (§6.3); a perspective filter excludes Source hits entirely
+                // rather than guessing at one.
+                if perspective.is_some() {
+                    return Vec::new();
+                }
+                if layer.is_some_and(|wanted| wanted != SearchLayerV2::SourceOwnWords) {
+                    return Vec::new();
+                }
+                if !tag_matches(&revision.response.tags, tag_needle.as_deref()) {
+                    return Vec::new();
+                }
+                if !topic_matches(&revision.response.topics, topic_needle.as_deref()) {
+                    return Vec::new();
+                }
+                if !tokens_match_all(&source_haystack(&revision.response), &tokens) {
+                    return Vec::new();
+                }
+                vec![SearchMatchV2 {
+                    record_type: SearchRecordTypeV2::Source,
+                    record_id: target.record_id.clone(),
                     current_revision: target.pointer.revision.clone(),
                     asset_id: target.asset.id.clone(),
-                    title: unit.title.clone(),
-                    body: unit.body.clone(),
-                    tags: unit.tags.clone(),
-                    perspectives: revision.perspectives.clone(),
-                    locators: unit
-                        .evidence_refs
+                    title: revision.response.title.clone(),
+                    body: revision.response.general_summary.clone(),
+                    tags: revision.response.tags.clone(),
+                    perspectives: Vec::new(),
+                    locators: revision
+                        .response
+                        .key_claims
                         .iter()
-                        .map(|evidence| evidence.locator.clone())
+                        .flat_map(|claim| claim.evidence_refs.iter().map(|e| e.locator.clone()))
                         .collect(),
-                    layer: search_layer(&unit.kind),
-                })
-                .collect::<Vec<_>>()
+                    layer: SearchLayerV2::SourceOwnWords,
+                    confirmation: confirmation_label_for_target(target),
+                }]
+            }
         })
         .collect::<Vec<_>>();
     matches.sort_by(|left, right| {
         left.title
             .cmp(&right.title)
-            .then(left.knowledge_id.cmp(&right.knowledge_id))
+            .then(left.record_id.cmp(&right.record_id))
             .then(left.body.cmp(&right.body))
     });
     Ok(matches)
 }
 
-fn search_layer(kind: &KnowledgeUnitKindV2) -> KnowledgeSearchLayerV2 {
+fn search_layer(kind: &KnowledgeUnitKindV2) -> SearchLayerV2 {
     match kind {
         KnowledgeUnitKindV2::Fact
         | KnowledgeUnitKindV2::Definition
         | KnowledgeUnitKindV2::Formula
-        | KnowledgeUnitKindV2::Result => KnowledgeSearchLayerV2::GroundedEvidence,
+        | KnowledgeUnitKindV2::Result => SearchLayerV2::GroundedEvidence,
         // Background is what the model supplied, so it belongs with the rest of
         // what the model supplied — never with the document's own words.
         KnowledgeUnitKindV2::Interpretation
         | KnowledgeUnitKindV2::Hypothesis
-        | KnowledgeUnitKindV2::Background => KnowledgeSearchLayerV2::LlmAnalysis,
+        | KnowledgeUnitKindV2::Background => SearchLayerV2::LlmAnalysis,
         KnowledgeUnitKindV2::Counterargument
         | KnowledgeUnitKindV2::Uncertainty
-        | KnowledgeUnitKindV2::OpenQuestion => KnowledgeSearchLayerV2::CounterargumentOrUncertainty,
+        | KnowledgeUnitKindV2::OpenQuestion => SearchLayerV2::CounterargumentOrUncertainty,
     }
 }
 
@@ -577,6 +832,51 @@ fn derive_groups(repository_root: &Path) -> Result<BTreeMap<String, Vec<ScannedT
     Ok(groups)
 }
 
+/// Every topic proposed on a current Source or Knowledge revision (§6.3),
+/// flat, case-insensitively deduped, and deterministically sorted.
+///
+/// Read-only and cheap on purpose (D13: `mko topics` grounds the Skill's
+/// reuse-before-invention rule, so it has to be worth running before every
+/// new proposal): it reuses `scan_collection` directly rather than
+/// `derive_groups`' full derivation, which additionally computes review
+/// histories and projection drift that a topic listing has no use for.
+pub fn list_topics_v2(repository_root: &Path) -> Result<Vec<String>, MkoError> {
+    KnowledgeConfigV2::read(repository_root)?;
+    validate_real_directory(repository_root, "queue_repository_invalid")?;
+    let deadline = Instant::now() + RECORD_SCAN_DEADLINE;
+    let mut targets = scan_collection(
+        repository_root,
+        ReviewTargetTypeV2::Source,
+        "sources",
+        deadline,
+    )?;
+    targets.extend(scan_collection(
+        repository_root,
+        ReviewTargetTypeV2::Knowledge,
+        "knowledge",
+        deadline,
+    )?);
+    if targets.len() > MAX_RECORDS {
+        return Err(queue_scan_limit());
+    }
+    // Keyed by case-folded form so two spellings of the same label collapse
+    // to one entry; the map's key order gives a deterministic result without
+    // a separate sort pass.
+    let mut topics = BTreeMap::<String, String>::new();
+    for target in &targets {
+        let response_topics = match &target.revision {
+            RevisionV2::Source(revision) => &revision.response.topics,
+            RevisionV2::Knowledge(revision) => &revision.response.topics,
+        };
+        for topic in response_topics {
+            topics
+                .entry(topic.to_lowercase())
+                .or_insert_with(|| topic.clone());
+        }
+    }
+    Ok(topics.into_values().collect())
+}
+
 /// The projection Core would generate for a record right now, derived from the
 /// record itself.
 ///
@@ -635,6 +935,11 @@ fn canonical_projection_input(target: &ScannedTarget) -> Result<ProjectionInputV
     );
     tags.sort();
     tags.dedup();
+    let mut topics = match &target.revision {
+        RevisionV2::Source(revision) => revision.response.topics.clone(),
+        RevisionV2::Knowledge(revision) => revision.response.topics.clone(),
+    };
+    topics.sort();
     let body = match &target.revision {
         RevisionV2::Source(revision) => crate::projection_v2::source_projection_body_v2(
             &revision.response,
@@ -663,6 +968,7 @@ fn canonical_projection_input(target: &ScannedTarget) -> Result<ProjectionInputV
         domain: primary_perspective(&perspectives),
         perspectives,
         tags,
+        topics,
         summary,
         body_markdown: body,
         record_link: format!("{collection}/{}/current.yaml", target.record_id),

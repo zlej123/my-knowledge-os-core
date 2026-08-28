@@ -24,8 +24,8 @@ use mko_core::{
     model_v2::{KnowledgeResponseV2, PreparedMetadataV2, SourceResponseV2},
     prepared_v2::{
         PreparePdfAssetRequestV2, PreparedPdfResultV2, PreparedPersistenceOutcomeV2,
-        cleanup_prepared_sessions_v2, prepare_pdf_asset_v2, prepare_snapshot_asset_v2,
-        read_prepared_content_v2,
+        cleanup_prepared_sessions_v2, prepare_local_file_asset_v2, prepare_pdf_asset_v2,
+        prepare_snapshot_asset_v2, read_prepared_content_v2,
     },
     queue_v2::{ReviewCardTargetStateV2, derive_queue_v2, show_review_card_v2},
     records_v2::{
@@ -180,40 +180,62 @@ pub fn prepare_source_json_v2(
     provider: &Path,
     asset_id: &str,
     confirm_download: bool,
+    extracted_text: Option<&str>,
     worker_executable: &Path,
 ) -> Result<(), MkoError> {
-    // A snapshot has no provider file to inspect, fingerprint, or extract from:
-    // its text is already in the knowledge base and its hash is its identity.
-    // Routing on the origin is what makes "give me this link" reach the same
-    // drafting flow as a PDF.
+    // Every non-PDF origin has no provider file to inspect, fingerprint, or
+    // extract from: its text (or original) is already in the knowledge base
+    // and its hash is its identity. Routing on the origin is what makes "give
+    // me this link/paste/file/conversation/video" reach the same drafting flow as a
+    // PDF. Exhaustive on purpose (Phase 2): a binary `if WebSnapshot {..}
+    // else {assume PDF}` silently mis-routed every new origin into the
+    // PDF/Inbox path before this match existed.
     let metadata = PreparedMetadataV2 {
         title: None,
         authors: Vec::new(),
         created_at: None,
     };
-    if read_asset_v2(repository, asset_id)?.origin == AssetOriginV2::WebSnapshot {
-        let result = prepare_snapshot_asset_v2(repository, asset_id, metadata)?;
-        return emit_prepared_session_v2(result);
+    let origin = read_asset_v2(repository, asset_id)?.origin;
+    // `--extracted-text` applies only to an image/document local file (Phase
+    // 3); every other origin already has its text in the knowledge base.
+    // Reject it early, before routing, rather than silently ignoring it.
+    if extracted_text.is_some() && !matches!(origin, AssetOriginV2::LocalFile) {
+        return Err(MkoError::new(
+            "local_file_extracted_text_not_applicable",
+            "--extracted-text applies only to an image or document local file",
+        ));
     }
-    let result = prepare_pdf_asset_v2(
-        PreparePdfAssetRequestV2 {
-            repository_root: repository,
-            provider_root: provider,
-            asset_id,
-            metadata: PreparedMetadataV2 {
-                title: None,
-                authors: Vec::new(),
-                created_at: None,
-            },
-            hydration_confirmation: if confirm_download {
-                HydrationConfirmationV2::Confirmed
-            } else {
-                HydrationConfirmationV2::NotConfirmed
-            },
-        },
-        worker_executable,
-    )?;
-    emit_prepared_session_v2(result)
+    match origin {
+        AssetOriginV2::WebSnapshot
+        | AssetOriginV2::PastedText
+        | AssetOriginV2::Conversation
+        | AssetOriginV2::VideoTranscript => {
+            let result = prepare_snapshot_asset_v2(repository, asset_id, metadata)?;
+            emit_prepared_session_v2(result)
+        }
+        AssetOriginV2::LocalFile => {
+            let result =
+                prepare_local_file_asset_v2(repository, asset_id, extracted_text, metadata)?;
+            emit_prepared_session_v2(result)
+        }
+        AssetOriginV2::ProviderPdf => {
+            let result = prepare_pdf_asset_v2(
+                PreparePdfAssetRequestV2 {
+                    repository_root: repository,
+                    provider_root: provider,
+                    asset_id,
+                    metadata,
+                    hydration_confirmation: if confirm_download {
+                        HydrationConfirmationV2::Confirmed
+                    } else {
+                        HydrationConfirmationV2::NotConfirmed
+                    },
+                },
+                worker_executable,
+            )?;
+            emit_prepared_session_v2(result)
+        }
+    }
 }
 
 /// One envelope for both origins: what a caller does next with a prepared
@@ -575,6 +597,46 @@ fn read_json_input<T: DeserializeOwned>(
         ));
     }
     serde_json::from_slice(&bytes).map_err(|error| MkoError::new(error_code, error.to_string()))
+}
+
+/// A bounded, no-follow byte read for a CLI-side file input that is not
+/// JSON — mirrors `mko_core::asset_v2::read_bounded_nofollow`'s shape
+/// (`{subject}_unreadable` for an I/O failure opening/reading the file,
+/// `{subject}_invalid` for one that is missing, a symlink, not a regular
+/// file, or over `limit`) so a CLI-side reader is held to the same
+/// bounded/no-follow discipline as a Core-side one, instead of falling back
+/// to an unbounded, symlink-following `std::fs::read`.
+pub(crate) fn read_bounded_nofollow(
+    path: &Path,
+    limit: u64,
+    subject: &str,
+) -> Result<Vec<u8>, MkoError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_nofollow(&mut options);
+    let file = options
+        .open(path)
+        .map_err(|error| MkoError::new(format!("{subject}_unreadable"), error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| MkoError::new(format!("{subject}_unreadable"), error.to_string()))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > limit {
+        return Err(MkoError::new(
+            format!("{subject}_invalid"),
+            format!("{subject} must be a bounded regular non-link file"),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| MkoError::new(format!("{subject}_unreadable"), error.to_string()))?;
+    if bytes.len() as u64 > limit {
+        return Err(MkoError::new(
+            format!("{subject}_invalid"),
+            format!("{subject} exceeds its bounded input size"),
+        ));
+    }
+    Ok(bytes)
 }
 
 #[cfg(target_os = "linux")]
