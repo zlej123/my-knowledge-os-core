@@ -9,7 +9,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{error::MkoError, safe_yaml::validate_yaml_input};
 
-pub const CONTRACT_VERSION_V2: &str = "0.3.0";
+pub const CONTRACT_VERSION_V2: &str = "0.3.1";
+/// The exact prior on-disk contract the Phase 0 migration (`mko migrate`)
+/// knows how to upgrade. Approval became a derived confirmation badge instead
+/// of a blocking gate; nothing about the stored bytes changed, so this is the
+/// only supported migration source for `CONTRACT_VERSION_V2`.
+pub const MIGRATABLE_CONTRACT_VERSION_V2: &str = "0.3.0";
 pub const SCHEMA_VERSION_V2: u32 = 2;
 pub const DEFAULT_HYDRATION_WARNING_THRESHOLD_BYTES_V2: u64 = 10 * 1024 * 1024;
 const MAX_CONFIG_BYTES: u64 = 64 * 1024;
@@ -113,6 +118,33 @@ impl KnowledgeConfigV2 {
     }
 
     pub fn read(repository_root: &Path) -> Result<Self, MkoError> {
+        let config = Self::read_unvalidated(repository_root)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Reads a v0.3 Personal KB config for the Phase 0 migration (`mko
+    /// migrate`), accepting exactly the prior contract this migration
+    /// upgrades from. Every other check `validate` performs still applies —
+    /// this widens only the contract-version equality, never the rest of the
+    /// shape.
+    pub fn read_for_migration(repository_root: &Path) -> Result<Self, MkoError> {
+        let config = Self::read_unvalidated(repository_root)?;
+        config.validate_shape()?;
+        if config.contract_version != MIGRATABLE_CONTRACT_VERSION_V2 {
+            return Err(MkoError::new(
+                "kb_contract_not_migratable",
+                format!(
+                    "this migration upgrades only contract {MIGRATABLE_CONTRACT_VERSION_V2}; \
+                     this knowledge base declares {}",
+                    config.contract_version
+                ),
+            ));
+        }
+        Ok(config)
+    }
+
+    fn read_unvalidated(repository_root: &Path) -> Result<Self, MkoError> {
         let path = repository_root.join("knowledge-os.yaml");
         let mut options = OpenOptions::new();
         options.read(true);
@@ -162,13 +194,39 @@ impl KnowledgeConfigV2 {
         validate_yaml_input(&input)?;
         let config: Self = serde_saphyr::from_str(&input)
             .map_err(|error| MkoError::new("kb_config_invalid", error.to_string()))?;
-        config.validate()?;
         Ok(config)
     }
 
     pub fn validate(&self) -> Result<(), MkoError> {
+        self.validate_shape()?;
+        if self.contract_version != CONTRACT_VERSION_V2 {
+            if self.contract_version == MIGRATABLE_CONTRACT_VERSION_V2 {
+                // A CLI holding the new confirmation-badge vocabulary must
+                // refuse an unmigrated KB loudly rather than silently
+                // reimposing gate semantics and debt displays on it (D12).
+                return Err(MkoError::new(
+                    "kb_contract_outdated",
+                    format!(
+                        "this knowledge base was created under mko contract \
+                         {MIGRATABLE_CONTRACT_VERSION_V2} and now requires migration to \
+                         {CONTRACT_VERSION_V2}; run `mko migrate` from a clean git tree in the \
+                         knowledge repository"
+                    ),
+                ));
+            }
+            return Err(MkoError::new(
+                "kb_schema_unsupported",
+                "select or create a My Knowledge OS v0.3 Personal KB",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Everything `validate` checks except the exact contract-version match,
+    /// shared with `read_for_migration` so the migration path does not relax
+    /// any check beyond the one field it exists to widen.
+    fn validate_shape(&self) -> Result<(), MkoError> {
         if self.system != "my-knowledge-os"
-            || self.contract_version != CONTRACT_VERSION_V2
             || self.schema_version != SCHEMA_VERSION_V2
             || self.scope != "personal"
         {

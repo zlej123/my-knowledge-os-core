@@ -15,8 +15,9 @@ use crate::{
     error::MkoError,
     lock::{RepositoryMutationLock, StaleRepositoryLockPolicy},
     model_v2::{
-        ContentBlockV2, EvidenceRefV2, KnowledgeBasisV2, KnowledgeResponseV2, KnowledgeUnitKindV2,
-        LimitationBasisV2, PreparedContentV2, ReviewTargetTypeV2, SourceResponseV2,
+        AuthoredByV2, ContentBlockV2, EvidenceRefV2, KnowledgeBasisV2, KnowledgeResponseV2,
+        KnowledgeUnitKindV2, LimitationBasisV2, PreparedContentV2, ReviewTargetTypeV2,
+        SourceResponseV2,
     },
     projection_v2::{
         ProjectionInputV2, ProjectionRecordTypeV2, ProjectionStateV2, ProjectionWriteOutcomeV2,
@@ -160,6 +161,13 @@ pub struct SourceRevisionV2 {
     pub asset_id: String,
     pub asset_fingerprint: String,
     pub evidence_basis: EvidenceBasisV2,
+    /// Provenance the Core carries alongside the revision (§4.1). The
+    /// separate, derived human-confirmation badge lives in the review event
+    /// graph — see `review_v2::ReviewDerivedStateV2` — not on the revision
+    /// itself. Defaulted and elided when `Ai` so a revision written before
+    /// this field existed still round-trips to its original bytes.
+    #[serde(default, skip_serializing_if = "AuthoredByV2::is_ai")]
+    pub authored_by: AuthoredByV2,
     pub response: SourceResponseV2,
 }
 
@@ -176,6 +184,13 @@ pub struct KnowledgeRevisionV2 {
     pub domain_policy: DomainPolicyV2,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub perspectives: Vec<PerspectiveV2>,
+    /// Provenance the Core carries alongside the revision (§4.1). The
+    /// separate, derived human-confirmation badge lives in the review event
+    /// graph — see `review_v2::ReviewDerivedStateV2` — not on the revision
+    /// itself. Defaulted and elided when `Ai` so a revision written before
+    /// this field existed still round-trips to its original bytes.
+    #[serde(default, skip_serializing_if = "AuthoredByV2::is_ai")]
+    pub authored_by: AuthoredByV2,
     pub response: KnowledgeResponseV2,
 }
 
@@ -250,6 +265,9 @@ pub fn write_source_record_v2(
         asset_id: request.asset.id.clone(),
         asset_fingerprint: request.asset.fingerprint.clone(),
         evidence_basis: evidence_basis.clone(),
+        // Every current caller writes through the agent-drafted prepare
+        // pipeline (see json_v2's Source write command).
+        authored_by: AuthoredByV2::Ai,
         response: request.response.clone(),
     };
     let bytes = render_revision_markdown("Source", &revision)?;
@@ -296,6 +314,9 @@ pub fn write_knowledge_record_v2(
         evidence_basis: evidence_basis.clone(),
         domain_policy,
         perspectives: Vec::new(),
+        // Every current caller writes through the agent-drafted prepare
+        // pipeline (see json_v2's Knowledge write command).
+        authored_by: AuthoredByV2::Ai,
         response: request.response.clone(),
     };
     let bytes = render_revision_markdown("Knowledge", &revision)?;
@@ -994,13 +1015,13 @@ fn expected_projection_input(
     .next()
     .ok_or_else(|| MkoError::new("review_state_invalid", "review history is missing"))?;
     let derived_state = match history.derived.state {
-        ReviewDerivedStateV2::Unreviewed if history.previous_reviewed_revision.is_some() => {
-            ProjectionStateV2::RevisedUnreviewed
+        ReviewDerivedStateV2::Unconfirmed if history.previous_reviewed_revision.is_some() => {
+            ProjectionStateV2::RevisedUnconfirmed
         }
-        ReviewDerivedStateV2::Unreviewed => ProjectionStateV2::Unreviewed,
+        ReviewDerivedStateV2::Unconfirmed => ProjectionStateV2::Unconfirmed,
         ReviewDerivedStateV2::Deferred => ProjectionStateV2::Deferred,
         ReviewDerivedStateV2::ChangesRequested => ProjectionStateV2::ChangesRequested,
-        ReviewDerivedStateV2::Approved => ProjectionStateV2::Approved,
+        ReviewDerivedStateV2::Confirmed => ProjectionStateV2::Confirmed,
         ReviewDerivedStateV2::BlockedConflict => ProjectionStateV2::Blocked,
     };
     Ok(ProjectionInputV2 {

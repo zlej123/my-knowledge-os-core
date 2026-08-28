@@ -63,7 +63,7 @@ fn rendering_is_deterministic_and_digest_is_over_canonical_input() {
     assert_eq!(first.projection_digest, expected_digest);
     assert!(text.contains(&format!("projection_digest: \"{expected_digest}\"")));
     assert!(text.contains("record_type: source"));
-    assert!(text.contains("derived_state: unreviewed"));
+    assert!(text.contains("derived_state: unconfirmed"));
     assert!(text.contains("[[sources/"));
 }
 
@@ -311,7 +311,7 @@ fn projection(title: &str) -> ProjectionInputV2 {
         title: title.into(),
         current_revision: format!("sha256:{}", "b".repeat(64)),
         review_head_id: None,
-        derived_state: ProjectionStateV2::Unreviewed,
+        derived_state: ProjectionStateV2::Unconfirmed,
         domain: "research".into(),
         perspectives: Vec::new(),
         tags: vec!["example".into(), "paper".into()],

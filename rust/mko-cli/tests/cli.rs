@@ -23,7 +23,7 @@ fn version_reports_the_product_release() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("mko 0.3.25"));
+        .stdout(predicate::str::contains("mko 0.4.0"));
 }
 
 #[test]
@@ -39,7 +39,8 @@ fn help_exposes_the_human_command_surface_only() {
         .stdout(predicate::str::contains("find"))
         .stdout(predicate::str::contains("ui"))
         .stdout(predicate::str::contains("remember"))
-        .stdout(predicate::str::contains("review"))
+        .stdout(predicate::str::contains("confirm"))
+        .stdout(predicate::str::contains("migrate"))
         .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("  asset").not())
         .stdout(predicate::str::contains("  source").not())

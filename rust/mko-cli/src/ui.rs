@@ -13,7 +13,7 @@ use mko_core::{
     provider_scan::MonotonicElapsedClock,
     queue_v2::{
         KnowledgeSearchLayerV2, ResurfacedKnowledgeStateV2, derive_queue_v2,
-        resurface_knowledge_by_perspective_v2, search_approved_knowledge_by_perspective_v2,
+        resurface_knowledge_by_perspective_v2, search_confirmed_knowledge_by_perspective_v2,
     },
     quick_note_v2::search_quick_notes_v2,
 };
@@ -408,9 +408,11 @@ struct CoreProjection {
 struct CoreCounts {
     new_material: u64,
     in_progress: u64,
-    review_pending: u64,
-    changes_requested: u64,
-    approved_knowledge: u64,
+    /// A Source or Knowledge revision is complete the moment the Core writes
+    /// it (§4.1). This is a positive count of usable knowledge, not a
+    /// review-debt count — the read-only dashboard does not surface one,
+    /// matching the terminal home screen (§4.2).
+    confirmed_knowledge: u64,
     blocked: u64,
 }
 
@@ -501,9 +503,7 @@ fn build_core_projection(repository: &Path, provider: &Path) -> Result<CoreProje
             counts: CoreCounts {
                 new_material: report.new_material,
                 in_progress: report.registered.saturating_add(report.incomplete),
-                review_pending: report.review_pending,
-                changes_requested: 0,
-                approved_knowledge: report.complete,
+                confirmed_knowledge: report.complete,
                 blocked: report.blocked,
             },
             scan_complete: true,
@@ -547,7 +547,7 @@ fn build_core_projection(repository: &Path, provider: &Path) -> Result<CoreProje
                         .map(|perspective| perspective.as_str().to_owned())
                         .collect(),
                     review_state: match item.review_state {
-                        ResurfacedKnowledgeStateV2::Approved => "approved",
+                        ResurfacedKnowledgeStateV2::Confirmed => "confirmed",
                         ResurfacedKnowledgeStateV2::Deferred => "deferred",
                     },
                     reviewed_at: item.reviewed_at.to_rfc3339(),
@@ -586,9 +586,7 @@ fn build_core_projection(repository: &Path, provider: &Path) -> Result<CoreProje
                 counts: CoreCounts {
                     new_material: report.new_material,
                     in_progress: report.in_progress,
-                    review_pending: report.review_pending,
-                    changes_requested: report.changes_requested,
-                    approved_knowledge: report.approved_knowledge,
+                    confirmed_knowledge: report.confirmed_knowledge,
                     blocked: report.blocked,
                 },
                 scan_complete: report.scan_complete,
@@ -619,10 +617,10 @@ fn queue_type_label(value: &QueueItemTypeV2) -> &'static str {
 
 fn queue_state_label(value: &QueueItemStateV2) -> &'static str {
     match value {
-        QueueItemStateV2::Unreviewed => "unreviewed",
+        QueueItemStateV2::Unconfirmed => "unconfirmed",
         QueueItemStateV2::Deferred => "deferred",
         QueueItemStateV2::ChangesRequested => "changes_requested",
-        QueueItemStateV2::RevisedUnreviewed => "revised_unreviewed",
+        QueueItemStateV2::RevisedUnconfirmed => "revised_unconfirmed",
         QueueItemStateV2::Blocked => "blocked",
     }
 }
@@ -693,7 +691,7 @@ fn search_projection(repository: &Path, query: &str) -> Result<Vec<SearchResult>
         }
         None => None,
     };
-    let mut results = search_approved_knowledge_by_perspective_v2(repository, term, perspective)?
+    let mut results = search_confirmed_knowledge_by_perspective_v2(repository, term, perspective)?
         .into_iter()
         .map(|item| SearchResult {
             record_type: "knowledge",
@@ -1576,7 +1574,7 @@ mod tests {
         let projection = build_core_projection(&repository, &provider).unwrap();
 
         assert_eq!(projection.generation, "v3");
-        assert_eq!(projection.counts.review_pending, 0);
+        assert_eq!(projection.counts.confirmed_knowledge, 0);
         assert_eq!(projection.next_action, "지식 찾기");
         assert!(projection.queue.is_empty());
         assert_eq!(snapshot(&repository), before);

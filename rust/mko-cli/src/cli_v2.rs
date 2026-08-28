@@ -71,10 +71,10 @@ pub fn queue(repository: &Path) -> Result<(), MkoError> {
     let stdout = io::stdout();
     let mut output = stdout.lock();
     if queue.items.is_empty() {
-        writeln!(output, "검토 대기 항목이 없습니다.")
+        writeln!(output, "미확인 항목이 없습니다.")
             .map_err(|error| output_error(error.to_string()))?;
     } else {
-        writeln!(output, "검토 대기열 ({}개)", queue.items.len())
+        writeln!(output, "미확인 목록 ({}개)", queue.items.len())
             .map_err(|error| output_error(error.to_string()))?;
         for (index, item) in queue.items.iter().enumerate() {
             writeln!(
@@ -328,7 +328,7 @@ fn choose_review_item(repository: &Path) -> Result<Option<String>, MkoError> {
     }
 
     println!();
-    println!("검토 대기 {}개", items.len());
+    println!("미확인 {}개", items.len());
     for (index, item) in items.iter().enumerate() {
         println!(
             "{}. {} [{} / {}]",
@@ -348,7 +348,7 @@ fn choose_review_item(repository: &Path) -> Result<Option<String>, MkoError> {
     println!();
 
     for attempt in 1..=REVIEW_SELECTION_ATTEMPTS {
-        print!("검토할 항목 번호 [Enter: 1번 · q: 닫기] › ");
+        print!("확인할 항목 번호 [Enter: 1번 · q: 닫기] › ");
         std::io::stdout()
             .flush()
             .map_err(|error| MkoError::new("output_failed", error.to_string()))?;
@@ -402,14 +402,14 @@ fn report_review_remaining(repository: &Path) {
         return;
     };
     match queue.items.len() {
-        0 => println!("검토할 항목이 모두 끝났습니다."),
+        0 => println!("확인할 항목이 모두 끝났습니다."),
         remaining => {
-            println!("검토 대기 {remaining}개가 남았습니다: `mko`로 이어서 볼 수 있습니다.")
+            println!("미확인 {remaining}개가 남았습니다: `mko`로 이어서 볼 수 있습니다.")
         }
     }
 }
 
-pub fn review(
+pub fn confirm(
     repository: &Path,
     stable_id: Option<&str>,
     clock: &dyn Clock,
@@ -425,25 +425,25 @@ pub fn review(
         },
     };
     match publish_tty_review_v2(repository, &selected_id, clock)? {
-        TtyReviewOutcomeV2::Approved(publication) => {
+        TtyReviewOutcomeV2::Confirmed(publication) => {
             report_review_publication(&publication)?;
             report_review_remaining(repository);
         }
         TtyReviewOutcomeV2::ChangesRequested(publication) => {
             println!("수정을 요청했습니다: {}", publication.record.id);
             println!(
-                "이 항목은 수정 요청 상태로 대기열에 남아 있고, 다음 초안이 준비되면 다시 검토할 수 있습니다."
+                "이 항목은 수정 요청 상태로 미확인 목록에 남아 있고, 다음 초안이 준비되면 다시 확인할 수 있습니다."
             );
             report_review_remaining(repository);
         }
         TtyReviewOutcomeV2::Deferred(publication) => {
             println!("나중에 보기로 했습니다: {}", publication.record.id);
-            println!("이 항목은 검토 대기열에 그대로 남아 있습니다.");
+            println!("이 항목은 미확인 목록에 그대로 남아 있습니다.");
             report_review_remaining(repository);
         }
         TtyReviewOutcomeV2::Cancelled => {
             println!("아무것도 바꾸지 않았습니다.");
-            println!("이 항목은 검토 대기열에 남아 있습니다: `mko`로 다시 열 수 있습니다.");
+            println!("이 항목은 미확인 목록에 남아 있습니다: `mko`로 다시 열 수 있습니다.");
         }
     }
     Ok(())
@@ -474,7 +474,7 @@ fn report_review_publication(
         }
     }
     if blocked.is_empty() {
-        println!("approved {} (readiness current)", publication.record.id);
+        println!("confirmed {} (readiness current)", publication.record.id);
     } else {
         println!(
             "review event published {}, but readiness is blocked by {} projection(s)",
@@ -503,10 +503,10 @@ fn item_type_label(value: &QueueItemTypeV2) -> &'static str {
 
 fn state_label(value: &QueueItemStateV2) -> &'static str {
     match value {
-        QueueItemStateV2::Unreviewed => "미검토",
+        QueueItemStateV2::Unconfirmed => "미확인",
         QueueItemStateV2::Deferred => "보류",
         QueueItemStateV2::ChangesRequested => "수정 요청",
-        QueueItemStateV2::RevisedUnreviewed => "수정 후 미검토",
+        QueueItemStateV2::RevisedUnconfirmed => "수정 후 미확인",
         QueueItemStateV2::Blocked => "차단됨",
     }
 }
@@ -521,11 +521,11 @@ fn action_label(value: &QueueNextActionV2) -> &'static str {
 
 fn json_target_state(value: ReviewCardTargetStateV2) -> ReviewTargetStateV2 {
     match value {
-        ReviewCardTargetStateV2::Unreviewed => ReviewTargetStateV2::Unreviewed,
+        ReviewCardTargetStateV2::Unconfirmed => ReviewTargetStateV2::Unconfirmed,
         ReviewCardTargetStateV2::Deferred => ReviewTargetStateV2::Deferred,
         ReviewCardTargetStateV2::ChangesRequested => ReviewTargetStateV2::ChangesRequested,
-        ReviewCardTargetStateV2::RevisedUnreviewed => ReviewTargetStateV2::RevisedUnreviewed,
-        ReviewCardTargetStateV2::Approved => ReviewTargetStateV2::Approved,
+        ReviewCardTargetStateV2::RevisedUnconfirmed => ReviewTargetStateV2::RevisedUnconfirmed,
+        ReviewCardTargetStateV2::Confirmed => ReviewTargetStateV2::Confirmed,
         ReviewCardTargetStateV2::Blocked => ReviewTargetStateV2::Blocked,
     }
 }

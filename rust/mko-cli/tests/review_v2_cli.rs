@@ -57,7 +57,7 @@ fn queue_and_show_render_stable_core_owned_human_views() {
         .arg(environment.root.path())
         .assert()
         .success()
-        .stdout(predicates::str::contains("검토 대기열 (1개)"))
+        .stdout(predicates::str::contains("미확인 목록 (1개)"))
         .stdout(predicates::str::contains("Example paper"))
         .stdout(predicates::str::contains(&item.item_id));
 
@@ -187,7 +187,7 @@ fn non_tty_review_displays_the_card_but_cannot_publish_approval() {
     let environment = environment();
     Command::cargo_bin("mko")
         .unwrap()
-        .arg("review")
+        .arg("confirm")
         .arg(&environment.source_id)
         .arg("--repo")
         .arg(environment.root.path())
@@ -216,7 +216,7 @@ fn valid_v1_repository_keeps_the_frozen_legacy_review_route() {
 
     Command::cargo_bin("mko")
         .unwrap()
-        .args(["review", "--repo"])
+        .args(["confirm", "--repo"])
         .arg(root.path())
         .assert()
         .failure()
@@ -240,7 +240,7 @@ fn real_tty_review_approves_only_the_exact_displayed_revision() {
         !transcript.contains("Type exactly:") && !transcript.contains(&card.card_digest),
         "verifying a digest is the machine's job, not the owner's: {transcript}"
     );
-    assert!(transcript.contains("approved personal-review-"));
+    assert!(transcript.contains("confirmed personal-review-"));
     assert_eq!(
         fs::read_dir(environment.root.path().join("reviews"))
             .unwrap()
@@ -253,14 +253,14 @@ fn real_tty_review_approves_only_the_exact_displayed_revision() {
         &environment.source_id,
     )
     .unwrap();
-    assert_eq!(state.state, ReviewDerivedStateV2::Approved);
+    assert_eq!(state.state, ReviewDerivedStateV2::Confirmed);
     let knowledge_state = derive_review_state_v2(
         environment.root.path(),
         ReviewTargetTypeV2::Knowledge,
         &environment.knowledge_id,
     )
     .unwrap();
-    assert_eq!(knowledge_state.state, ReviewDerivedStateV2::Unreviewed);
+    assert_eq!(knowledge_state.state, ReviewDerivedStateV2::Unconfirmed);
 }
 
 #[cfg(target_os = "macos")]
@@ -288,7 +288,7 @@ fn real_tty_knowledge_selection_approves_only_knowledge_with_domain_confirmation
         )
         .unwrap()
         .state,
-        ReviewDerivedStateV2::Unreviewed
+        ReviewDerivedStateV2::Unconfirmed
     );
     assert_eq!(
         derive_review_state_v2(
@@ -298,7 +298,7 @@ fn real_tty_knowledge_selection_approves_only_knowledge_with_domain_confirmation
         )
         .unwrap()
         .state,
-        ReviewDerivedStateV2::Approved
+        ReviewDerivedStateV2::Confirmed
     );
 }
 
@@ -325,7 +325,7 @@ fn real_tty_queue_item_selection_approves_all_targets_in_one_event() {
         )
         .unwrap()
         .state,
-        ReviewDerivedStateV2::Approved
+        ReviewDerivedStateV2::Confirmed
     );
     assert_eq!(
         derive_review_state_v2(
@@ -335,7 +335,7 @@ fn real_tty_queue_item_selection_approves_all_targets_in_one_event() {
         )
         .unwrap()
         .state,
-        ReviewDerivedStateV2::Approved
+        ReviewDerivedStateV2::Confirmed
     );
     assert_eq!(
         fs::read_dir(environment.root.path().join("reviews"))
@@ -351,7 +351,7 @@ fn review_rejects_a_well_formed_target_id_outside_the_displayed_group() {
     let environment = environment();
     Command::cargo_bin("mko")
         .unwrap()
-        .arg("review")
+        .arg("confirm")
         .arg(format!("personal-source-{}", "0".repeat(64)))
         .arg("--repo")
         .arg(environment.root.path())
@@ -391,7 +391,7 @@ fn approval_confirmation(card: &RenderedReviewCardV2, selected_id: &str) -> Stri
 #[allow(deprecated)]
 fn run_tty_review(environment: &Environment, selected_id: &str, confirmation: &str) -> String {
     let shell_command =
-        "stty -echo; exec \"$MKO_TEST_BIN\" review \"$MKO_TEST_ID\" --repo \"$MKO_TEST_REPO\"";
+        "stty -echo; exec \"$MKO_TEST_BIN\" confirm \"$MKO_TEST_ID\" --repo \"$MKO_TEST_REPO\"";
     let mut child = ProcessCommand::new("/usr/bin/script")
         .args(["-q", "/dev/null", "/bin/sh", "-c", shell_command])
         .env("MKO_TEST_BIN", assert_cmd::cargo::cargo_bin("mko"))

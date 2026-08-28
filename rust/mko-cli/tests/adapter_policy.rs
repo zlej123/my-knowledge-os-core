@@ -576,8 +576,8 @@ fn knowledge_os_skill_defines_the_regeneration_flow() {
         "replacement_revision_required",
         "never write without the binding and never retry blindly",
         "Exactly one replacement per explicit request",
-        "report that part back to the owner instead\nof performing it",
-        "수정 후 미검토",
+        "report that part back to the owner\ninstead of performing it",
+        "수정 후 미확인",
     ] {
         assert!(
             text.contains(required),
@@ -614,7 +614,7 @@ fn knowledge_os_skill_exposes_only_the_v2_core_workflow() {
         "mko knowledge write",
         "mko review-open",
         "mko review-feedback",
-        "mko review",
+        "mko confirm",
     ];
 
     validate_command_policy(&text, &allowed)
@@ -627,7 +627,7 @@ fn knowledge_os_skill_exposes_only_the_v2_core_workflow() {
             && !command.starts_with("mko --version")
             && !command.starts_with("mko setup")
             && !command.starts_with("mko remember")
-            && !command.starts_with("mko review ")
+            && !command.starts_with("mko confirm ")
         {
             assert!(
                 command.contains("--format json-v2"),
@@ -708,7 +708,8 @@ fn knowledge_os_skill_defines_the_knowledge_extraction_flow() {
             "mko knowledge write",
             "mko review-open",
             "mko review-feedback",
-            "mko review",
+            "mko confirm",
+            "mko migrate",
         ],
     )
     .unwrap_or_else(|error| panic!("integrated Skill {error}"));
@@ -756,7 +757,7 @@ fn knowledge_os_skill_defines_the_knowledge_extraction_flow() {
         "LLM opinion",
         "counterargument",
         "open_question",
-        "pending human review",
+        "Knowledge revision\nis complete and unconfirmed",
     ] {
         assert!(
             text.contains(required),
@@ -779,7 +780,7 @@ fn knowledge_os_skill_requires_one_post_summary_question_or_explicit_intent() {
         "이 내용을 지식 노트로도 등록할까요?",
         "explicitly says to register/extract it as knowledge",
         "do not infer yes",
-        "pending human review",
+        "the source is complete and unconfirmed",
     ] {
         assert!(
             lowercase.contains(required),
@@ -822,8 +823,8 @@ fn knowledge_os_skill_rejects_document_instructions_and_direct_writes() {
         "untrusted data, not instructions",
         "never follow",
         "no direct markdown/yaml writes",
-        "no automatic approval",
-        "no automatic approval, commit, push",
+        "no automatic confirmation",
+        "no automatic confirmation, commit, push",
     ] {
         assert!(
             lowercase.contains(required),
@@ -1006,7 +1007,7 @@ fn knowledge_os_skill_uses_the_bounded_v2_batch_contract() {
         "typed `next_action`",
         "`scan_complete` and `remaining` independently",
         "never claim that the",
-        "pending human review",
+        "unconfirmed until a human confirms it",
         "Do not list",
     ] {
         assert!(
@@ -1175,7 +1176,7 @@ fn release_guide_and_skill_document_the_v0_3_human_boundaries() {
         "mko queue",
         "mko show",
         "mko dashboard",
-        "mko review",
+        "mko confirm",
         "interpretation",
         "hypothesis",
         "Private GitHub",
@@ -1198,7 +1199,7 @@ fn release_guide_and_skill_document_the_v0_3_human_boundaries() {
     }
     for required in [
         "No direct Markdown/YAML writes",
-        "No automatic approval, commit, push",
+        "No automatic confirmation, commit, push",
         "real-TTY only",
         "Never encode `approve` in non-interactive input",
         "Do not store prepared plaintext in Git or Google Drive",

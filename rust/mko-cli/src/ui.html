@@ -62,7 +62,7 @@
 
       <section class="view active" id="view-today">
         <div class="metrics">
-          <div class="metric"><strong id="metric-knowledge">–</strong><span>지식 검토</span></div>
+          <div class="metric"><strong id="metric-knowledge">–</strong><span>확인된 지식</span></div>
           <div class="metric"><strong id="metric-evidence">–</strong><span>근거 관계 판단</span></div>
           <div class="metric"><strong id="metric-decisions">–</strong><span>포트폴리오 판단</span></div>
           <div class="metric"><strong id="metric-executions">–</strong><span>실행 검토</span></div>
@@ -73,7 +73,7 @@
 
       <section class="view" id="view-knowledge">
         <form class="searchbar" id="search-form">
-          <input id="search-input" aria-label="승인된 지식과 내 생각 검색" placeholder="승인된 지식과 내 생각에서 찾기" required maxlength="200">
+          <input id="search-input" aria-label="확인된 지식과 내 생각 검색" placeholder="확인된 지식과 내 생각에서 찾기" required maxlength="200">
           <select id="search-perspective" aria-label="관점 필터"><option value="">전체 관점</option><option value="investment">투자</option><option value="project">프로젝트</option><option value="technical">기술</option><option value="learning">학습</option><option value="life">생활</option></select>
           <button class="button primary" type="submit">찾기</button>
         </form>
@@ -151,7 +151,7 @@
       setText('#knowledge-heading',heading); setText('#knowledge-count',`${items.length}건`); const list=document.querySelector('#knowledge-list'); list.replaceChildren();
       if(!items.length){list.append(empty('표시할 지식이 없습니다.'));return;}
       items.forEach(item=>{
-        const card=element('article','card'); const state=item.record_type==='quick_note'?'내 생각':item.review_state==='deferred'?'나중에 보기':'승인된 지식';
+        const card=element('article','card'); const state=item.record_type==='quick_note'?'내 생각':item.review_state==='deferred'?'나중에 보기':'확인된 지식';
         card.append(badge(state,item.review_state==='deferred'?'amber':''),element('h3','',item.title),element('p','',compact(item.synthesis||item.body,300)));
         const meta=element('div','meta',item.current_revision||item.revision||item.record_id||item.knowledge_id); card.append(meta); list.append(card);
       });
@@ -181,8 +181,8 @@
       data.executions.forEach(item=>{const card=element('article','card');card.append(badge(item.state,item.state==='ready_paper_execution'?'red':'amber'),element('h3','',item.id),element('p','',`${item.proposal_count}개 주문 · 명목금액 ${item.notional.toLocaleString()}`),element('div','meta',`${item.portfolio_decision_id} · ${item.created_at}`));executions.append(card);});
     }
     function render(data){
-      projection=data; const corePending=data.core.counts.review_pending+data.core.counts.changes_requested;
-      setText('#metric-knowledge',corePending);setText('#metric-evidence',data.investment.pending.evidence);setText('#metric-decisions',data.investment.pending.decisions);setText('#metric-executions',data.investment.pending.executions);
+      projection=data; const coreConfirmed=data.core.counts.confirmed_knowledge;
+      setText('#metric-knowledge',coreConfirmed);setText('#metric-evidence',data.investment.pending.evidence);setText('#metric-decisions',data.investment.pending.decisions);setText('#metric-executions',data.investment.pending.executions);
       setText('#nav-today',data.attention.length);setText('#nav-investment',data.investment.pending.evidence+data.investment.pending.filings);setText('#nav-decisions',data.investment.pending.decisions+data.investment.pending.executions);
       const status=document.querySelector('#global-status');status.className=`status ${data.core.scan_complete?'connected':'partial'}`;status.textContent=`MKO ${data.core.generation} · ${data.core.next_action}${data.core.scan_complete?'':' · 자료 스캔 불완전, 새로고침 또는 mko doctor로 확인'} · 투자 모듈 ${data.investment.status} · 읽기 전용`;
       renderAttention(data.attention);renderKnowledge(data.core.knowledge);renderInvestment(data.investment);renderDecisions(data.investment);

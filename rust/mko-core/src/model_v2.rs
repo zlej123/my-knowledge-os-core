@@ -27,6 +27,34 @@ pub enum PreparedArtifactTypeV2 {
     PreparedContent,
 }
 
+/// Who wrote the words in a Source or Knowledge revision.
+///
+/// Every revision the Core writes is complete the moment it lands — there is
+/// no pending-until-approved lifecycle (see `ReviewDerivedStateV2` for the
+/// separate, derived human-confirmation badge). This field only says whose
+/// words they are. Today every Source and Knowledge revision is produced by
+/// the agent-drafted prepare pipeline, so it is always `Ai`; `Human` exists
+/// for owner-typed content that later phases route through this same record
+/// shape.
+///
+/// `Ai` is the default and is skipped on serialization (like
+/// `AssetOriginV2::ProviderPdf`), so a revision written before this field
+/// existed still parses and still re-serializes to its original, still
+/// content-addressed bytes — Phase 0 does not rewrite revision files.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthoredByV2 {
+    #[default]
+    Ai,
+    Human,
+}
+
+impl AuthoredByV2 {
+    pub(crate) fn is_ai(&self) -> bool {
+        matches!(self, Self::Ai)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreparedTrustV2 {

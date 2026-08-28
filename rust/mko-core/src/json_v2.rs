@@ -92,10 +92,10 @@ pub enum QueueItemTypeV2 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueueItemStateV2 {
-    Unreviewed,
+    Unconfirmed,
     Deferred,
     ChangesRequested,
-    RevisedUnreviewed,
+    RevisedUnconfirmed,
     Blocked,
 }
 
@@ -190,11 +190,11 @@ pub struct QuestionsAppendDataV2 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewTargetStateV2 {
-    Unreviewed,
+    Unconfirmed,
     Deferred,
     ChangesRequested,
-    RevisedUnreviewed,
-    Approved,
+    RevisedUnconfirmed,
+    Confirmed,
     Blocked,
 }
 

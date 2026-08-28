@@ -219,7 +219,7 @@ fn canonical_source_write_also_publishes_its_exact_projection() {
     let text = fs::read_to_string(&projection.path).unwrap();
     assert!(text.contains(&format!("current_revision: \"{}\"", result.revision)));
     assert!(text.contains(&format!("record_id: \"{}\"", result.record_id)));
-    assert!(text.contains("derived_state: unreviewed"));
+    assert!(text.contains("derived_state: unconfirmed"));
     assert!(text.contains(&format!(
         "asset_link: \"assets/registry/{}.json\"",
         environment.asset.id

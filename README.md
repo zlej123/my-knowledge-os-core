@@ -6,7 +6,7 @@ Git + Markdown 개인 지식 시스템입니다.
 - Google Drive Inbox에는 원본 PDF를 둡니다.
 - Private Git 저장소에는 Asset 메타데이터와 불변 Source/Knowledge revision을 둡니다.
 - Obsidian은 생성된 projection을 읽는 화면입니다.
-- LLM은 초안을 만들지만 승인·커밋·푸시하지 않습니다.
+- LLM은 초안을 만들지만 자동으로 확인·커밋·푸시하지 않습니다.
 
 ## 매일 쓰는 방법
 
@@ -16,11 +16,12 @@ Git + Markdown 개인 지식 시스템입니다.
 mko
 ```
 
-현재 저장소 형식을 먼저 구분한 뒤 새 자료, 검토 대기, 수정 필요, 승인된 지식, 문제 수를
+현재 저장소 형식을 먼저 구분한 뒤 새 자료, 정리 중, 확인된 지식, 문제 수를
 한국어로 보여줍니다. 기존 v0.1 저장소는 자동 변환하거나 수정하지 않고 읽기 전용 안내로
-엽니다. 메뉴에서 Inbox 등록, 검토, 검색, 점검으로 이동할 수 있습니다. 종료는 `q`입니다.
+엽니다. 메뉴에서 자료 정리, 지식 찾기, 빠른 메모, 문제 확인(또는 다시 볼 지식)으로 이동할 수
+있습니다. 종료는 `q`입니다.
 
-승인된 지식을 바로 찾고 싶다면 짧은 별칭을 사용할 수 있습니다.
+확인된 지식을 바로 찾고 싶다면 짧은 별칭을 사용할 수 있습니다.
 
 ```bash
 mko find "찾을 내용"
@@ -41,7 +42,7 @@ Knowledge 관점은 `life`, `learning`, `technical`, `project`, `investment` 중
 있습니다. 관점 확인은 정확한 현재 revision과 효과를 실제 터미널에 표시하고 새 pending
 revision을 만듭니다. `investment`는 Core가 `high_risk`로 파생하며 반론과 열린 질문이 없는
 Knowledge에는 적용할 수 없습니다. 평소에는 `mko` → `다시 볼 지식`에서 관점 필터와 지식
-번호를 선택하면 되므로 Knowledge ID를 입력할 필요가 없습니다. 승인 지식뿐 아니라
+번호를 선택하면 되므로 Knowledge ID를 입력할 필요가 없습니다. 확인 지식뿐 아니라
 `나중에 보기`로 보류한 지식도 나타납니다. 항목을 열면 전체 synthesis와 검토일을 보여주고,
 해당 revision의 마지막 열람 시각만 Git에서 제외된 `.mko/runtime`에 기록합니다. 이어서
 `p`를 선택한 경우에만 별도의 관점 확인 흐름으로 들어갑니다.
@@ -170,7 +171,7 @@ Asset 등록
   → 근거 기반 Source 요약
   → “이 내용을 지식 노트로도 등록할까요?”
   → 사용자가 동의하면 Knowledge 초안
-  → 통합 검토 대기열
+  → Core가 쓰는 순간 완결 (사람 확인 배지는 실제 터미널에서 별도로 기록)
 ```
 
 Knowledge는 다음 네 층을 구분합니다.
@@ -178,7 +179,7 @@ Knowledge는 다음 네 층을 구분합니다.
 1. 문서 근거가 있는 사실·정의·공식·결과
 2. `interpretation`/`hypothesis`로 표시한 LLM 분석
 3. 반론·불확실성·검증 질문
-4. 별도 승인 경로로 기록하는 사용자의 판단
+4. 별도 확인 경로로 기록하는 사용자의 판단
 
 ## 확인과 피드백
 
@@ -188,16 +189,17 @@ mko show <stable-id>
 mko dashboard
 ```
 
-`mko queue`와 Obsidian `HOME.md`는 같은 검토 상태를 보여줍니다. Source와 Knowledge가 같은
-PDF에서 나왔다면 하나의 결합 카드로 표시됩니다. 승인된 지식 Base에는 복수 관점 열과
+`mko queue`와 Obsidian `HOME.md`는 같은 미확인 상태를 보여줍니다. Source와 Knowledge가 같은
+PDF에서 나왔다면 하나의 결합 카드로 표시됩니다. 확인된 지식 Base에는 복수 관점 열과
 생활·학습·기술·프로젝트·투자 뷰가 생성됩니다. 생성 파일에 사용자 수정이 있으면 자동으로
 덮어쓰지 않습니다.
 
-Codex는 정확한 카드를 보여준 뒤 `request_changes` 또는 `defer` 피드백만 전달할 수 있습니다.
-최종 승인은 실제 터미널에서 수행합니다.
+Source나 Knowledge revision은 Core가 쓰는 순간 완결됩니다 — 승인 대기 상태가 아닙니다. Codex는
+정확한 카드를 보여준 뒤 `request_changes` 또는 `defer` 피드백만 전달할 수 있습니다. 사람의 확인
+배지는 실제 터미널에서 기록합니다.
 
 ```bash
-mko review <stable-id>
+mko confirm <stable-id>
 ```
 
 이 명령은 현재 revision과 효과를 다시 표시하고 revision-bound 확인을 요구합니다. 비대화형

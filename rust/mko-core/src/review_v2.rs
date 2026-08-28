@@ -166,10 +166,10 @@ pub struct ReviewResolutionPublicationV2 {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReviewDerivedStateV2 {
-    Unreviewed,
+    Unconfirmed,
     Deferred,
     ChangesRequested,
-    Approved,
+    Confirmed,
     BlockedConflict,
 }
 
@@ -188,7 +188,7 @@ pub(crate) struct ReviewTargetHistoryV2 {
     pub derived: DerivedReviewStateV2,
     pub current_reviewed_at: Option<DateTime<Utc>>,
     pub previous_reviewed_revision: Option<String>,
-    pub previous_approved_revision: Option<String>,
+    pub previous_confirmed_revision: Option<String>,
     pub current_feedback: Option<String>,
     /// Feedback attached to the head of `previous_reviewed_revision` — what a
     /// replacement revision claims to address.
@@ -272,7 +272,7 @@ pub fn publish_tty_review_v2(
 
 #[derive(Debug)]
 pub enum TtyReviewOutcomeV2 {
-    Approved(Box<ReviewPublicationV2>),
+    Confirmed(Box<ReviewPublicationV2>),
     ChangesRequested(Box<ReviewPublicationV2>),
     Deferred(Box<ReviewPublicationV2>),
     /// The owner declined at the prompt, or the prompt ended without one.
@@ -282,13 +282,13 @@ pub enum TtyReviewOutcomeV2 {
 
 /// What the owner chose in front of the card.
 ///
-/// Approving publishes knowledge and cannot be taken back, so it alone keeps
-/// the exact digest phrase. Requesting changes and deferring leave the item in
-/// the queue, so they are a single keystroke — the weight of the confirmation
-/// matches the weight of the act.
+/// Confirming records the human-confirmation badge and cannot be taken back,
+/// so it alone keeps the exact digest phrase. Requesting changes and
+/// deferring leave the item in the queue, so they are a single keystroke —
+/// the weight of the confirmation matches the weight of the act.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TtyReviewChoiceV2 {
-    Approve,
+    Confirm,
     RequestChanges,
     Defer,
     Cancel,
@@ -310,7 +310,7 @@ fn publish_tty_review_with_terminal(
     let choice = read_tty_review_choice(&effect, terminal)?;
     let decision = match choice {
         TtyReviewChoiceV2::Cancel => return Ok(TtyReviewOutcomeV2::Cancelled),
-        TtyReviewChoiceV2::Approve => {
+        TtyReviewChoiceV2::Confirm => {
             let Some(confirmed) = confirm_tty_approval(effect, terminal)? else {
                 return Ok(TtyReviewOutcomeV2::Cancelled);
             };
@@ -322,7 +322,7 @@ fn publish_tty_review_with_terminal(
             )?;
             validate_confirmed_tty_approval_locked(repository_root, &confirmed)?;
             return publish_confirmed_tty_approval_locked(repository_root, confirmed, clock)
-                .map(|publication| TtyReviewOutcomeV2::Approved(Box::new(publication)));
+                .map(|publication| TtyReviewOutcomeV2::Confirmed(Box::new(publication)));
         }
         TtyReviewChoiceV2::RequestChanges => {
             let Some(feedback) = read_tty_feedback(terminal)? else {
@@ -535,7 +535,7 @@ fn prepare_tty_approval_snapshot(
     }
     let targets = selected
         .iter()
-        .filter(|target| target.state != ReviewCardTargetStateV2::Approved)
+        .filter(|target| target.state != ReviewCardTargetStateV2::Confirmed)
         .map(|target| target.snapshot.clone())
         .collect::<Vec<_>>();
     if targets.is_empty() {
@@ -548,12 +548,12 @@ fn prepare_tty_approval_snapshot(
     reject_duplicate_snapshots(&targets)?;
     let selected_effects = selected
         .iter()
-        .filter(|target| target.state != ReviewCardTargetStateV2::Approved)
+        .filter(|target| target.state != ReviewCardTargetStateV2::Confirmed)
         .map(|target| {
             if !target
                 .effects
                 .iter()
-                .any(|effect| effect == "approve_current_revision_via_tty")
+                .any(|effect| effect == "confirm_current_revision_via_tty")
             {
                 return Err(MkoError::new(
                     "review_effect_invalid",
@@ -563,13 +563,13 @@ fn prepare_tty_approval_snapshot(
             Ok(SelectedTargetEffectV2 {
                 record_id: target.snapshot.record_id.clone(),
                 displayed_revision: target.snapshot.displayed_revision.clone(),
-                effects: vec!["approve_current_revision_via_tty".into()],
+                effects: vec!["confirm_current_revision_via_tty".into()],
             })
         })
         .collect::<Result<Vec<_>, MkoError>>()?;
     let domain_confirmations = selected
         .iter()
-        .filter(|target| target.state != ReviewCardTargetStateV2::Approved)
+        .filter(|target| target.state != ReviewCardTargetStateV2::Confirmed)
         .filter_map(|target| {
             target
                 .domain_policy
@@ -701,11 +701,11 @@ fn read_tty_review_choice(
     }
     if !effect.domain_confirmations.is_empty() {
         display.extend_from_slice(
-            "\n이 지식은 별도 확인이 필요한 분류입니다. 승인을 고르면 분류를 함께 확인합니다.\n"
+            "\n이 지식은 별도 확인이 필요한 분류입니다. 확인을 고르면 분류를 함께 확인합니다.\n"
                 .as_bytes(),
         );
     }
-    display.extend_from_slice("\n[a] 승인   [c] 수정 요청   [d] 나중에   [q] 취소\n> ".as_bytes());
+    display.extend_from_slice("\n[a] 확인   [c] 수정 요청   [d] 나중에   [q] 취소\n> ".as_bytes());
     terminal
         .display(&display)
         .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
@@ -719,7 +719,7 @@ fn read_tty_review_choice(
         .read_confirmation(64)
         .map_err(|error| MkoError::new("review_tty_failed", error.to_string()))?;
     match input.trim() {
-        "a" | "A" => Ok(TtyReviewChoiceV2::Approve),
+        "a" | "A" => Ok(TtyReviewChoiceV2::Confirm),
         "c" | "C" => Ok(TtyReviewChoiceV2::RequestChanges),
         "d" | "D" => Ok(TtyReviewChoiceV2::Defer),
         "" | "q" | "Q" => Ok(TtyReviewChoiceV2::Cancel),
@@ -946,7 +946,7 @@ fn publish_review_locked(
     for (input, target) in projection_inputs.iter_mut().zip(&review_targets) {
         input.review_head_id = Some(id.clone());
         input.derived_state = match target.decision {
-            ReviewDecisionV2::Approve => ProjectionStateV2::Approved,
+            ReviewDecisionV2::Approve => ProjectionStateV2::Confirmed,
             ReviewDecisionV2::RequestChanges => ProjectionStateV2::ChangesRequested,
             ReviewDecisionV2::Defer => ProjectionStateV2::Deferred,
         };
@@ -1166,9 +1166,9 @@ fn derive_state_from_graph(
                     && target.displayed_revision == revision
             })
         })
-        .map_or(ReviewDerivedStateV2::Unreviewed, |target| {
+        .map_or(ReviewDerivedStateV2::Unconfirmed, |target| {
             match target.decision {
-                ReviewDecisionV2::Approve => ReviewDerivedStateV2::Approved,
+                ReviewDecisionV2::Approve => ReviewDerivedStateV2::Confirmed,
                 ReviewDecisionV2::RequestChanges => ReviewDerivedStateV2::ChangesRequested,
                 ReviewDecisionV2::Defer => ReviewDerivedStateV2::Deferred,
             }
@@ -1241,7 +1241,7 @@ fn review_history_from_graph(
         previous_reviewed_revision: previous_reviewed
             .as_ref()
             .map(|(_, _, revision, _)| revision.clone()),
-        previous_approved_revision: approved.pop().map(|(_, _, revision, _)| revision),
+        previous_confirmed_revision: approved.pop().map(|(_, _, revision, _)| revision),
         current_feedback,
         previous_feedback: previous_reviewed.and_then(|(_, _, _, feedback)| feedback),
     })
@@ -1846,7 +1846,7 @@ mod tests {
 
     fn approved(outcome: TtyReviewOutcomeV2) -> ReviewPublicationV2 {
         match outcome {
-            TtyReviewOutcomeV2::Approved(publication) => *publication,
+            TtyReviewOutcomeV2::Confirmed(publication) => *publication,
             other => panic!("expected an approval, got {other:?}"),
         }
     }
@@ -2203,7 +2203,7 @@ mod tests {
 
         let choice = read_tty_review_choice(&effect, &mut terminal).unwrap();
 
-        assert_eq!(choice, TtyReviewChoiceV2::Approve);
+        assert_eq!(choice, TtyReviewChoiceV2::Confirm);
         let displayed = String::from_utf8(terminal.displayed).unwrap();
         assert!(displayed.contains(std::str::from_utf8(&card_bytes).unwrap()));
         assert!(displayed.contains(&record_id));
@@ -2219,7 +2219,7 @@ mod tests {
             )),
             "the decision screen must name the document: {displayed}"
         );
-        assert!(displayed.contains("[a] 승인"));
+        assert!(displayed.contains("[a] 확인"));
         assert!(displayed.contains("[c] 수정 요청"));
         assert!(displayed.contains("[d] 나중에"));
         assert!(displayed.contains("[q] 취소"));
@@ -2233,7 +2233,7 @@ mod tests {
     #[test]
     fn every_decision_key_is_understood_and_an_unknown_one_is_refused() {
         for (input, expected) in [
-            ("a\n", TtyReviewChoiceV2::Approve),
+            ("a\n", TtyReviewChoiceV2::Confirm),
             ("c\n", TtyReviewChoiceV2::RequestChanges),
             ("d\n", TtyReviewChoiceV2::Defer),
             ("q\n", TtyReviewChoiceV2::Cancel),
@@ -2427,7 +2427,7 @@ mod tests {
             )
             .unwrap()
             .state,
-            ReviewDerivedStateV2::Approved
+            ReviewDerivedStateV2::Confirmed
         );
         assert_eq!(
             derive_review_state_v2(
@@ -2437,7 +2437,7 @@ mod tests {
             )
             .unwrap()
             .state,
-            ReviewDerivedStateV2::Unreviewed
+            ReviewDerivedStateV2::Unconfirmed
         );
     }
 
@@ -2478,7 +2478,7 @@ mod tests {
             )
             .unwrap()
             .state,
-            ReviewDerivedStateV2::Unreviewed
+            ReviewDerivedStateV2::Unconfirmed
         );
         assert_eq!(
             derive_review_state_v2(
@@ -2488,7 +2488,7 @@ mod tests {
             )
             .unwrap()
             .state,
-            ReviewDerivedStateV2::Approved
+            ReviewDerivedStateV2::Confirmed
         );
     }
 
@@ -2680,14 +2680,14 @@ mod tests {
                 asset_id: format!("personal-asset-{}", "2".repeat(64)),
                 targets: vec![crate::queue_v2::ReviewCardTargetV2 {
                     snapshot: snapshot.clone(),
-                    state: ReviewCardTargetStateV2::Unreviewed,
+                    state: ReviewCardTargetStateV2::Unconfirmed,
                     domain_policy: domain_policy.clone(),
-                    previous_approved_revision: None,
+                    previous_confirmed_revision: None,
                     previous_reviewed_revision: None,
                     current_feedback: None,
                     addressed_feedback: None,
                     conflicting_review_head_ids: Vec::new(),
-                    effects: vec!["approve_current_revision_via_tty".into()],
+                    effects: vec!["confirm_current_revision_via_tty".into()],
                 }],
                 effect_digest: format!("sha256:{}", "3".repeat(64)),
                 card_digest: sha256_digest(&card_bytes),
@@ -2699,7 +2699,7 @@ mod tests {
             selected_effects: vec![SelectedTargetEffectV2 {
                 record_id: record_id.clone(),
                 displayed_revision: format!("sha256:{}", "c".repeat(64)),
-                effects: vec!["approve_current_revision_via_tty".into()],
+                effects: vec!["confirm_current_revision_via_tty".into()],
             }],
             domain_confirmations: domain_policy
                 .map(|domain_policy| DomainConfirmationV2 {

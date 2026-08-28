@@ -4,7 +4,7 @@
   "title": "Example paper",
   "current_revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "review_head_id": null,
-  "derived_state": "unreviewed",
+  "derived_state": "unconfirmed",
   "domain": "research",
   "tags": ["example", "paper"],
   "record_link": "sources/personal-source-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/current.yaml",

@@ -54,22 +54,22 @@ impl ProjectionRecordTypeV2 {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectionStateV2 {
-    Unreviewed,
+    Unconfirmed,
     Deferred,
     ChangesRequested,
-    RevisedUnreviewed,
-    Approved,
+    RevisedUnconfirmed,
+    Confirmed,
     Blocked,
 }
 
 impl ProjectionStateV2 {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Unreviewed => "unreviewed",
+            Self::Unconfirmed => "unconfirmed",
             Self::Deferred => "deferred",
             Self::ChangesRequested => "changes_requested",
-            Self::RevisedUnreviewed => "revised_unreviewed",
-            Self::Approved => "approved",
+            Self::RevisedUnconfirmed => "revised_unconfirmed",
+            Self::Confirmed => "confirmed",
             Self::Blocked => "blocked",
         }
     }
@@ -1099,8 +1099,57 @@ fn claim_projection_path(
 fn is_canonical_dashboard_path(value: &str) -> bool {
     matches!(
         value,
-        "HOME.md" | "views/review-queue.base" | "views/knowledge-library.base"
+        "HOME.md" | "views/unconfirmed.base" | "views/knowledge-library.base"
     )
+}
+
+/// Removes a superseded generated dashboard file and its manifest entry.
+///
+/// Used once by the Phase 0 migration (`migrate_v2`) to retire
+/// `views/review-queue.base` after `views/unconfirmed.base` replaces it as the
+/// canonical dashboard file. `relative` is therefore deliberately not required
+/// to satisfy `is_canonical_dashboard_path` — retiring a path is exactly what
+/// takes it out of the canonical set. A no-op when nothing was ever generated
+/// at that path.
+pub(crate) fn retire_generated_dashboard_file_locked_v2(
+    repository_root: &Path,
+    relative: &str,
+) -> Result<(), MkoError> {
+    let path = repository_root.join(relative);
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(MkoError::new("dashboard_read_failed", error.to_string())),
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
+            fs::remove_file(&path)
+                .map_err(|error| MkoError::new("dashboard_repair_failed", error.to_string()))?;
+        }
+        Ok(_) => {
+            return Err(MkoError::new(
+                "dashboard_destination_invalid",
+                "the retired dashboard path is not a non-symlink regular file",
+            ));
+        }
+    }
+    let manifest_path = repository_root.join(MANIFEST_PATH);
+    if matches!(
+        fs::symlink_metadata(&manifest_path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    ) {
+        return Ok(());
+    }
+    let (mut manifest, manifest_bytes) = read_manifest(repository_root)?;
+    if !manifest
+        .dashboard_files
+        .iter()
+        .any(|entry| entry.path == relative)
+    {
+        return Ok(());
+    }
+    manifest
+        .dashboard_files
+        .retain(|entry| entry.path != relative);
+    let _ = write_manifest(repository_root, &manifest_bytes, &manifest)?;
+    Ok(())
 }
 
 fn is_canonical_projection_path(value: &str) -> bool {

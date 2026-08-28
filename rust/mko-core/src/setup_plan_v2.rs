@@ -44,117 +44,14 @@ const MANAGED_DIRECTORIES: &[&str] = &[
     "recovery",
     "recovery/manual-edits",
 ];
-const GENERATED_FILES: &[(&str, &str)] = &[
-    (".mko/.gitignore", "runtime/\n"),
-    (
-        "HOME.md",
-        r#"---
-type: dashboard
-generated_by: my-knowledge-os
----
-
-# My Knowledge OS
-
-## 검토 대기
-
-![[views/review-queue.base]]
-
-## 승인된 지식
-
-![[views/knowledge-library.base]]
-
-터미널에서는 `mko queue`로 같은 검토 대기열을 확인할 수 있습니다.
-"#,
-    ),
-    (
-        "views/review-queue.base",
-        r#"filters:
-  and:
-    - file.inFolder("views/records")
-    - 'derived_state != "approved"'
-views:
-  - type: table
-    name: Review Queue
-    order:
-      - title
-      - record_type
-      - derived_state
-      - domain
-      - perspectives
-      - current_revision
-"#,
-    ),
-    (
-        "views/knowledge-library.base",
-        r#"filters:
-  and:
-    - file.inFolder("views/records")
-    - 'record_type == "knowledge"'
-    - 'derived_state == "approved"'
-properties:
-  perspectives:
-    displayName: 관점
-views:
-  - type: table
-    name: 전체 지식
-    order:
-      - title
-      - perspectives
-      - tags
-      - current_revision
-  - type: table
-    name: 생활
-    filters:
-      and:
-        - 'list(perspectives).contains("life")'
-    order:
-      - title
-      - perspectives
-      - tags
-      - current_revision
-  - type: table
-    name: 학습
-    filters:
-      and:
-        - 'list(perspectives).contains("learning")'
-    order:
-      - title
-      - perspectives
-      - tags
-      - current_revision
-  - type: table
-    name: 기술
-    filters:
-      and:
-        - 'list(perspectives).contains("technical")'
-    order:
-      - title
-      - perspectives
-      - tags
-      - current_revision
-  - type: table
-    name: 프로젝트
-    filters:
-      and:
-        - 'list(perspectives).contains("project")'
-    order:
-      - title
-      - perspectives
-      - tags
-      - current_revision
-  - type: table
-    name: 투자
-    filters:
-      and:
-        - 'list(perspectives).contains("investment")'
-    order:
-      - title
-      - perspectives
-      - tags
-      - current_revision
-"#,
-    ),
-];
+/// Setup's own extra scaffold entry, not dashboard content. The dashboard
+/// body itself (HOME.md and the generated views) has exactly one definition,
+/// in `dashboard_v2::GENERATED_FILES` — this used to carry a second,
+/// independently drifting copy (Phase 0 consolidated it).
+fn generated_files() -> impl Iterator<Item = (&'static str, &'static str)> {
+    std::iter::once((".mko/.gitignore", "runtime/\n"))
+        .chain(crate::dashboard_v2::GENERATED_FILES.iter().copied())
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -663,7 +560,7 @@ fn inspect_setup(
             "kb_config_invalid",
         )?,
     );
-    for (relative, _) in GENERATED_FILES {
+    for (relative, _) in generated_files() {
         observations.insert(
             format!("repository:{relative}"),
             observe_path(&repository_root.join(relative), "dashboard_drift")?,
@@ -767,7 +664,7 @@ fn repository_effect(repository_root: &Path) -> Result<SetupPlanEffectV2, MkoErr
 
 fn dashboard_effect(repository_root: &Path) -> Result<SetupPlanEffectV2, MkoError> {
     let mut missing = false;
-    for (relative, expected) in &GENERATED_FILES[1..] {
+    for (relative, expected) in crate::dashboard_v2::GENERATED_FILES {
         let path = repository_root.join(relative);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {

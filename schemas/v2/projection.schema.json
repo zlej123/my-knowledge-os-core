@@ -49,11 +49,11 @@
     },
     "derived_state": {
       "enum": [
-        "unreviewed",
+        "unconfirmed",
         "deferred",
         "changes_requested",
-        "revised_unreviewed",
-        "approved",
+        "revised_unconfirmed",
+        "confirmed",
         "blocked"
       ]
     },
