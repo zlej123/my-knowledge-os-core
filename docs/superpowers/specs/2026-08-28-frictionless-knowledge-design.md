@@ -247,8 +247,13 @@ below are new behavior.
 One registration contract for every form. The Core accepts:
 
 - **original bytes** — when an original file exists (image, docx, hwp,
-  md/txt); preserved as a sidecar next to the extracted text, exactly as PDF
-  bytes are preserved today;
+  md/txt); preserved as a sidecar next to the extracted text. Correction
+  (verified 2026-08-28): PDF originals today are *not* copied into the KB —
+  they are preserved by provider pointer (fingerprint + Google Drive Inbox
+  binding, revalidated per read). The Phase 3 sidecar is therefore the
+  first KB-embedded original-bytes store (content-addressed, e.g.
+  `assets/originals/`), following the web-snapshot storage shape rather
+  than the PDF pointer shape;
 - **agent-read text** — what the agent extracted: the paste itself, the file
   text, OCR output, a transcript, a conversion. This is the evidence the
   downstream pipeline (prepare → source → knowledge) consumes, unchanged,
@@ -305,7 +310,13 @@ version discipline. Each phase is its own plan and its own PR.
 
 Phase 3 opens with a feasibility check for hwp extraction on the owner's
 machines; if no honest extraction path exists, hwp alone is deferred and
-recorded in the backlog with the occurrence.
+recorded in the backlog with the occurrence. First check ran 2026-08-28 on
+the primary machine: no honest `.hwp` 5.x path exists (no pyhwp/LibreOffice/
+Hancom/pandoc installed; macOS built-ins cannot read HWP; real HWP 5.x files
+were confirmed present, so the occurrence is real). `.hwpx` is a ZIP of XML
+and likely agent-readable with no install, pending verification against a
+materialized file. Unless the owner chooses to install pyhwp (`hwp5txt`),
+Phase 3 defers `.hwp` to the backlog and keeps `.hwpx` as a candidate.
 
 ## 8. Risks
 
@@ -326,6 +337,14 @@ recorded in the backlog with the occurrence.
   model already covers content at this sensitivity, and query verbatims are
   the raw material for future search tuning. The log is treated with the
   same sensitivity as the KB.
+- **Binary sidecars collide with `mko check`'s byte budget.** `check`
+  hard-caps walked files at 2 MiB (32 MiB aggregate), which a normal
+  screenshot or docx exceeds — the first committed original would break
+  the shipped pre-commit hook. The Phase 3 plan must decide explicitly:
+  a per-form size ceiling for originals, and either a raised budget or a
+  scoped exemption (size/hash-verified, not text-scanned) for the
+  originals directory. This is a named plan decision, not an
+  implementation-time discovery.
 
 ## 9. Out of scope
 
