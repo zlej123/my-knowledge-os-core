@@ -484,7 +484,7 @@ pub(crate) fn validate_asset_record_v2(asset: &AssetRecordV2) -> Result<(), MkoE
                 && asset.provider.logical_locator.is_empty()
         }
         AssetOriginV2::LocalFile => {
-            asset.media_type == "text/plain"
+            crate::local_file_v2::is_known_local_file_media_type(&asset.media_type)
                 && asset.provider.provider_type == "local-file"
                 && validate_local_file_locator(&asset.provider.logical_locator)
         }

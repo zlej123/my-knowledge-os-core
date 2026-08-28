@@ -68,11 +68,16 @@ pub enum AssetOriginV2 {
     /// the same TEXT-fingerprint identity as `WebSnapshot`, because there is
     /// no original file and no address to return to (§6.1).
     PastedText,
-    /// A local Markdown/text file the owner already holds. Identified by the
-    /// **original bytes'** fingerprint (§6.1), unlike the other text-only
-    /// origins: the original is small text, so it is stored verbatim,
-    /// content-addressed, alongside the registry record (Phase 2's minimal
-    /// text-originals store; Phase 3 extends it to binaries).
+    /// A local file the owner already holds: Markdown/text (Phase 2), or an
+    /// image or docx/hwpx document (Phase 3). Identified by the **original
+    /// bytes'** fingerprint (§6.1) regardless of form. `media_type`
+    /// discriminates text from image from document — deliberately not a
+    /// separate `AssetOriginV2` variant per form (Phase 3, decided): every
+    /// form's extension, signature, and size rule lives in one small table
+    /// (`local_file_v2`) rather than a new origin variant threaded through
+    /// every match site. The original is stored verbatim, content-addressed,
+    /// in `assets/originals/` (Phase 2's text-originals store, extended to
+    /// bounded binaries in Phase 3).
     LocalFile,
     /// Text captured from a conversation — e.g. store-on-miss (§6.3).
     /// TEXT-fingerprint identity, exactly like `WebSnapshot`.

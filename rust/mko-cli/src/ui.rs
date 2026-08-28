@@ -712,6 +712,7 @@ fn search_projection(repository: &Path, query: &str) -> Result<Vec<SearchResult>
         None,
         None,
         None,
+        None,
     )?
     .into_iter()
     .map(|item| SearchResult {

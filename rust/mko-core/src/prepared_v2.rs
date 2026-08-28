@@ -312,27 +312,52 @@ fn prepare_snapshot_inner(
     persist_prepared_session_v2(repository_root, bundle, clock, "v2 snapshot prepare")
 }
 
-/// Prepares a local Markdown/text file's original bytes for drafting (§6.1).
+/// Prepares a local file's original bytes for drafting (§6.1, §6.2).
 ///
 /// Unlike the PDF path, there is no provider file to re-inspect: the original
-/// bytes are already in the knowledge base's text-originals store, and the
-/// integrity check is the same shape as a snapshot's — the stored original
-/// must still hash to the identity it was registered under.
+/// is already in the knowledge base's originals store.
+///
+/// - **Text-kind Assets** (unchanged from Phase 2): the integrity check is
+///   the same shape as a snapshot's — the stored original must still hash to
+///   the identity it was registered under — and that text is what the
+///   prepared bundle is built from. `extracted_text` must be `None`: the
+///   original already *is* the text, and accepting a second, different text
+///   here would silently discard whichever one the caller thought was in
+///   effect.
+/// - **Image/document-kind Assets** (Phase 3): the Core never parses these
+///   formats (D2), so there is no text to derive from the original. The
+///   caller supplies the agent-read text (OCR output, a converted document
+///   body) directly — required, and it is what the prepared bundle is built
+///   from. The original is still re-verified against its own identity, so a
+///   damaged or tampered original is caught even though its bytes never
+///   become bundle content. Calling this again with different supplied text
+///   is how re-extraction (a better OCR pass) works: same immutable Asset, a
+///   new prepared bundle, and — once written — a new Source/Knowledge
+///   revision, never a duplicate Asset.
 pub fn prepare_local_file_asset_v2(
     repository_root: &Path,
     asset_id: &str,
+    extracted_text: Option<&str>,
     metadata: PreparedMetadataV2,
 ) -> Result<PreparedPdfResultV2, MkoError> {
-    prepare_local_file_asset_v2_with_clock(repository_root, asset_id, metadata, &SystemClock)
+    prepare_local_file_asset_v2_with_clock(
+        repository_root,
+        asset_id,
+        extracted_text,
+        metadata,
+        &SystemClock,
+    )
 }
 
 pub fn prepare_local_file_asset_v2_with_clock(
     repository_root: &Path,
     asset_id: &str,
+    extracted_text: Option<&str>,
     metadata: PreparedMetadataV2,
     clock: &dyn Clock,
 ) -> Result<PreparedPdfResultV2, MkoError> {
-    let outcome = prepare_local_file_inner(repository_root, asset_id, metadata, clock);
+    let outcome =
+        prepare_local_file_inner(repository_root, asset_id, extracted_text, metadata, clock);
     // Same observation the PDF and snapshot paths record, for the same
     // reason: a failure that is reported once and discarded leaves material
     // registered, stalled, and unexplained.
@@ -352,6 +377,7 @@ pub fn prepare_local_file_asset_v2_with_clock(
 fn prepare_local_file_inner(
     repository_root: &Path,
     asset_id: &str,
+    extracted_text: Option<&str>,
     metadata: PreparedMetadataV2,
     clock: &dyn Clock,
 ) -> Result<PreparedPdfResultV2, MkoError> {
@@ -369,13 +395,53 @@ fn prepare_local_file_inner(
             "this Asset is not a local file",
         ));
     }
-    let text = read_original_text_v2(repository_root, &asset)?;
-    if sha256_digest(text.as_bytes()) != asset.fingerprint {
-        return Err(MkoError::new(
-            "registered_asset_changed",
-            "the stored original no longer matches the identity it was registered under",
-        ));
-    }
+    let kind = crate::local_file_v2::local_file_media_kind(&asset.media_type).ok_or_else(|| {
+        MkoError::new(
+            "asset_binding_invalid",
+            "this Asset's media type is not a recognized local-file form",
+        )
+    })?;
+    let text = match kind {
+        crate::local_file_v2::LocalFileMediaKindV2::Text => {
+            if extracted_text.is_some() {
+                return Err(MkoError::new(
+                    "local_file_extracted_text_not_applicable",
+                    "a text local file's original is already its evidence; do not supply separate extracted text",
+                ));
+            }
+            let text = read_original_text_v2(repository_root, &asset)?;
+            if sha256_digest(text.as_bytes()) != asset.fingerprint {
+                return Err(MkoError::new(
+                    "registered_asset_changed",
+                    "the stored original no longer matches the identity it was registered under",
+                ));
+            }
+            text
+        }
+        crate::local_file_v2::LocalFileMediaKindV2::Image
+        | crate::local_file_v2::LocalFileMediaKindV2::Document => {
+            let supplied = extracted_text.ok_or_else(|| {
+                MkoError::new(
+                    "local_file_extracted_text_required",
+                    "this Asset's original carries no text of its own; supply the agent-read text (OCR output or a converted document body)",
+                )
+            })?;
+            if supplied.trim().is_empty() {
+                return Err(MkoError::new(
+                    "local_file_extracted_text_empty",
+                    "supplied extracted text has no readable content",
+                ));
+            }
+            let original = crate::local_file_v2::read_original_bytes_v2(repository_root, &asset)?;
+            if sha256_digest(&original) != asset.fingerprint {
+                return Err(MkoError::new(
+                    "registered_asset_changed",
+                    "the stored original no longer matches the identity it was registered under",
+                ));
+            }
+            supplied.to_owned()
+        }
+    };
 
     let bundle = build_pdf_prepared_content_v2(&asset, std::slice::from_ref(&text), metadata)?;
     persist_prepared_session_v2(repository_root, bundle, clock, "v2 local-file prepare")
@@ -620,10 +686,16 @@ fn validate_asset(asset: &AssetRecordV2) -> Result<(), MkoError> {
     // that the identity is derived from the fingerprint of what was stored.
     let media_type_ok = match asset.origin {
         AssetOriginV2::ProviderPdf => asset.media_type == "application/pdf",
-        AssetOriginV2::WebSnapshot
-        | AssetOriginV2::PastedText
-        | AssetOriginV2::LocalFile
-        | AssetOriginV2::Conversation => asset.media_type == "text/plain",
+        AssetOriginV2::WebSnapshot | AssetOriginV2::PastedText | AssetOriginV2::Conversation => {
+            asset.media_type == "text/plain"
+        }
+        // The agent-read text a LocalFile prepare call builds a bundle from
+        // is text/plain evidence regardless of which local-file media type
+        // produced it (§6.2) — what varies per media type is the *original*,
+        // not the shape of what gets prepared from it.
+        AssetOriginV2::LocalFile => {
+            crate::local_file_v2::is_known_local_file_media_type(&asset.media_type)
+        }
     };
     if asset.schema_version != 2
         || !media_type_ok

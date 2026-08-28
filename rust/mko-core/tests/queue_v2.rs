@@ -164,6 +164,7 @@ fn search_confirmed_only_filter_excludes_unconfirmed() {
             None,
             None,
             None,
+            None,
         )
         .unwrap()
         .is_empty()
@@ -174,6 +175,7 @@ fn search_confirmed_only_filter_excludes_unconfirmed() {
             "reported",
             None,
             SearchConfirmationFilterV2::UnconfirmedOnly,
+            None,
             None,
             None,
             None,
@@ -244,6 +246,7 @@ fn search_matches_source_records() {
             None,
             None,
             None,
+            None,
         )
         .unwrap()
         .is_empty()
@@ -263,6 +266,7 @@ fn search_tag_and_layer_filters_narrow_results() {
         Some("example"),
         None,
         None,
+        None,
     )
     .unwrap();
     assert_eq!(by_tag.len(), 1);
@@ -274,6 +278,7 @@ fn search_tag_and_layer_filters_narrow_results() {
             None,
             SearchConfirmationFilterV2::Any,
             Some("nonexistent-tag"),
+            None,
             None,
             None,
         )
@@ -288,6 +293,7 @@ fn search_tag_and_layer_filters_narrow_results() {
         SearchConfirmationFilterV2::Any,
         None,
         Some(SearchLayerV2::CounterargumentOrUncertainty),
+        None,
         None,
     )
     .unwrap();
@@ -350,6 +356,7 @@ fn confirmed_perspective_is_searchable_and_resurfacing_prioritizes_open_question
             None,
             None,
             None,
+            None,
         )
         .unwrap()
         .len(),
@@ -361,6 +368,7 @@ fn confirmed_perspective_is_searchable_and_resurfacing_prioritizes_open_question
             "reported",
             Some(PerspectiveV2::Investment),
             SearchConfirmationFilterV2::Any,
+            None,
             None,
             None,
             None,

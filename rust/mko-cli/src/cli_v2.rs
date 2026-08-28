@@ -180,6 +180,7 @@ pub fn prepare_source_json_v2(
     provider: &Path,
     asset_id: &str,
     confirm_download: bool,
+    extracted_text: Option<&str>,
     worker_executable: &Path,
 ) -> Result<(), MkoError> {
     // Every non-PDF origin has no provider file to inspect, fingerprint, or
@@ -194,13 +195,24 @@ pub fn prepare_source_json_v2(
         authors: Vec::new(),
         created_at: None,
     };
-    match read_asset_v2(repository, asset_id)?.origin {
+    let origin = read_asset_v2(repository, asset_id)?.origin;
+    // `--extracted-text` applies only to an image/document local file (Phase
+    // 3); every other origin already has its text in the knowledge base.
+    // Reject it early, before routing, rather than silently ignoring it.
+    if extracted_text.is_some() && !matches!(origin, AssetOriginV2::LocalFile) {
+        return Err(MkoError::new(
+            "local_file_extracted_text_not_applicable",
+            "--extracted-text applies only to an image or document local file",
+        ));
+    }
+    match origin {
         AssetOriginV2::WebSnapshot | AssetOriginV2::PastedText | AssetOriginV2::Conversation => {
             let result = prepare_snapshot_asset_v2(repository, asset_id, metadata)?;
             emit_prepared_session_v2(result)
         }
         AssetOriginV2::LocalFile => {
-            let result = prepare_local_file_asset_v2(repository, asset_id, metadata)?;
+            let result =
+                prepare_local_file_asset_v2(repository, asset_id, extracted_text, metadata)?;
             emit_prepared_session_v2(result)
         }
         AssetOriginV2::ProviderPdf => {

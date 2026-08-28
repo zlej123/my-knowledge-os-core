@@ -63,8 +63,9 @@ use mko_core::{
     question_v2::{QuestionRecordV2, append_question_v2, questions_for_asset_v2},
     queue_v2::{
         ConfirmationLabelV2, ResurfacedKnowledgeStateV2, SearchConfirmationFilterV2, SearchLayerV2,
-        SearchMatchV2, SearchRecordTypeV2, list_topics_v2, resurface_knowledge_by_perspective_v2,
-        search_records_by_perspective_v2, summarize_home_queue_v2,
+        SearchMatchV2, SearchOriginFormV2, SearchRecordTypeV2, list_topics_v2,
+        resurface_knowledge_by_perspective_v2, search_records_by_perspective_v2,
+        summarize_home_queue_v2,
     },
     quick_note_v2::{
         QuickNotePublicationOutcomeV2, QuickNoteV2, prepare_quick_note_v2, publish_quick_note_v2,
@@ -408,10 +409,43 @@ struct FindArgs {
     /// matches `투자>반도체`). Arrives with `topics` in Phase 2 (§6.3).
     #[arg(long)]
     topic: Option<String>,
+    /// Matches a record by its input form: `pasted-text | local-file | image
+    /// | document | video | web | conversation` (§6). A display/filter
+    /// vocabulary derived from the Asset's origin and media type, not the
+    /// Core's internal origin enum. `video` is accepted but matches nothing
+    /// until Phase 4. Arrives with the forms it filters in Phase 3.
+    #[arg(long, value_enum)]
+    origin: Option<FindOriginArg>,
     #[arg(long)]
     repo: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     format: OutputFormat,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum FindOriginArg {
+    PastedText,
+    LocalFile,
+    Image,
+    Document,
+    Video,
+    Web,
+    Conversation,
+}
+
+impl From<FindOriginArg> for SearchOriginFormV2 {
+    fn from(value: FindOriginArg) -> Self {
+        match value {
+            FindOriginArg::PastedText => Self::PastedText,
+            FindOriginArg::LocalFile => Self::LocalFile,
+            FindOriginArg::Image => Self::Image,
+            FindOriginArg::Document => Self::Document,
+            FindOriginArg::Video => Self::Video,
+            FindOriginArg::Web => Self::Web,
+            FindOriginArg::Conversation => Self::Conversation,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -646,10 +680,15 @@ struct AddArgs {
     /// (§6, Phase 2).
     #[arg(long, conflicts_with_all = ["inbox", "snapshot", "local_file", "conversation"])]
     paste: Option<PathBuf>,
-    /// Absolute path to a local Markdown/text file the owner already holds.
-    /// Unlike `--paste`/`--snapshot`/`--conversation`, this names the
-    /// material itself — Core reads and stores its original bytes directly,
-    /// content-addressed (§6.1); no separate runtime text file is written.
+    /// Absolute path to a local file the owner already holds: Markdown/text
+    /// (`.md`/`.markdown`/`.txt`), an image (`.png`/`.jpg`/`.jpeg`/`.webp`/
+    /// `.heic`), or a document (`.docx`/`.hwpx` — `.hwp` is not supported,
+    /// see `docs/BACKLOG.md`). Unlike `--paste`/`--snapshot`/`--conversation`,
+    /// this names the material itself — Core reads and stores its original
+    /// bytes directly, content-addressed (§6.1); no separate runtime text
+    /// file is written for the original. An image or document's evidence
+    /// text is supplied separately, at the prepare step (§6.2, `mko source
+    /// prepare --extracted-text`).
     #[arg(long, conflicts_with_all = ["inbox", "snapshot", "paste", "conversation"])]
     local_file: Option<PathBuf>,
     /// Path to a file holding conversation content captured on a recall miss
@@ -932,6 +971,14 @@ struct PrepareArgs {
     confirm_download: bool,
     #[arg(long)]
     clear_stale_lock: bool,
+    /// Path to a file holding the agent-read text for an image or document
+    /// local file (OCR output, a converted document body) — Phase 3, §6.2.
+    /// Text arrives in a file, not an argument, matching every other
+    /// evidence-bearing flag in this CLI. Applies only when the Asset is a
+    /// LocalFile whose original carries no text of its own; every other
+    /// Asset's text is already in the knowledge base.
+    #[arg(long)]
+    extracted_text: Option<PathBuf>,
     #[arg(long, value_enum)]
     format: Option<OutputFormat>,
 }
@@ -1117,6 +1164,7 @@ fn home() -> Result<(), MkoError> {
                 tag: None,
                 layer: None,
                 topic: None,
+                origin: None,
                 repo: Some(context.repository_root),
                 format: OutputFormat::Human,
             })
@@ -1317,6 +1365,7 @@ fn find(arguments: FindArgs) -> Result<(), MkoError> {
                 || arguments.tag.is_some()
                 || arguments.layer.is_some()
                 || arguments.topic.is_some()
+                || arguments.origin.is_some()
             {
                 return Err(MkoError::new(
                     "perspective_v3_required",
@@ -1355,6 +1404,7 @@ fn find(arguments: FindArgs) -> Result<(), MkoError> {
                 SearchConfirmationFilterV2::Any
             };
             let layer = arguments.layer.map(SearchLayerV2::from);
+            let origin = arguments.origin.map(SearchOriginFormV2::from);
             let matches = search_records_by_perspective_v2(
                 &repository,
                 &arguments.term,
@@ -1363,6 +1413,7 @@ fn find(arguments: FindArgs) -> Result<(), MkoError> {
                 arguments.tag.as_deref(),
                 layer,
                 arguments.topic.as_deref(),
+                origin,
             )?;
             let notes = if perspective.is_none() {
                 search_quick_notes_v2(&repository, &arguments.term)?
@@ -2261,10 +2312,12 @@ fn add_conversation_v2(
     emit_text_evidence_add_result_v2(arguments, result)
 }
 
-/// Registers a local Markdown/text file the owner already holds. Unlike
+/// Registers a local file the owner already holds — text, an image, or a
+/// document (Phase 3, §6.1); `local_file_v2::register_local_file_asset_v2`
+/// discriminates the form by extension. Unlike
 /// `--paste`/`--snapshot`/`--conversation`, `local_file` names the material
-/// itself: Core reads and stores its original bytes directly (§6.1), with no
-/// separate runtime text file to write first.
+/// itself: Core reads and stores its original bytes directly, with no
+/// separate runtime text file to write first for the original.
 fn add_local_file_v2(
     arguments: &AddArgs,
     local_file: &Path,
@@ -2362,16 +2415,37 @@ fn provider_logical_locator(provider_root: &Path, file: &Path) -> Result<String,
     Ok(components.join("/"))
 }
 
+/// Reads the agent-read text for an image or document local file
+/// (`--extracted-text`) from a file, never a command-line argument — the
+/// same file-not-argument discipline `--paste`/`--snapshot`/`--conversation`
+/// already follow, and for the same reason.
+fn read_extracted_text_file_v2(path: &Path) -> Result<String, MkoError> {
+    std::fs::read_to_string(path)
+        .map_err(|error| MkoError::new("extracted_text_unreadable", error.to_string()))
+}
+
 fn prepare(arguments: PrepareArgs) -> Result<(), MkoError> {
     if arguments.format == Some(OutputFormat::JsonV2) {
         let context = resolve_context(arguments.repo.clone())?;
+        let extracted_text = arguments
+            .extracted_text
+            .as_deref()
+            .map(read_extracted_text_file_v2)
+            .transpose()?;
         return crate::cli_v2::prepare_source_json_v2(
             &context.repository_root,
             &context.provider_root,
             &arguments.asset_id,
             arguments.confirm_download,
+            extracted_text.as_deref(),
             &worker_executable()?,
         );
+    }
+    if arguments.extracted_text.is_some() {
+        return Err(MkoError::new(
+            "format_unsupported",
+            "--extracted-text requires --format json-v2",
+        ));
     }
     if !format_is_json_v1(arguments.format) {
         return prepare_legacy(arguments);

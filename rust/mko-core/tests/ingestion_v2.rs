@@ -8,9 +8,11 @@ use std::fs;
 
 use chrono::{DateTime, Utc};
 use mko_core::{
+    asset_v2::AssetRegistrationOutcomeV2,
     clock::{Clock, SystemClock},
     local_file_v2::{
-        RegisterLocalFileRequestV2, read_original_text_v2, register_local_file_asset_v2,
+        DOCX_MEDIA_TYPE, MAX_LOCAL_IMAGE_BYTES, RegisterLocalFileRequestV2, read_original_bytes_v2,
+        read_original_text_v2, register_local_file_asset_v2,
     },
     model_v2::{
         ConfidenceV2, EvidenceRefV2, KnowledgeBasisV2, KnowledgeRecommendationOutcomeV2,
@@ -19,22 +21,45 @@ use mko_core::{
     },
     prepared_v2::{prepare_local_file_asset_v2, prepare_snapshot_asset_v2},
     queue_v2::{
-        SearchConfirmationFilterV2, derive_queue_v2, list_topics_v2,
+        SearchConfirmationFilterV2, SearchOriginFormV2, derive_queue_v2, list_topics_v2,
         search_records_by_perspective_v2,
     },
     records_v2::{
-        AssetRecordV2, WriteKnowledgeRecordRequestV2, WriteSourceRecordRequestV2,
+        AssetOriginV2, AssetRecordV2, WriteKnowledgeRecordRequestV2, WriteSourceRecordRequestV2,
         knowledge_record_id_v2, read_current_knowledge_revision_v2, write_knowledge_record_v2,
         write_source_record_v2,
     },
     revision_v2::{canonical_json_bytes, sha256_digest},
     scaffold_v2::scaffold_personal_kb_v2,
     snapshot_v2::{
-        RegisterConversationRequestV2, RegisterPastedTextRequestV2, register_conversation_v2,
-        register_pasted_text_v2,
+        RegisterConversationRequestV2, RegisterPastedTextRequestV2, RegisterSnapshotRequestV2,
+        register_conversation_v2, register_pasted_text_v2, register_web_snapshot_v2,
     },
 };
 use tempfile::tempdir;
+
+/// A verified minimal valid 1x1 PNG (68 bytes): real magic bytes, a real
+/// zlib-compressed `IDAT` chunk, a real `IEND` — small enough to embed as a
+/// literal.
+fn tiny_png_bytes() -> Vec<u8> {
+    vec![
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00, 0x00, 0xb5,
+        0x1c, 0x0c, 0x02, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x64,
+        0xf8, 0x0f, 0x00, 0x01, 0x05, 0x01, 0x01, 0x27, 0x18, 0xe3, 0x66, 0x00, 0x00, 0x00, 0x00,
+        0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ]
+}
+
+/// Real zip local-file-header magic bytes (`PK\x03\x04`), which is all this
+/// Core version's docx/hwpx signature check requires (§8.2/D2: the Core does
+/// not parse the format, only validates the signature its extension
+/// claims).
+fn fake_docx_bytes() -> Vec<u8> {
+    let mut bytes = b"PK\x03\x04".to_vec();
+    bytes.extend(vec![0_u8; 32]);
+    bytes
+}
 
 #[derive(Clone, Copy)]
 struct FixedClock(DateTime<Utc>);
@@ -171,9 +196,9 @@ fn local_file_registered_twice_is_idempotent_and_prepares_the_same_bundle() {
     assert_eq!(second.asset.id, first.asset.id);
 
     let prepared_once =
-        prepare_local_file_asset_v2(root.path(), &first.asset.id, no_metadata()).unwrap();
+        prepare_local_file_asset_v2(root.path(), &first.asset.id, None, no_metadata()).unwrap();
     let prepared_twice =
-        prepare_local_file_asset_v2(root.path(), &first.asset.id, no_metadata()).unwrap();
+        prepare_local_file_asset_v2(root.path(), &first.asset.id, None, no_metadata()).unwrap();
     assert_eq!(prepared_once.bundle, prepared_twice.bundle);
     assert_eq!(prepared_once.bundle.media_type, "text/plain");
     assert_eq!(prepared_once.bundle.asset_id, first.asset.id);
@@ -282,6 +307,22 @@ fn source_response(topics: Vec<String>) -> SourceResponseV2 {
             reasons: Vec::new(),
         },
         topics,
+    }
+}
+
+/// Like `source_response`, but with one grounded key claim — for a test that
+/// wants a real evidence-bearing Source write, not an empty-claims one.
+fn source_response_with_claim(
+    claim_text: &str,
+    evidence: EvidenceRefV2,
+    topics: Vec<String>,
+) -> SourceResponseV2 {
+    SourceResponseV2 {
+        key_claims: vec![mko_core::model_v2::SourceClaimV2 {
+            text: claim_text.into(),
+            evidence_refs: vec![evidence],
+        }],
+        ..source_response(topics)
     }
 }
 
@@ -492,6 +533,7 @@ fn topic_filter_matches_case_insensitively_and_by_hierarchical_prefix() {
         None,
         None,
         Some("투자>반도체"),
+        None,
     )
     .unwrap();
     assert_eq!(exact.len(), 1);
@@ -505,6 +547,7 @@ fn topic_filter_matches_case_insensitively_and_by_hierarchical_prefix() {
         None,
         None,
         Some("투자"),
+        None,
     )
     .unwrap();
     assert_eq!(prefix.len(), 1);
@@ -519,6 +562,7 @@ fn topic_filter_matches_case_insensitively_and_by_hierarchical_prefix() {
         None,
         None,
         Some("개발"),
+        None,
     )
     .unwrap();
     assert!(no_match.is_empty());
@@ -605,7 +649,512 @@ fn a_revision_written_before_topics_existed_still_round_trips_and_scans() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
     assert_eq!(matches.len(), 1);
+}
+
+// Phase 3 (§6.1, §6.2): binary local-file originals — images and
+// docx/hwpx documents — extend the same store text local files already use,
+// with per-form signature validation and size ceilings.
+
+#[test]
+fn image_local_file_is_signature_validated_and_round_trips_through_the_originals_store() {
+    let root = tempdir().unwrap();
+    scaffold_personal_kb_v2(root.path()).unwrap();
+    let source_files = tempdir().unwrap();
+    let path = source_files.path().join("screenshot.png");
+    let png = tiny_png_bytes();
+    fs::write(&path, &png).unwrap();
+
+    let registered = register_local_file_asset_v2(RegisterLocalFileRequestV2 {
+        repository_root: root.path(),
+        path: &path,
+        title: "A screenshot",
+        modified_at: Utc::now(),
+    })
+    .unwrap();
+    assert_eq!(registered.asset.origin, AssetOriginV2::LocalFile);
+    assert_eq!(registered.asset.media_type, "image/png");
+    assert_eq!(registered.asset.fingerprint, sha256_digest(&png));
+
+    let hash = registered
+        .asset
+        .fingerprint
+        .strip_prefix("sha256:")
+        .unwrap();
+    let stored = fs::read(
+        root.path()
+            .join("assets/originals")
+            .join(format!("{hash}.png")),
+    )
+    .unwrap();
+    assert_eq!(stored, png);
+    assert_eq!(
+        read_original_bytes_v2(root.path(), &registered.asset).unwrap(),
+        png
+    );
+    // Text-only reading refuses a binary original rather than guessing.
+    assert_eq!(
+        read_original_text_v2(root.path(), &registered.asset)
+            .unwrap_err()
+            .code(),
+        "local_file_not_text"
+    );
+}
+
+#[test]
+fn a_docx_local_file_is_signature_validated_by_its_zip_header() {
+    let root = tempdir().unwrap();
+    scaffold_personal_kb_v2(root.path()).unwrap();
+    let source_files = tempdir().unwrap();
+    let path = source_files.path().join("report.docx");
+    let docx = fake_docx_bytes();
+    fs::write(&path, &docx).unwrap();
+
+    let registered = register_local_file_asset_v2(RegisterLocalFileRequestV2 {
+        repository_root: root.path(),
+        path: &path,
+        title: "",
+        modified_at: Utc::now(),
+    })
+    .unwrap();
+    assert_eq!(registered.asset.media_type, DOCX_MEDIA_TYPE);
+    assert_eq!(
+        read_original_bytes_v2(root.path(), &registered.asset).unwrap(),
+        docx
+    );
+}
+
+#[test]
+fn an_image_whose_bytes_do_not_match_its_extension_is_rejected() {
+    let root = tempdir().unwrap();
+    scaffold_personal_kb_v2(root.path()).unwrap();
+    let source_files = tempdir().unwrap();
+    let path = source_files.path().join("not-really.png");
+    fs::write(&path, b"definitely not a PNG").unwrap();
+
+    let error = register_local_file_asset_v2(RegisterLocalFileRequestV2 {
+        repository_root: root.path(),
+        path: &path,
+        title: "",
+        modified_at: Utc::now(),
+    })
+    .unwrap_err();
+    assert_eq!(error.code(), "local_file_signature_invalid");
+    assert!(
+        fs::read_dir(root.path().join("assets/originals"))
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+            == 0
+    );
+}
+
+#[test]
+fn an_image_past_its_size_ceiling_is_rejected_before_it_reaches_the_originals_store() {
+    let root = tempdir().unwrap();
+    scaffold_personal_kb_v2(root.path()).unwrap();
+    let source_files = tempdir().unwrap();
+    let path = source_files.path().join("oversized.png");
+    // Valid PNG signature, then padded well past the image ceiling — the
+    // ceiling must be enforced before the (nonexistent, here) rest of the
+    // image would even be parsed.
+    let mut oversized = tiny_png_bytes();
+    oversized.resize((MAX_LOCAL_IMAGE_BYTES + 1) as usize, 0);
+    fs::write(&path, &oversized).unwrap();
+
+    let error = register_local_file_asset_v2(RegisterLocalFileRequestV2 {
+        repository_root: root.path(),
+        path: &path,
+        title: "",
+        modified_at: Utc::now(),
+    })
+    .unwrap_err();
+    assert_eq!(error.code(), "local_file_invalid");
+    assert!(
+        fs::read_dir(root.path().join("assets/originals")).is_err()
+            || fs::read_dir(root.path().join("assets/originals"))
+                .unwrap()
+                .count()
+                == 0
+    );
+}
+
+#[test]
+fn prepare_requires_supplied_text_for_an_image_and_refuses_it_for_a_text_local_file() {
+    let root = tempdir().unwrap();
+    scaffold_personal_kb_v2(root.path()).unwrap();
+    let source_files = tempdir().unwrap();
+
+    let image_path = source_files.path().join("screenshot.png");
+    fs::write(&image_path, tiny_png_bytes()).unwrap();
+    let image = register_local_file_asset_v2(RegisterLocalFileRequestV2 {
+        repository_root: root.path(),
+        path: &image_path,
+        title: "",
+        modified_at: Utc::now(),
+    })
+    .unwrap();
+
+    let missing =
+        prepare_local_file_asset_v2(root.path(), &image.asset.id, None, no_metadata()).unwrap_err();
+    assert_eq!(missing.code(), "local_file_extracted_text_required");
+
+    let empty = prepare_local_file_asset_v2(
+        root.path(),
+        &image.asset.id,
+        Some("   \n\t  "),
+        no_metadata(),
+    )
+    .unwrap_err();
+    assert_eq!(empty.code(), "local_file_extracted_text_empty");
+
+    let prepared = prepare_local_file_asset_v2(
+        root.path(),
+        &image.asset.id,
+        Some("OCR: quarterly revenue up 12%."),
+        no_metadata(),
+    )
+    .unwrap();
+    assert_eq!(prepared.bundle.media_type, "image/png");
+    assert_eq!(
+        prepared.bundle.content_blocks[0].clone(),
+        mko_core::model_v2::ContentBlockV2::Text {
+            id: "block-000001".into(),
+            locator: "page:1;chunk:1;granularity:coarse".into(),
+            text: "OCR: quarterly revenue up 12%.".into(),
+        }
+    );
+
+    let text_path = source_files.path().join("note.md");
+    fs::write(&text_path, "# A note\n\nSomething written down.\n").unwrap();
+    let text_asset = register_local_file_asset_v2(RegisterLocalFileRequestV2 {
+        repository_root: root.path(),
+        path: &text_path,
+        title: "",
+        modified_at: Utc::now(),
+    })
+    .unwrap();
+    let rejected = prepare_local_file_asset_v2(
+        root.path(),
+        &text_asset.asset.id,
+        Some("this should not be accepted"),
+        no_metadata(),
+    )
+    .unwrap_err();
+    assert_eq!(rejected.code(), "local_file_extracted_text_not_applicable");
+}
+
+/// §6.1: re-extraction (a better OCR pass) is a new Source revision of the
+/// same immutable Asset, never a duplicate Asset — verifying and extending
+/// Phase 2's re-registration behavior for the binary case.
+#[test]
+fn re_extraction_with_different_supplied_text_replaces_the_source_revision_of_the_same_asset() {
+    let root = tempdir().unwrap();
+    scaffold_personal_kb_v2(root.path()).unwrap();
+    let source_files = tempdir().unwrap();
+    let path = source_files.path().join("screenshot.png");
+    fs::write(&path, tiny_png_bytes()).unwrap();
+
+    let first_registration = register_local_file_asset_v2(RegisterLocalFileRequestV2 {
+        repository_root: root.path(),
+        path: &path,
+        title: "",
+        modified_at: Utc::now(),
+    })
+    .unwrap();
+    // Re-registering the same bytes is the same Asset, not a duplicate.
+    let second_registration = register_local_file_asset_v2(RegisterLocalFileRequestV2 {
+        repository_root: root.path(),
+        path: &path,
+        title: "",
+        modified_at: Utc::now(),
+    })
+    .unwrap();
+    assert_eq!(
+        second_registration.outcome,
+        AssetRegistrationOutcomeV2::Existing
+    );
+    assert_eq!(second_registration.asset.id, first_registration.asset.id);
+    let asset = first_registration.asset;
+
+    let first_prepared = prepare_local_file_asset_v2(
+        root.path(),
+        &asset.id,
+        Some("First-pass OCR, low quality."),
+        no_metadata(),
+    )
+    .unwrap();
+    let first_evidence = evidence_ref_for(&first_prepared.bundle);
+    let first_write = write_source_record_v2(
+        WriteSourceRecordRequestV2 {
+            repository_root: root.path(),
+            asset: &asset,
+            bundle: &first_prepared.bundle,
+            response: &source_response_with_claim(
+                "First-pass OCR, low quality.",
+                first_evidence,
+                Vec::new(),
+            ),
+            expected_revision: None,
+        },
+        &clock("2026-08-28T00:00:00Z"),
+    )
+    .unwrap();
+
+    // A better OCR pass: same Asset, a new prepared bundle bound to the new
+    // text, and a Source write that replaces the prior revision.
+    let second_prepared = prepare_local_file_asset_v2(
+        root.path(),
+        &asset.id,
+        Some("Second-pass OCR: quarterly revenue up 12%."),
+        no_metadata(),
+    )
+    .unwrap();
+    assert_ne!(
+        second_prepared.bundle.bundle_id,
+        first_prepared.bundle.bundle_id
+    );
+    let second_evidence = evidence_ref_for(&second_prepared.bundle);
+    let second_write = write_source_record_v2(
+        WriteSourceRecordRequestV2 {
+            repository_root: root.path(),
+            asset: &asset,
+            bundle: &second_prepared.bundle,
+            response: &source_response_with_claim(
+                "Second-pass OCR: quarterly revenue up 12%.",
+                second_evidence,
+                Vec::new(),
+            ),
+            expected_revision: Some(&first_write.revision),
+        },
+        &clock("2026-08-28T01:00:00Z"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        second_write.outcome,
+        mko_core::records_v2::RecordWriteOutcomeV2::Replaced
+    );
+    assert_eq!(second_write.record_id, first_write.record_id);
+    assert_ne!(second_write.revision, first_write.revision);
+}
+
+#[test]
+fn origin_filter_maps_display_forms_to_asset_origin_and_media_type() {
+    let root = tempdir().unwrap();
+    scaffold_personal_kb_v2(root.path()).unwrap();
+    let source_files = tempdir().unwrap();
+
+    let paste = register_pasted_text_v2(RegisterPastedTextRequestV2 {
+        repository_root: root.path(),
+        title: "paste",
+        text: "pasted evidence text",
+        captured_at: Utc::now(),
+    })
+    .unwrap();
+    let web = register_web_snapshot_v2(RegisterSnapshotRequestV2 {
+        repository_root: root.path(),
+        url: "https://example.com/page",
+        title: "web",
+        text: "web evidence text",
+        fetched_at: Utc::now(),
+    })
+    .unwrap();
+    let conversation = register_conversation_v2(RegisterConversationRequestV2 {
+        repository_root: root.path(),
+        title: "conversation",
+        text: "conversation evidence text",
+        captured_at: Utc::now(),
+    })
+    .unwrap();
+    let text_path = source_files.path().join("note.md");
+    fs::write(&text_path, "local file evidence text").unwrap();
+    let local_text = register_local_file_asset_v2(RegisterLocalFileRequestV2 {
+        repository_root: root.path(),
+        path: &text_path,
+        title: "local text",
+        modified_at: Utc::now(),
+    })
+    .unwrap();
+    let image_path = source_files.path().join("screenshot.png");
+    fs::write(&image_path, tiny_png_bytes()).unwrap();
+    let image = register_local_file_asset_v2(RegisterLocalFileRequestV2 {
+        repository_root: root.path(),
+        path: &image_path,
+        title: "image",
+        modified_at: Utc::now(),
+    })
+    .unwrap();
+    let docx_path = source_files.path().join("report.docx");
+    fs::write(&docx_path, fake_docx_bytes()).unwrap();
+    let document = register_local_file_asset_v2(RegisterLocalFileRequestV2 {
+        repository_root: root.path(),
+        path: &docx_path,
+        title: "document",
+        modified_at: Utc::now(),
+    })
+    .unwrap();
+
+    // A registered Asset alone is not searchable — `mko find` scans Source
+    // and Knowledge revisions, not the raw registry — so each Asset needs a
+    // real prepared-and-written Source before the origin filter can find it.
+    for (asset, term) in [
+        (&paste.asset, "pasted evidence text"),
+        (&web.asset, "web evidence text"),
+        (&conversation.asset, "conversation evidence text"),
+    ] {
+        let prepared = prepare_snapshot_asset_v2(root.path(), &asset.id, no_metadata()).unwrap();
+        write_source_record_v2(
+            WriteSourceRecordRequestV2 {
+                repository_root: root.path(),
+                asset,
+                bundle: &prepared.bundle,
+                response: &source_response_with_claim(
+                    term,
+                    evidence_ref_for(&prepared.bundle),
+                    Vec::new(),
+                ),
+                expected_revision: None,
+            },
+            &clock("2026-08-28T00:00:00Z"),
+        )
+        .unwrap();
+    }
+    let prepared_local_text =
+        prepare_local_file_asset_v2(root.path(), &local_text.asset.id, None, no_metadata())
+            .unwrap();
+    write_source_record_v2(
+        WriteSourceRecordRequestV2 {
+            repository_root: root.path(),
+            asset: &local_text.asset,
+            bundle: &prepared_local_text.bundle,
+            response: &source_response_with_claim(
+                "local file evidence text",
+                evidence_ref_for(&prepared_local_text.bundle),
+                Vec::new(),
+            ),
+            expected_revision: None,
+        },
+        &clock("2026-08-28T00:00:00Z"),
+    )
+    .unwrap();
+
+    for (origin, expected_id, term) in [
+        (
+            SearchOriginFormV2::PastedText,
+            &paste.asset.id,
+            "pasted evidence text",
+        ),
+        (SearchOriginFormV2::Web, &web.asset.id, "web evidence text"),
+        (
+            SearchOriginFormV2::Conversation,
+            &conversation.asset.id,
+            "conversation evidence text",
+        ),
+        (
+            SearchOriginFormV2::LocalFile,
+            &local_text.asset.id,
+            "local file evidence text",
+        ),
+    ] {
+        let matches = search_records_by_perspective_v2(
+            root.path(),
+            term,
+            None,
+            SearchConfirmationFilterV2::Any,
+            None,
+            None,
+            None,
+            Some(origin),
+        )
+        .unwrap();
+        assert_eq!(matches.len(), 1, "origin {origin:?} for term {term:?}");
+        assert_eq!(&matches[0].asset_id, expected_id);
+    }
+
+    // `image` and `document` both map from `LocalFile`, discriminated by
+    // media type — not each other, and not `local-file` itself.
+    let prepared_image = prepare_local_file_asset_v2(
+        root.path(),
+        &image.asset.id,
+        Some("image evidence text"),
+        no_metadata(),
+    )
+    .unwrap();
+    write_source_record_v2(
+        WriteSourceRecordRequestV2 {
+            repository_root: root.path(),
+            asset: &image.asset,
+            bundle: &prepared_image.bundle,
+            response: &source_response_with_claim(
+                "image evidence text",
+                evidence_ref_for(&prepared_image.bundle),
+                Vec::new(),
+            ),
+            expected_revision: None,
+        },
+        &clock("2026-08-28T00:00:00Z"),
+    )
+    .unwrap();
+    let prepared_document = prepare_local_file_asset_v2(
+        root.path(),
+        &document.asset.id,
+        Some("document evidence text"),
+        no_metadata(),
+    )
+    .unwrap();
+    write_source_record_v2(
+        WriteSourceRecordRequestV2 {
+            repository_root: root.path(),
+            asset: &document.asset,
+            bundle: &prepared_document.bundle,
+            response: &source_response_with_claim(
+                "document evidence text",
+                evidence_ref_for(&prepared_document.bundle),
+                Vec::new(),
+            ),
+            expected_revision: None,
+        },
+        &clock("2026-08-28T00:00:00Z"),
+    )
+    .unwrap();
+
+    for (origin, expected_id, term) in [
+        (SearchOriginFormV2::Image, &image.asset.id, "image evidence"),
+        (
+            SearchOriginFormV2::Document,
+            &document.asset.id,
+            "document evidence",
+        ),
+    ] {
+        let matches = search_records_by_perspective_v2(
+            root.path(),
+            term,
+            None,
+            SearchConfirmationFilterV2::Any,
+            None,
+            None,
+            None,
+            Some(origin),
+        )
+        .unwrap();
+        assert_eq!(matches.len(), 1, "origin {origin:?} for term {term:?}");
+        assert_eq!(&matches[0].asset_id, expected_id);
+    }
+
+    // `video` is accepted but matches nothing until Phase 4.
+    let no_video = search_records_by_perspective_v2(
+        root.path(),
+        "evidence",
+        None,
+        SearchConfirmationFilterV2::Any,
+        None,
+        None,
+        None,
+        Some(SearchOriginFormV2::Video),
+    )
+    .unwrap();
+    assert!(no_video.is_empty());
 }

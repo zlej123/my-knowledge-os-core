@@ -402,3 +402,303 @@ fn captured_conversation_content_becomes_registered_evidence() {
     assert_eq!(report["data"]["outcome"], "created");
     assert_eq!(report["data"]["logical_locator"], "");
 }
+
+/// A verified minimal valid 1x1 PNG (68 bytes) — real magic bytes, a real
+/// zlib-compressed `IDAT` chunk, a real `IEND`. Small enough to embed as a
+/// literal so image tests need no external fixture file.
+fn tiny_png_bytes() -> Vec<u8> {
+    vec![
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00, 0x00, 0xb5,
+        0x1c, 0x0c, 0x02, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x64,
+        0xf8, 0x0f, 0x00, 0x01, 0x05, 0x01, 0x01, 0x27, 0x18, 0xe3, 0x66, 0x00, 0x00, 0x00, 0x00,
+        0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ]
+}
+
+// Phase 3, §6.1/§6.2: an image local file's original bytes are preserved
+// signature-validated, distinct from a text local file's convention where the
+// original bytes *are* the evidence.
+#[test]
+#[allow(deprecated)]
+fn an_image_local_file_is_registered_with_its_signature_validated_original() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    let provider = root.path().join("Personal Inbox");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    fs::create_dir_all(&provider).unwrap();
+    let screenshot = root.path().join("screenshot.png");
+    let png = tiny_png_bytes();
+    fs::write(&screenshot, &png).unwrap();
+
+    let output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["add", "--local-file"])
+        .arg(&screenshot)
+        .args(["--title", "A screenshot", "--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(report["data"]["outcome"], "created");
+    let asset_id = report["data"]["asset_id"].as_str().unwrap();
+    let hash = asset_id.strip_prefix("personal-asset-").unwrap();
+    let registry: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            repository
+                .join("assets/registry")
+                .join(format!("{asset_id}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(registry["media_type"], "image/png");
+    assert_eq!(registry["origin"], "local_file");
+    let stored = fs::read(
+        repository
+            .join("assets/originals")
+            .join(format!("{hash}.png")),
+    )
+    .unwrap();
+    assert_eq!(stored, png);
+}
+
+#[test]
+#[allow(deprecated)]
+fn a_local_file_with_a_mismatched_signature_is_rejected() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    let provider = root.path().join("Personal Inbox");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    fs::create_dir_all(&provider).unwrap();
+    let fake = root.path().join("not-actually-a.png");
+    fs::write(&fake, b"this is not PNG content at all").unwrap();
+
+    let output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["add", "--local-file"])
+        .arg(&fake)
+        .args(["--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+
+    let output: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(output["error"]["code"], "local_file_signature_invalid");
+    assert!(
+        repository
+            .join("assets/registry")
+            .read_dir()
+            .unwrap()
+            .next()
+            .is_none()
+    );
+}
+
+// Phase 3, §6.2: an image's original carries no text of its own — `mko
+// source prepare` requires the agent-read text via `--extracted-text`
+// (a file, not an argument, matching every other evidence flag).
+#[test]
+#[allow(deprecated)]
+fn source_prepare_requires_extracted_text_for_an_image_and_builds_a_bundle_from_it() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    let provider = root.path().join("Personal Inbox");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    fs::create_dir_all(&provider).unwrap();
+    let screenshot = root.path().join("screenshot.png");
+    fs::write(&screenshot, tiny_png_bytes()).unwrap();
+    let add_output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["add", "--local-file"])
+        .arg(&screenshot)
+        .args(["--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let add_output: serde_json::Value = serde_json::from_slice(&add_output).unwrap();
+    let asset_id = add_output["data"]["asset_id"].as_str().unwrap();
+
+    // Without --extracted-text, Core refuses rather than guessing at text
+    // this image's original does not carry.
+    let missing_text = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["source", "prepare", "--asset-id"])
+        .arg(asset_id)
+        .args(["--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let missing_text: serde_json::Value = serde_json::from_slice(&missing_text).unwrap();
+    assert_eq!(
+        missing_text["error"]["code"],
+        "local_file_extracted_text_required"
+    );
+
+    let ocr = root.path().join("ocr.txt");
+    fs::write(&ocr, "A screen reading: quarterly revenue up 12%.").unwrap();
+    let prepared = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["source", "prepare", "--asset-id"])
+        .arg(asset_id)
+        .arg("--extracted-text")
+        .arg(&ocr)
+        .args(["--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let prepared: serde_json::Value = serde_json::from_slice(&prepared).unwrap();
+    assert_eq!(prepared["command"], "source.prepare");
+    let bundle_path = prepared["data"]["bundle_path"].as_str().unwrap();
+    let bundle: serde_json::Value =
+        serde_json::from_slice(&fs::read(bundle_path).unwrap()).unwrap();
+    assert_eq!(bundle["bundle"]["media_type"], "image/png");
+    assert_eq!(
+        bundle["bundle"]["content_blocks"][0]["text"],
+        "A screen reading: quarterly revenue up 12%."
+    );
+}
+
+// End-to-end: register an image, prepare it with agent-read (OCR) text,
+// write the Source, then find it back with `--origin image` (§6, Phase 3).
+#[test]
+#[allow(deprecated)]
+fn image_add_prepare_write_and_find_by_origin_flow() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    let provider = root.path().join("Personal Inbox");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    fs::create_dir_all(&provider).unwrap();
+    let screenshot = root.path().join("screenshot.png");
+    fs::write(&screenshot, tiny_png_bytes()).unwrap();
+    let add_output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["add", "--local-file"])
+        .arg(&screenshot)
+        .args(["--title", "Revenue screenshot", "--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let add_output: serde_json::Value = serde_json::from_slice(&add_output).unwrap();
+    let asset_id = add_output["data"]["asset_id"].as_str().unwrap();
+
+    let ocr = root.path().join("ocr.txt");
+    fs::write(&ocr, "Quarterly revenue increased by twelve percent.").unwrap();
+    let prepared = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["source", "prepare", "--asset-id"])
+        .arg(asset_id)
+        .arg("--extracted-text")
+        .arg(&ocr)
+        .args(["--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let prepared: serde_json::Value = serde_json::from_slice(&prepared).unwrap();
+    let bundle_path = prepared["data"]["bundle_path"].as_str().unwrap();
+    let bundle: serde_json::Value =
+        serde_json::from_slice(&fs::read(bundle_path).unwrap()).unwrap();
+    let block_id = bundle["bundle"]["content_blocks"][0]["id"]
+        .as_str()
+        .unwrap();
+    let locator = bundle["bundle"]["content_blocks"][0]["locator"]
+        .as_str()
+        .unwrap();
+
+    let response = serde_json::json!({
+        "schema_version": 2,
+        "title": "Revenue screenshot",
+        "authors": [],
+        "publication_date": null,
+        "one_sentence_summary": "A screenshot showing a revenue increase.",
+        "general_summary": "The screenshot reports quarterly revenue increased by twelve percent.",
+        "key_claims": [{
+            "text": "Quarterly revenue increased by twelve percent.",
+            "evidence_refs": [{
+                "block_id": block_id,
+                "locator": locator,
+                "text_span_utf8": null,
+                "table_range": null,
+            }],
+        }],
+        "limitations": [],
+        "tags": ["revenue"],
+        "knowledge_recommendation": {"outcome": "reference_only", "reasons": ["Single data point."]},
+        "topics": [],
+    });
+    let response_path = root.path().join("source-response.json");
+    fs::write(&response_path, serde_json::to_vec(&response).unwrap()).unwrap();
+    Command::cargo_bin("mko")
+        .unwrap()
+        .args(["source", "write-draft", "--bundle"])
+        .arg(bundle_path)
+        .arg("--response")
+        .arg(&response_path)
+        .args(["--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success();
+
+    let matching = Command::cargo_bin("mko")
+        .unwrap()
+        .args([
+            "find", "revenue", "--origin", "image", "--format", "json-v2",
+        ])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let matching: serde_json::Value = serde_json::from_slice(&matching).unwrap();
+    assert_eq!(matching["data"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(matching["data"]["items"][0]["asset_id"], asset_id);
+
+    // The same query with an origin filter that cannot match an image
+    // (`document`) returns nothing, proving the filter actually narrows.
+    let non_matching = Command::cargo_bin("mko")
+        .unwrap()
+        .args([
+            "find", "revenue", "--origin", "document", "--format", "json-v2",
+        ])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let non_matching: serde_json::Value = serde_json::from_slice(&non_matching).unwrap();
+    assert!(non_matching["data"]["items"].as_array().unwrap().is_empty());
+}

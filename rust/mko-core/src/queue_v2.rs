@@ -135,6 +135,48 @@ pub enum SearchConfirmationFilterV2 {
     UnconfirmedOnly,
 }
 
+/// `--origin` filter vocabulary (§6, Phase 3, decided): a **display/filter**
+/// vocabulary derived from an Asset's `origin` and, for `LocalFile`, its
+/// `media_type` — deliberately distinct from `AssetOriginV2`, whose variant
+/// names never leak into this filter (`LocalFile` alone maps to three
+/// different forms depending on media type). `Video` is accepted as a value
+/// but matches nothing until Phase 4 introduces a video origin.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchOriginFormV2 {
+    PastedText,
+    LocalFile,
+    Image,
+    Document,
+    Video,
+    Web,
+    Conversation,
+}
+
+fn origin_form_matches(asset: &AssetRecordV2, needle: Option<SearchOriginFormV2>) -> bool {
+    use crate::records_v2::AssetOriginV2;
+    let Some(needle) = needle else { return true };
+    match needle {
+        SearchOriginFormV2::PastedText => asset.origin == AssetOriginV2::PastedText,
+        SearchOriginFormV2::Web => asset.origin == AssetOriginV2::WebSnapshot,
+        SearchOriginFormV2::Conversation => asset.origin == AssetOriginV2::Conversation,
+        // No video origin exists yet (Phase 4); the value is accepted so a
+        // caller can pass it without Core rejecting it, but it matches no
+        // Asset registered by this Core version.
+        SearchOriginFormV2::Video => false,
+        SearchOriginFormV2::LocalFile => {
+            asset.origin == AssetOriginV2::LocalFile && asset.media_type == "text/plain"
+        }
+        SearchOriginFormV2::Image => {
+            asset.origin == AssetOriginV2::LocalFile && asset.media_type.starts_with("image/")
+        }
+        SearchOriginFormV2::Document => {
+            asset.origin == AssetOriginV2::LocalFile
+                && crate::local_file_v2::local_file_media_kind(&asset.media_type)
+                    == Some(crate::local_file_v2::LocalFileMediaKindV2::Document)
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SearchMatchV2 {
     pub record_type: SearchRecordTypeV2,
@@ -419,6 +461,7 @@ pub fn search_records_v2(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -431,6 +474,7 @@ pub fn search_records_by_perspective_v2(
     tag: Option<&str>,
     layer: Option<SearchLayerV2>,
     topic: Option<&str>,
+    origin: Option<SearchOriginFormV2>,
 ) -> Result<Vec<SearchMatchV2>, MkoError> {
     let tokens = normalize_query_tokens_v2(term)?;
     let tag_needle = normalize_tag_needle_v2(tag)?;
@@ -440,6 +484,7 @@ pub fn search_records_by_perspective_v2(
         .values()
         .flatten()
         .filter(|target| confirmation_allows(confirmation, target))
+        .filter(|target| origin_form_matches(&target.asset, origin))
         .flat_map(|target| match &target.revision {
             RevisionV2::Knowledge(revision) => {
                 if perspective

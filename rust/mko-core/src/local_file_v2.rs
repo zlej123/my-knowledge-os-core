@@ -1,14 +1,37 @@
-//! A local Markdown/text file the owner already holds, kept as immutable
-//! evidence alongside its original bytes (§6.1, §6.2).
+//! A local file the owner already holds, kept as immutable evidence alongside
+//! its original bytes (§6.1, §6.2). Covers Markdown/text (Phase 2), and
+//! images and docx/hwpx documents (Phase 3).
 //!
 //! Unlike a web snapshot, a paste, or a captured conversation — none of which
 //! have an original file — a local file's identity is the **original bytes'**
-//! fingerprint, not the fingerprint of any agent-extracted text. Since
-//! md/txt originals are themselves small text files, the original is stored
-//! verbatim, content-addressed, in a minimal text-originals store
-//! (`assets/originals/<hash>.<ext>`). Phase 3 extends this store to binaries
-//! after a separate check-budget decision (§8); Phase 2 covers text only, and
-//! the store shares the snapshot-scale bound (~2 MiB).
+//! fingerprint, not the fingerprint of any agent-extracted text. The original
+//! is stored verbatim, content-addressed, in a minimal originals store
+//! (`assets/originals/<hash>.<ext>`), bounded per media type (§8's named
+//! check-budget decision, resolved in `check.rs`).
+//!
+//! **[DECIDED, Phase 3] Enum shape.** `AssetOriginV2::LocalFile` is not split
+//! into per-media-type variants; instead `media_type` discriminates text,
+//! image, and document forms behind the single `LocalFile` origin. Every
+//! extension-, signature-, and size-specific rule below lives in one small
+//! table (`LOCAL_FILE_MEDIA_TYPES`) rather than scattered `if` chains, so a
+//! fifth form is one table row plus one signature function, not a new code
+//! path threaded through registration, validation, and `check`.
+//!
+//! **Text is registered with its own bytes as the evidence** (unchanged from
+//! Phase 2): the file must be valid UTF-8, and that text is both the stored
+//! original and the extracted text a prepared bundle is built from.
+//!
+//! **Image and document originals carry no extractable text of their own.**
+//! The Core never parses them (D2): registration stores only the original
+//! bytes, signature-validated. The agent-read text (OCR output for an image,
+//! a converted document body) is supplied later, at prepare time, exactly
+//! once per prepare call — see `prepared_v2::prepare_local_file_asset_v2`.
+//! This mirrors the PDF path's shape (an extractor supplies pages at prepare
+//! time, never at registration) rather than inventing a second persistent
+//! text store: re-extraction (a better OCR pass) is simply another prepare
+//! call with different supplied text, landing as a new Source/Knowledge
+//! revision of the same immutable Asset — never a duplicate Asset, and no
+//! extra Asset-level bookkeeping is required for it.
 //!
 //! Registration deliberately does not route through the Google Drive Inbox
 //! provider machinery (`inspect_provider_file`/`validated_disjoint_roots`):
@@ -33,10 +56,224 @@ use crate::{
     revision_v2::{canonical_json_bytes, sha256_digest},
 };
 
-/// Same scale as a snapshot (§6): generous for a note, bounded so a runaway
-/// file cannot fill the knowledge base.
+/// Text ceiling: generous for a note, bounded so a runaway file cannot fill
+/// the knowledge base. Unchanged from Phase 2.
 pub const MAX_LOCAL_FILE_BYTES: u64 = 2 * 1024 * 1024;
+/// **[DECIDED, Phase 3]** Image originals (screenshots, photos of pages).
+pub const MAX_LOCAL_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+/// **[DECIDED, Phase 3]** docx/hwpx originals.
+pub const MAX_LOCAL_DOCUMENT_BYTES: u64 = 15 * 1024 * 1024;
+/// The largest of the three ceilings above — the bound a caller uses before
+/// it knows which of them applies (e.g. `check`'s originals walk, which must
+/// read a file before its extension tells it which specific ceiling to check
+/// it against).
+pub const MAX_LOCAL_ORIGINAL_BYTES: u64 = MAX_LOCAL_DOCUMENT_BYTES;
+
 const MAX_LOCAL_FILE_TITLE_CHARS: usize = 200;
+
+pub const DOCX_MEDIA_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+pub const HWPX_MEDIA_TYPE: &str = "application/vnd.hancom.hwpx";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalFileMediaKindV2 {
+    Text,
+    Image,
+    Document,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LocalFileMediaSpecV2 {
+    pub extension: &'static str,
+    pub media_type: &'static str,
+    pub max_bytes: u64,
+    pub kind: LocalFileMediaKindV2,
+}
+
+/// One row per recognized extension. Order does not matter — extensions are
+/// unique. An extension absent from this table (or a path with none) falls
+/// back to the Text/`.txt` entry, exactly as Phase 2 did: the extension is
+/// cosmetic for text, so an unrecognized one is still accepted and simply
+/// filed as `.txt`. For an image or document, that same fallback means an
+/// unrecognized binary extension is treated as text and rejected by the
+/// UTF-8 check — a clear, if generic, refusal rather than a silent guess at
+/// a binary format this Core version does not support.
+const LOCAL_FILE_MEDIA_TYPES: &[(&str, LocalFileMediaSpecV2)] = &[
+    (
+        "md",
+        LocalFileMediaSpecV2 {
+            extension: "md",
+            media_type: "text/plain",
+            max_bytes: MAX_LOCAL_FILE_BYTES,
+            kind: LocalFileMediaKindV2::Text,
+        },
+    ),
+    (
+        "markdown",
+        LocalFileMediaSpecV2 {
+            extension: "markdown",
+            media_type: "text/plain",
+            max_bytes: MAX_LOCAL_FILE_BYTES,
+            kind: LocalFileMediaKindV2::Text,
+        },
+    ),
+    (
+        "txt",
+        LocalFileMediaSpecV2 {
+            extension: "txt",
+            media_type: "text/plain",
+            max_bytes: MAX_LOCAL_FILE_BYTES,
+            kind: LocalFileMediaKindV2::Text,
+        },
+    ),
+    (
+        "png",
+        LocalFileMediaSpecV2 {
+            extension: "png",
+            media_type: "image/png",
+            max_bytes: MAX_LOCAL_IMAGE_BYTES,
+            kind: LocalFileMediaKindV2::Image,
+        },
+    ),
+    (
+        "jpg",
+        LocalFileMediaSpecV2 {
+            extension: "jpg",
+            media_type: "image/jpeg",
+            max_bytes: MAX_LOCAL_IMAGE_BYTES,
+            kind: LocalFileMediaKindV2::Image,
+        },
+    ),
+    (
+        "jpeg",
+        LocalFileMediaSpecV2 {
+            extension: "jpeg",
+            media_type: "image/jpeg",
+            max_bytes: MAX_LOCAL_IMAGE_BYTES,
+            kind: LocalFileMediaKindV2::Image,
+        },
+    ),
+    (
+        "webp",
+        LocalFileMediaSpecV2 {
+            extension: "webp",
+            media_type: "image/webp",
+            max_bytes: MAX_LOCAL_IMAGE_BYTES,
+            kind: LocalFileMediaKindV2::Image,
+        },
+    ),
+    (
+        "heic",
+        LocalFileMediaSpecV2 {
+            extension: "heic",
+            media_type: "image/heic",
+            max_bytes: MAX_LOCAL_IMAGE_BYTES,
+            kind: LocalFileMediaKindV2::Image,
+        },
+    ),
+    (
+        "docx",
+        LocalFileMediaSpecV2 {
+            extension: "docx",
+            media_type: DOCX_MEDIA_TYPE,
+            max_bytes: MAX_LOCAL_DOCUMENT_BYTES,
+            kind: LocalFileMediaKindV2::Document,
+        },
+    ),
+    (
+        "hwpx",
+        LocalFileMediaSpecV2 {
+            extension: "hwpx",
+            media_type: HWPX_MEDIA_TYPE,
+            max_bytes: MAX_LOCAL_DOCUMENT_BYTES,
+            kind: LocalFileMediaKindV2::Document,
+        },
+    ),
+];
+
+const TEXT_FALLBACK_SPEC: LocalFileMediaSpecV2 = LocalFileMediaSpecV2 {
+    extension: "txt",
+    media_type: "text/plain",
+    max_bytes: MAX_LOCAL_FILE_BYTES,
+    kind: LocalFileMediaKindV2::Text,
+};
+
+pub(crate) fn media_spec_for_extension(extension: &str) -> LocalFileMediaSpecV2 {
+    let needle = extension.to_ascii_lowercase();
+    LOCAL_FILE_MEDIA_TYPES
+        .iter()
+        .find(|(key, _)| *key == needle)
+        .map(|(_, spec)| *spec)
+        .unwrap_or(TEXT_FALLBACK_SPEC)
+}
+
+fn media_spec_for_path(path: &Path) -> LocalFileMediaSpecV2 {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some(extension) => media_spec_for_extension(extension),
+        None => TEXT_FALLBACK_SPEC,
+    }
+}
+
+/// The table row a registered Asset's `media_type` corresponds to, or `None`
+/// for a media type this Core version has never registered under this
+/// origin — a defensive case, not a reachable one, given `media_type` is
+/// always drawn from this same table at registration time.
+pub(crate) fn media_spec_for_media_type(media_type: &str) -> Option<LocalFileMediaSpecV2> {
+    LOCAL_FILE_MEDIA_TYPES
+        .iter()
+        .map(|(_, spec)| *spec)
+        .find(|spec| spec.media_type == media_type)
+}
+
+pub fn is_known_local_file_media_type(media_type: &str) -> bool {
+    media_spec_for_media_type(media_type).is_some()
+}
+
+pub fn local_file_media_kind(media_type: &str) -> Option<LocalFileMediaKindV2> {
+    media_spec_for_media_type(media_type).map(|spec| spec.kind)
+}
+
+/// Validates a binary original's magic bytes against the signature its
+/// extension claims, following `fingerprint::validate_pdf_content`'s
+/// precedent. Text carries no signature check — its evidence is that it
+/// decodes as UTF-8, checked separately.
+fn validate_signature(
+    kind: LocalFileMediaKindV2,
+    media_type: &str,
+    bytes: &[u8],
+) -> Result<(), MkoError> {
+    let valid = match (kind, media_type) {
+        (LocalFileMediaKindV2::Text, _) => true,
+        (LocalFileMediaKindV2::Image, "image/png") => bytes.starts_with(b"\x89PNG"),
+        (LocalFileMediaKindV2::Image, "image/jpeg") => bytes.starts_with(b"\xFF\xD8\xFF"),
+        (LocalFileMediaKindV2::Image, "image/webp") => {
+            bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
+        }
+        (LocalFileMediaKindV2::Image, "image/heic") => valid_heic_ftyp(bytes),
+        (LocalFileMediaKindV2::Document, _) => bytes.starts_with(b"PK\x03\x04"),
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(MkoError::new(
+            "local_file_signature_invalid",
+            "file content does not match the signature its extension claims",
+        ))
+    }
+}
+
+/// ISO base media file format `ftyp` box check: bytes 4..8 spell `ftyp`, and
+/// the brand at bytes 8..12 is a HEIC/HEIF brand this Core recognizes.
+fn valid_heic_ftyp(bytes: &[u8]) -> bool {
+    if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
+        return false;
+    }
+    const KNOWN_BRANDS: &[&[u8; 4]] = &[
+        b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"hevm", b"hevs", b"mif1", b"msf1",
+    ];
+    KNOWN_BRANDS.iter().any(|brand| &&bytes[8..12] == brand)
+}
 
 pub struct RegisterLocalFileRequestV2<'a> {
     pub repository_root: &'a Path,
@@ -58,25 +295,32 @@ pub fn register_local_file_asset_v2(
             "a local file must be registered by its absolute path",
         ));
     }
-    let bytes = read_bounded_nofollow(request.path, MAX_LOCAL_FILE_BYTES, "local_file")?;
-    let text = std::str::from_utf8(&bytes).map_err(|_| {
-        MkoError::new(
-            "local_file_not_text",
-            "only UTF-8 Markdown/text local files may be registered in this Core version",
-        )
-    })?;
-    if text.trim().is_empty() {
-        return Err(MkoError::new(
-            "local_file_empty",
-            "the file has no readable text",
-        ));
+    let spec = media_spec_for_path(request.path);
+    let bytes = read_bounded_nofollow(request.path, spec.max_bytes, "local_file")?;
+    match spec.kind {
+        LocalFileMediaKindV2::Text => {
+            let text = std::str::from_utf8(&bytes).map_err(|_| {
+                MkoError::new(
+                    "local_file_not_text",
+                    "only UTF-8 Markdown/text local files may be registered under this extension",
+                )
+            })?;
+            if text.trim().is_empty() {
+                return Err(MkoError::new(
+                    "local_file_empty",
+                    "the file has no readable text",
+                ));
+            }
+        }
+        LocalFileMediaKindV2::Image | LocalFileMediaKindV2::Document => {
+            validate_signature(spec.kind, spec.media_type, &bytes)?;
+        }
     }
 
     let locator = request
         .path
         .to_str()
         .ok_or_else(|| MkoError::new("local_file_path_invalid", "path must be valid UTF-8"))?;
-    let extension = original_extension(request.path);
     let fingerprint = sha256_digest(&bytes);
     let hash = fingerprint
         .strip_prefix("sha256:")
@@ -89,7 +333,7 @@ pub fn register_local_file_asset_v2(
         origin: AssetOriginV2::LocalFile,
         fingerprint,
         title_fallback: bounded_title(request.title, request.path),
-        media_type: "text/plain".into(),
+        media_type: spec.media_type.into(),
         provider: AssetProviderBindingV2 {
             provider_type: "local-file".into(),
             logical_locator: locator.into(),
@@ -108,32 +352,62 @@ pub fn register_local_file_asset_v2(
         &SystemClock,
         StaleRepositoryLockPolicy::Preserve,
     )?;
-    write_original_bytes(request.repository_root, &hash, &extension, &bytes)?;
+    write_original_bytes(request.repository_root, &hash, spec.extension, &bytes)?;
     write_asset_registry_record_v2(request.repository_root, record, &record_bytes)
 }
 
 /// The original bytes an Asset was built from, decoded as the UTF-8 text the
-/// prepare step consumes. Reads back the store rather than the owner's
-/// filesystem again: the original is now content-addressed evidence in the
-/// KB, and re-reading the live path would defeat the point of storing it.
+/// prepare step consumes. Text-kind Assets only: an image or document
+/// original has no text of its own to decode (D2) — see
+/// `prepared_v2::prepare_local_file_asset_v2`, which takes the agent-read
+/// text as an explicit argument for those kinds instead.
 pub fn read_original_text_v2(
     repository_root: &Path,
     asset: &AssetRecordV2,
 ) -> Result<String, MkoError> {
+    if local_file_media_kind(&asset.media_type) != Some(LocalFileMediaKindV2::Text) {
+        return Err(MkoError::new(
+            "local_file_not_text",
+            "this Asset's original is not text; its evidence is agent-read text supplied at prepare time",
+        ));
+    }
+    let bytes = read_original_bytes_v2(repository_root, asset)?;
+    String::from_utf8(bytes)
+        .map_err(|error| MkoError::new("local_file_unreadable", error.to_string()))
+}
+
+/// The exact original bytes an Asset was built from, of any local-file media
+/// kind, read back from the content-addressed originals store rather than
+/// the owner's filesystem again: the original is now committed evidence in
+/// the KB, and re-reading the live path would defeat the point of storing
+/// it.
+pub fn read_original_bytes_v2(
+    repository_root: &Path,
+    asset: &AssetRecordV2,
+) -> Result<Vec<u8>, MkoError> {
     let hash = asset.fingerprint.strip_prefix("sha256:").ok_or_else(|| {
         MkoError::new(
             "local_file_unreadable",
             "Asset fingerprint is not canonical",
         )
     })?;
-    let extension = extension_from_locator(&asset.provider.logical_locator);
-    let bytes = read_bounded_nofollow(
-        &original_path(repository_root, hash, &extension),
-        MAX_LOCAL_FILE_BYTES,
+    // The stored extension is derived from the locator's own extension, not
+    // reconstructed from `media_type` alone: several extensions share
+    // `text/plain` (`.md`, `.markdown`, `.txt`), so `media_type` cannot
+    // uniquely recover which one the original was filed under — the locator
+    // (recorded verbatim at registration) can.
+    let spec = media_spec_for_path(Path::new(&asset.provider.logical_locator));
+    if spec.media_type != asset.media_type {
+        return Err(MkoError::new(
+            "local_file_unreadable",
+            "Asset media type does not match the extension of its own locator",
+        ));
+    }
+    read_bounded_nofollow(
+        &original_path(repository_root, hash, spec.extension),
+        spec.max_bytes,
         "local_file_original",
-    )?;
-    String::from_utf8(bytes)
-        .map_err(|error| MkoError::new("local_file_unreadable", error.to_string()))
+    )
 }
 
 fn write_original_bytes(
@@ -163,7 +437,8 @@ fn write_original_bytes(
     }
     let path = original_path(repository_root, hash, extension);
     let outcome = write_new(&path, bytes, |existing| {
-        let stored = read_bounded_nofollow(existing, MAX_LOCAL_FILE_BYTES, "local_file_original")?;
+        let stored =
+            read_bounded_nofollow(existing, MAX_LOCAL_ORIGINAL_BYTES, "local_file_original")?;
         if stored == bytes {
             Ok(())
         } else {
@@ -187,22 +462,6 @@ fn original_path(repository_root: &Path, hash: &str, extension: &str) -> std::pa
     repository_root
         .join("assets/originals")
         .join(format!("{hash}.{extension}"))
-}
-
-/// Bounds the stored filename extension to a small, known-safe set. The
-/// extension is cosmetic — media type is always `text/plain` for this
-/// origin — so a file with any other extension, or none, is still accepted
-/// and simply filed as `.txt`.
-fn original_extension(path: &Path) -> String {
-    match path.extension().and_then(|extension| extension.to_str()) {
-        Some(extension) if extension.eq_ignore_ascii_case("md") => "md".into(),
-        Some(extension) if extension.eq_ignore_ascii_case("markdown") => "markdown".into(),
-        _ => "txt".into(),
-    }
-}
-
-fn extension_from_locator(locator: &str) -> String {
-    original_extension(Path::new(locator))
 }
 
 /// A local file always has a name to show: its own path. `Asset::title_fallback`
