@@ -114,7 +114,8 @@ pub(crate) fn json_v2_next_action(code: &str) -> NextActionV2 {
         | "local_file_extracted_text_required"
         | "local_file_extracted_text_not_applicable"
         | "local_file_extracted_text_empty"
-        | "extracted_text_unreadable" => NextActionV2::Add,
+        | "extracted_text_unreadable"
+        | "extracted_text_invalid" => NextActionV2::Add,
         // Registering the same page/file again rewrites content-addressed
         // evidence that no longer matches its identity, so this is
         // repairable by the caller rather than a dead end.

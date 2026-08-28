@@ -128,3 +128,66 @@ fn an_orphaned_original_warns() {
     // unreferenced.
     assert!(!report.has_code("asset_original_damaged"));
 }
+
+#[test]
+fn a_same_hash_different_extension_duplicate_is_orphaned_not_referenced() {
+    // Orphan detection must key on (hash, extension), not hash alone:
+    // `read_original_bytes_v2` derives the extension it will read from the
+    // registry record's own locator, so a same-bytes file filed under a
+    // *different* extension is never the file that record's reads resolve
+    // to — it must still be reported orphaned, even though its content hash
+    // happens to match a legitimately registered asset.
+    let root = tempdir().unwrap();
+    scaffold_personal_kb_v2(root.path()).unwrap();
+    let source_files = tempdir().unwrap();
+    let path = source_files.path().join("screenshot.png");
+    let png = tiny_png_bytes();
+    fs::write(&path, &png).unwrap();
+
+    register_local_file_asset_v2(RegisterLocalFileRequestV2 {
+        repository_root: root.path(),
+        path: &path,
+        title: "A screenshot",
+        modified_at: Utc::now(),
+    })
+    .unwrap();
+
+    let hash = sha256_digest(&png);
+    let hash = hash.strip_prefix("sha256:").unwrap();
+    // Hand-place a `.docx` copy of the exact same bytes: same content hash,
+    // so it passes the damaged-original integrity check, but no registry
+    // record was ever written for a `.docx` under this hash — the only
+    // record referencing this hash is the `.png` one above.
+    fs::write(
+        root.path()
+            .join("assets/originals")
+            .join(format!("{hash}.docx")),
+        &png,
+    )
+    .unwrap();
+
+    let report = check_repository(CheckRequest::new(root.path())).unwrap();
+    assert!(report.has_code("asset_original_orphaned"));
+    assert!(!report.has_code("asset_original_damaged"));
+
+    let orphaned_paths: Vec<&str> = report
+        .issues
+        .iter()
+        .filter(|issue| issue.code == "asset_original_orphaned")
+        .filter_map(|issue| issue.path.as_deref())
+        .collect();
+    assert_eq!(orphaned_paths, [format!("assets/originals/{hash}.docx")]);
+
+    // The registered .png itself must not be swept up as orphaned or
+    // damaged by the presence of the same-hash .docx.
+    let png_path = format!("assets/originals/{hash}.png");
+    assert!(
+        report
+            .issues
+            .iter()
+            .filter(|issue| issue.path.as_deref() == Some(png_path.as_str()))
+            .all(|issue| !issue.code.starts_with("asset_original_")),
+        "unexpected issues against the registered .png: {:#?}",
+        report.issues
+    );
+}

@@ -580,6 +580,111 @@ fn source_prepare_requires_extracted_text_for_an_image_and_builds_a_bundle_from_
     );
 }
 
+// Review finding: `--extracted-text` must read like every other bounded,
+// no-follow evidence file in the codebase, not via a plain
+// `std::fs::read_to_string` — a symlink is refused rather than followed.
+// Opening with `O_NOFOLLOW` makes the `open()` call itself fail for a
+// symlink, landing on the `_unreadable` code, exactly like
+// `add_rejects_a_source_symlink_without_importing_its_target` in
+// `mko-core/tests/add.rs` asserts `file_unreadable` for the equivalent
+// no-follow open elsewhere in the codebase.
+#[test]
+#[allow(deprecated)]
+fn source_prepare_rejects_a_symlinked_extracted_text_file() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    let provider = root.path().join("Personal Inbox");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    fs::create_dir_all(&provider).unwrap();
+    let screenshot = root.path().join("screenshot.png");
+    fs::write(&screenshot, tiny_png_bytes()).unwrap();
+    let add_output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["add", "--local-file"])
+        .arg(&screenshot)
+        .args(["--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let add_output: serde_json::Value = serde_json::from_slice(&add_output).unwrap();
+    let asset_id = add_output["data"]["asset_id"].as_str().unwrap();
+
+    let outside = root.path().join("outside-secret.txt");
+    fs::write(&outside, "text the caller never asked to expose").unwrap();
+    let link = root.path().join("ocr-link.txt");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+    let rejected = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["source", "prepare", "--asset-id"])
+        .arg(asset_id)
+        .arg("--extracted-text")
+        .arg(&link)
+        .args(["--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let rejected: serde_json::Value = serde_json::from_slice(&rejected).unwrap();
+    assert_eq!(rejected["error"]["code"], "extracted_text_unreadable");
+}
+
+// Review finding, size half: `--extracted-text` is bounded to the
+// snapshot-scale 2 MiB cap rather than read unbounded into memory.
+#[test]
+#[allow(deprecated)]
+fn source_prepare_rejects_an_oversized_extracted_text_file() {
+    let root = tempdir().unwrap();
+    let repository = root.path().join("kb");
+    let provider = root.path().join("Personal Inbox");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    fs::create_dir_all(&provider).unwrap();
+    let screenshot = root.path().join("screenshot.png");
+    fs::write(&screenshot, tiny_png_bytes()).unwrap();
+    let add_output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["add", "--local-file"])
+        .arg(&screenshot)
+        .args(["--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let add_output: serde_json::Value = serde_json::from_slice(&add_output).unwrap();
+    let asset_id = add_output["data"]["asset_id"].as_str().unwrap();
+
+    let ocr = root.path().join("ocr.txt");
+    // One byte past the 2 MiB cap.
+    fs::write(&ocr, vec![b'a'; 2 * 1024 * 1024 + 1]).unwrap();
+
+    let rejected = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["source", "prepare", "--asset-id"])
+        .arg(asset_id)
+        .arg("--extracted-text")
+        .arg(&ocr)
+        .args(["--format", "json-v2"])
+        .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+        .current_dir(&repository)
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let rejected: serde_json::Value = serde_json::from_slice(&rejected).unwrap();
+    assert_eq!(rejected["error"]["code"], "extracted_text_invalid");
+}
+
 // End-to-end: register an image, prepare it with agent-read (OCR) text,
 // write the Source, then find it back with `--origin image` (§6, Phase 3).
 #[test]

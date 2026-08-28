@@ -25,7 +25,7 @@ use crate::{
     front_matter::parse_markdown,
     hooks::PRE_COMMIT_SCRIPT,
     knowledge::{KnowledgeRecord, validate_knowledge_asset_contract, validate_knowledge_record},
-    local_file_v2::{MAX_LOCAL_ORIGINAL_BYTES, media_spec_for_extension},
+    local_file_v2::{MAX_LOCAL_ORIGINAL_BYTES, media_spec_for_extension, media_spec_for_path},
     model::{AssetRecord, AssetStatus, ReviewStatus, SourceRecord, SourceStatus},
     path_policy::validate_portable_relative_path,
     pdf::{EXTRACTOR_NAME, EXTRACTOR_VERSION},
@@ -379,15 +379,28 @@ fn inspect_files(repository_root: &Path, files: &[RepositoryFile], issues: &mut 
 /// severity tier exists on `CheckIssue` today, so — like every other check
 /// finding — it surfaces as an ordinary issue, with wording that says
 /// "orphaned" rather than "damaged" so a reader can tell the two apart.
+///
+/// "Referenced" means (hash, extension), not hash alone: `read_original_bytes_v2`
+/// derives the extension it will read from the record's own
+/// `provider.logical_locator` (via `media_spec_for_path`), so a stray file
+/// that merely shares a registered asset's content hash under a *different*
+/// extension (e.g. a same-bytes `.docx` dropped next to a registered `.png`)
+/// is never the file that record's reads resolve to, and must still be
+/// flagged as orphaned. A registry record whose own `media_type` disagrees
+/// with the extension its locator implies contributes no known pair at all —
+/// `read_original_bytes_v2` refuses to read it either, under any extension.
 fn inspect_originals(files: &[RepositoryFile], issues: &mut Vec<CheckIssue>) {
-    let mut known_hashes = BTreeSet::<String>::new();
+    let mut known_originals = BTreeSet::<(String, &'static str)>::new();
     for file in files {
         if file.path.starts_with("assets/registry/")
             && file.path.ends_with(".json")
             && let Ok(record) = serde_json::from_slice::<AssetRecordV2>(&file.bytes)
             && let Some(hash) = record.fingerprint.strip_prefix("sha256:")
         {
-            known_hashes.insert(hash.to_owned());
+            let spec = media_spec_for_path(Path::new(&record.provider.logical_locator));
+            if spec.media_type == record.media_type {
+                known_originals.insert((hash.to_owned(), spec.extension));
+            }
         }
     }
     for file in files {
@@ -442,7 +455,7 @@ fn inspect_originals(files: &[RepositoryFile], issues: &mut Vec<CheckIssue>) {
             ));
             continue;
         }
-        if !known_hashes.contains(hash) {
+        if !known_originals.contains(&(hash.to_owned(), spec.extension)) {
             issues.push(issue(
                 "asset_original_orphaned",
                 Some(&file.path),

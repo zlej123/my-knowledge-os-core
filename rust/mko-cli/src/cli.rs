@@ -2415,13 +2415,26 @@ fn provider_logical_locator(provider_root: &Path, file: &Path) -> Result<String,
     Ok(components.join("/"))
 }
 
+/// Snapshot-scale cap (`MAX_SNAPSHOT_BYTES` in `snapshot_v2.rs`): agent-read
+/// text supplied via `--extracted-text` is comparable evidence to a captured
+/// web snapshot, not an unbounded stream.
+const MAX_EXTRACTED_TEXT_BYTES: u64 = 2 * 1024 * 1024;
+
 /// Reads the agent-read text for an image or document local file
 /// (`--extracted-text`) from a file, never a command-line argument — the
 /// same file-not-argument discipline `--paste`/`--snapshot`/`--conversation`
-/// already follow, and for the same reason.
+/// already follow, and for the same reason. Unlike those three (unchanged
+/// here; see the Phase 3 plan doc for that as a recorded follow-up), this
+/// reader is bounded and no-follow, matching the discipline
+/// `read_bounded_nofollow`/`read_regular_nofollow` establish elsewhere in
+/// the codebase: `extracted_text_unreadable` for an I/O failure,
+/// `extracted_text_invalid` for a missing/symlinked/oversized/non-UTF-8
+/// file.
 fn read_extracted_text_file_v2(path: &Path) -> Result<String, MkoError> {
-    std::fs::read_to_string(path)
-        .map_err(|error| MkoError::new("extracted_text_unreadable", error.to_string()))
+    let bytes =
+        crate::cli_v2::read_bounded_nofollow(path, MAX_EXTRACTED_TEXT_BYTES, "extracted_text")?;
+    String::from_utf8(bytes)
+        .map_err(|error| MkoError::new("extracted_text_invalid", error.to_string()))
 }
 
 fn prepare(arguments: PrepareArgs) -> Result<(), MkoError> {
