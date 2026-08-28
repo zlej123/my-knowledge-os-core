@@ -47,6 +47,8 @@ pub enum JsonV2Command {
     Check,
     #[serde(rename = "status")]
     Status,
+    #[serde(rename = "find")]
+    Find,
     #[serde(rename = "queue")]
     Queue,
     #[serde(rename = "queue.drafts")]
@@ -79,6 +81,76 @@ pub enum JsonV2SuccessResult {
 #[serde(rename_all = "snake_case")]
 pub enum JsonV2FailureResult {
     Error,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindRecordTypeV2 {
+    Source,
+    Knowledge,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindLayerV2 {
+    GroundedEvidence,
+    LlmAnalysis,
+    CounterargumentOrUncertainty,
+    /// A Source hit: the document's own summary, never LLM analysis.
+    SourceOwnWords,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindConfirmationStatusV2 {
+    Confirmed,
+    Unconfirmed,
+}
+
+/// A stable display label (§4.2, §5): whether a human has confirmed the
+/// exact revision returned. `confirmed_at` is present iff `status` is
+/// `confirmed` — the agent must state this label inline when citing a
+/// record (SKILL.md recall contract).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FindConfirmationV2 {
+    pub status: FindConfirmationStatusV2,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub confirmed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FindMatchV2 {
+    pub record_type: FindRecordTypeV2,
+    pub record_id: String,
+    pub current_revision: String,
+    pub asset_id: String,
+    pub title: String,
+    pub body: String,
+    pub tags: Vec<String>,
+    pub perspectives: Vec<String>,
+    pub layer: FindLayerV2,
+    pub locators: Vec<String>,
+    pub confirmation: FindConfirmationV2,
+}
+
+/// A quick note match — carries no confirmation label, unlike Source and
+/// Knowledge (§4.2): a `remember`d note is owner-authored and immediately
+/// real, not part of the human-confirmation lifecycle.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FindNoteV2 {
+    pub note_id: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FindDataV2 {
+    pub items: Vec<FindMatchV2>,
+    pub notes: Vec<FindNoteV2>,
+    pub scan_complete: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -560,6 +632,13 @@ pub enum JsonV2Success {
         result: JsonV2SuccessResult,
         data: RecordWriteDataV2,
     },
+    #[serde(rename = "find")]
+    Find {
+        #[serde(deserialize_with = "deserialize_schema_version")]
+        schema_version: u32,
+        result: JsonV2SuccessResult,
+        data: FindDataV2,
+    },
     #[serde(rename = "queue")]
     Queue {
         #[serde(deserialize_with = "deserialize_schema_version")]
@@ -692,6 +771,14 @@ impl JsonV2Success {
 
     pub fn knowledge_write(data: RecordWriteDataV2) -> Self {
         Self::KnowledgeWrite {
+            schema_version: 2,
+            result: JsonV2SuccessResult::Ok,
+            data,
+        }
+    }
+
+    pub fn find(data: FindDataV2) -> Self {
+        Self::Find {
             schema_version: 2,
             result: JsonV2SuccessResult::Ok,
             data,

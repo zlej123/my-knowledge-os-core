@@ -50,7 +50,7 @@ This Skill is written for exactly one Core version. Before the first `mko` comma
 (after installation checks), verify the contract:
 
 ```bash
-mko handshake --skill-version "0.4.0" --format json-v2
+mko handshake --skill-version "0.4.1" --format json-v2
 ```
 
 Pass the pinned version string above exactly; never substitute the CLI's own reported version.
@@ -74,6 +74,44 @@ Use these terms consistently:
   that finishes it.
 - remember: hand the owner to real-TTY `mko remember`; never paraphrase or publish their quick-note
   text through an agent command.
+
+## Recall contract
+
+Retrieval, not capture, is the point of a knowledge base: nothing stored has ever helped the owner
+later if it never comes back. So for **every** substantive question the owner asks — in any
+conversation, about any topic — search Core first, unconditionally:
+
+```bash
+mko find "QUERY" --format json-v2
+```
+
+Run this before answering, with no domain judgment about whether the base "might" cover it. An
+empty result costs one query; skipping the search costs the owner material they already stored. Do
+not decide in advance that a question is too casual, too technical, or too far from what you assume
+is in the base — search anyway.
+
+Then:
+
+1. **Ground the answer in what came back.** Read `data.items` (Source and Knowledge hits, both
+   included by default — unconfirmed is not unfinished work, §4.2) and `data.notes` (the owner's own
+   quick notes). Prefer what the base already holds over restating from memory.
+2. **Cite every record you used by its `mko://` ID** — `mko://` followed directly by each match's
+   `record_id` field, with nothing in between. A citation without the ID is not traceable back to
+   the record.
+3. **State each cited record's confirmation label inline**, taken from `confirmation.status` on that
+   exact match: a human-confirmed record and an unconfirmed AI draft are not the same kind of
+   evidence, and the owner needs to see which one they are getting. Say it in the same sentence as
+   the citation, not as a separate footnote — e.g. "…(`mko://personal-knowledge-…`, 확인됨)" versus
+   "…(`mko://personal-knowledge-…`, AI 작성 · 미확인)".
+4. **A miss is data, not a dead end.** If `data.items` and `data.notes` are both empty, say so
+   plainly and answer from what you know — labelled as such, the same way an unrecorded answer is
+   labelled `background` elsewhere in this Skill. Do not offer to store the conversation's content on
+   a miss; that capability does not exist yet in this Core version.
+
+Narrow with `--confirmed`, `--unconfirmed`, `--tag`, `--layer`, or `--perspective` when the question
+itself names a scope the owner gave you (e.g. "확인된 것만", "투자 관점에서"). Otherwise search the
+full default scope — narrowing on your own guess is exactly the domain judgment this
+contract exists to remove.
 
 ## Setup and read-only requests
 

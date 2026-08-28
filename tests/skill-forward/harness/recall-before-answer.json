@@ -1,0 +1,51 @@
+{
+  "fixture": "none",
+  "steps": [
+    {
+      "command": "mko find \"학습률 개선\" --format json-v2",
+      "result": {
+        "schema_version": 2,
+        "command": "find",
+        "result": "ok",
+        "data": {
+          "items": [
+            {
+              "record_type": "knowledge",
+              "record_id": "personal-knowledge-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "current_revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "asset_id": "personal-asset-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "title": "학습률 스케줄 조정",
+              "body": "학습률을 크게 개선하는 코사인 스케줄을 적용했더니 검증 손실이 안정적으로 낮아졌다.",
+              "tags": ["학습률"],
+              "perspectives": ["learning"],
+              "layer": "grounded_evidence",
+              "locators": ["page:3"],
+              "confirmation": {
+                "status": "confirmed",
+                "confirmed_at": "2026-08-10T09:00:00+00:00"
+              }
+            },
+            {
+              "record_type": "source",
+              "record_id": "personal-source-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "current_revision": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "asset_id": "personal-asset-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "title": "학습률 실험 초안 노트",
+              "body": "여러 학습률 값을 비교한 초안 요약이며 아직 사람이 확인하지 않았다.",
+              "tags": ["학습률"],
+              "perspectives": [],
+              "layer": "source_own_words",
+              "locators": ["page:1"],
+              "confirmation": {
+                "status": "unconfirmed",
+                "confirmed_at": null
+              }
+            }
+          ],
+          "notes": [],
+          "scan_complete": true
+        }
+      }
+    }
+  ]
+}

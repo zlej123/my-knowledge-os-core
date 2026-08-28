@@ -9,6 +9,7 @@ use mko_core::{
         inspect_home,
     },
     provider_scan::ElapsedClock,
+    recall_log_v2::append_recall_log_v2,
     scaffold_v2::scaffold_personal_kb_v2,
 };
 
@@ -186,4 +187,79 @@ impl mko_core::clock::Clock for FixedClock {
     fn now_utc(&self) -> chrono::DateTime<chrono::Utc> {
         self.0
     }
+}
+
+// `inspect_home` reads the recall log against the real wall clock (there is
+// no injectable Clock on its public signature), so entries here are placed
+// relative to `Utc::now()` rather than a fixed timestamp — otherwise this
+// test would start failing the day it aged out of the 30-day window.
+#[test]
+fn home_aggregates_recall_metrics_and_survives_corrupt_lines() {
+    let root = tempfile::tempdir().unwrap();
+    let repository = root.path().join("kb");
+    let provider = root.path().join("provider");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    fs::create_dir(&provider).unwrap();
+
+    let now = chrono::Utc::now();
+    append_recall_log_v2(
+        &repository,
+        "학습률 개선",
+        2,
+        &[
+            "personal-knowledge-aaaa".into(),
+            "personal-source-bbbb".into(),
+        ],
+        &FixedClock(now - chrono::Duration::days(1)),
+    )
+    .unwrap();
+    append_recall_log_v2(
+        &repository,
+        "no matches",
+        0,
+        &[],
+        &FixedClock(now - chrono::Duration::days(2)),
+    )
+    .unwrap();
+    // Outside the 30-day window: must not be counted.
+    append_recall_log_v2(
+        &repository,
+        "ancient query",
+        3,
+        &["personal-knowledge-old".into()],
+        &FixedClock(now - chrono::Duration::days(45)),
+    )
+    .unwrap();
+    // A corrupt line appended by hand (never written through the Core) must
+    // not take the home screen down.
+    let log_path = repository.join("logs/recall.jsonl");
+    let mut contents = fs::read_to_string(&log_path).unwrap();
+    contents.push_str("not json at all\n");
+    fs::write(&log_path, contents).unwrap();
+
+    let report = inspect_home(&repository, &provider, &FixedElapsedClock::new()).unwrap();
+    let HomeReport::V3(report) = report else {
+        panic!("expected a v3 home report");
+    };
+    assert_eq!(report.recall.window_days, 30);
+    assert_eq!(report.recall.recall_count, 2);
+    assert_eq!(report.recall.zero_result_count, 1);
+    assert_eq!(report.recall.surfaced_total, 2);
+}
+
+#[test]
+fn home_never_crashes_when_no_recall_log_exists_yet() {
+    let root = tempfile::tempdir().unwrap();
+    let repository = root.path().join("kb");
+    let provider = root.path().join("provider");
+    scaffold_personal_kb_v2(&repository).unwrap();
+    fs::create_dir(&provider).unwrap();
+
+    let report = inspect_home(&repository, &provider, &FixedElapsedClock::new()).unwrap();
+    let HomeReport::V3(report) = report else {
+        panic!("expected a v3 home report");
+    };
+    assert_eq!(report.recall.recall_count, 0);
+    assert_eq!(report.recall.zero_result_count, 0);
+    assert_eq!(report.recall.surfaced_total, 0);
 }

@@ -22,6 +22,9 @@
       "$ref": "#/$defs/add_success"
     },
     {
+      "$ref": "#/$defs/find_success"
+    },
+    {
       "$ref": "#/$defs/source_prepare_success"
     },
     {
@@ -70,6 +73,7 @@
         "setup.plan",
         "setup.apply",
         "add",
+        "find",
         "source.prepare",
         "source.write",
         "knowledge.write",
@@ -539,6 +543,206 @@
           "$ref": "#/$defs/add_batch_data"
         }
       ]
+    },
+    "find_confirmation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "confirmed_at"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "confirmed",
+            "unconfirmed"
+          ]
+        },
+        "confirmed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "status": {
+              "const": "confirmed"
+            },
+            "confirmed_at": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "properties": {
+            "status": {
+              "const": "unconfirmed"
+            },
+            "confirmed_at": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    },
+    "find_match": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_type",
+        "record_id",
+        "current_revision",
+        "asset_id",
+        "title",
+        "body",
+        "tags",
+        "perspectives",
+        "layer",
+        "locators",
+        "confirmation"
+      ],
+      "properties": {
+        "record_type": {
+          "enum": [
+            "source",
+            "knowledge"
+          ]
+        },
+        "record_id": {
+          "type": "string",
+          "pattern": "^personal-(source|knowledge)-[0-9a-f]{64}$"
+        },
+        "current_revision": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "asset_id": {
+          "type": "string",
+          "pattern": "^personal-asset-[0-9a-f]{64}$"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 262144
+        },
+        "tags": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "maxLength": 256
+          }
+        },
+        "perspectives": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "enum": [
+              "life",
+              "learning",
+              "technical",
+              "project",
+              "investment"
+            ]
+          }
+        },
+        "layer": {
+          "enum": [
+            "grounded_evidence",
+            "llm_analysis",
+            "counterargument_or_uncertainty",
+            "source_own_words"
+          ]
+        },
+        "locators": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "confirmation": {
+          "$ref": "#/$defs/find_confirmation"
+        }
+      }
+    },
+    "find_note": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "note_id",
+        "text"
+      ],
+      "properties": {
+        "note_id": {
+          "type": "string",
+          "pattern": "^personal-note-[0-9a-f]{64}$"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 32768
+        }
+      }
+    },
+    "find_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "notes",
+        "scan_complete"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": {
+            "$ref": "#/$defs/find_match"
+          }
+        },
+        "notes": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": {
+            "$ref": "#/$defs/find_note"
+          }
+        },
+        "scan_complete": {
+          "type": "boolean"
+        }
+      }
+    },
+    "find_success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "command",
+        "result",
+        "data"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "command": {
+          "const": "find"
+        },
+        "result": {
+          "const": "ok"
+        },
+        "data": {
+          "$ref": "#/$defs/find_data"
+        }
+      }
     },
     "source_prepare_data": {
       "type": "object",

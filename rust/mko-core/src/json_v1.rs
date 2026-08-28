@@ -44,8 +44,6 @@ pub enum JsonV1Command {
     KnowledgeWrite,
     #[serde(rename = "knowledge.review")]
     KnowledgeReview,
-    #[serde(rename = "knowledge.search")]
-    KnowledgeSearch,
     #[serde(rename = "knowledge.show")]
     KnowledgeShow,
     #[serde(rename = "knowledge.list")]
@@ -314,24 +312,6 @@ pub struct KnowledgeReviewData {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConceptMatchData {
-    pub asset_id: String,
-    pub title: String,
-    pub name: String,
-    pub kind: ConceptKind,
-    #[serde(deserialize_with = "deserialize_required_option")]
-    pub locator: Option<String>,
-    pub knowledge_path: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct KnowledgeSearchData {
-    pub matches: Vec<ConceptMatchData>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KnowledgeReviewStatusData {
     Unreviewed,
@@ -452,13 +432,6 @@ pub enum JsonV1Success {
         schema_version: u32,
         result: SuccessResult,
         data: KnowledgeReviewData,
-    },
-    #[serde(rename = "knowledge.search")]
-    KnowledgeSearch {
-        #[serde(deserialize_with = "deserialize_schema_version")]
-        schema_version: u32,
-        result: SuccessResult,
-        data: KnowledgeSearchData,
     },
     #[serde(rename = "knowledge.show")]
     KnowledgeShow {

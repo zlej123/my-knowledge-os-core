@@ -210,7 +210,6 @@ fn json_v1_failure_message(command: &JsonV1Command, code: &str) -> &'static str 
             "knowledge_not_found" => "No unreviewed knowledge note is available for review.",
             _ => "The knowledge note could not be reviewed.",
         },
-        JsonV1Command::KnowledgeSearch => "The knowledge base could not be searched.",
         JsonV1Command::KnowledgeShow => match code {
             "knowledge_not_found" => "No knowledge note was found for that asset.",
             _ => "The knowledge note could not be shown.",

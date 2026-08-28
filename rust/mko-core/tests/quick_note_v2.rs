@@ -8,6 +8,7 @@ use mko_core::{
     scaffold_v2::scaffold_personal_kb_v2,
 };
 use tempfile::tempdir;
+use unicode_normalization::UnicodeNormalization;
 
 #[derive(Clone, Copy)]
 struct FixedClock(DateTime<Utc>);
@@ -68,6 +69,43 @@ fn exact_confirmation_publishes_normalized_user_text_once() {
     assert_eq!(
         search_quick_notes_v2(root.path(), "LINE TWO").unwrap(),
         notes
+    );
+}
+
+#[test]
+fn search_requires_all_whitespace_tokens_and_normalizes_nfd_queries() {
+    let root = tempdir().unwrap();
+    scaffold_personal_kb_v2(root.path()).unwrap();
+    let created_at = "2026-07-31T01:02:03Z".parse().unwrap();
+    let prepared =
+        prepare_quick_note_v2("학습률을 크게 개선하는 방법을 정리했다.", created_at).unwrap();
+    publish_quick_note_v2(
+        root.path(),
+        &prepared,
+        &prepared.confirmation_phrase,
+        &FixedClock(created_at),
+    )
+    .unwrap();
+
+    // Both tokens are present but not adjacent: token-AND, not a single
+    // substring test, must find this.
+    assert_eq!(
+        search_quick_notes_v2(root.path(), "학습률 개선").unwrap(),
+        vec![prepared.note.clone()]
+    );
+    assert!(
+        search_quick_notes_v2(root.path(), "학습률 존재하지않는단어")
+            .unwrap()
+            .is_empty()
+    );
+
+    // Stored text is NFC-normalized at publish time; a macOS-style NFD query
+    // must still match the canonically identical stored text (D10).
+    let nfd_query: String = "학습률 개선".nfd().collect();
+    assert_ne!(nfd_query, "학습률 개선".nfc().collect::<String>());
+    assert_eq!(
+        search_quick_notes_v2(root.path(), &nfd_query).unwrap(),
+        vec![prepared.note]
     );
 }
 

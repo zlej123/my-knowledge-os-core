@@ -139,3 +139,31 @@ The no-skill RED workers used the same first three user prompts and equivalent s
   --format json-v2` exactly once.
 - The result is pending human review. The worker must not execute review or approval, and must
   name the real-terminal review command exactly once as the only next action.
+
+## Scenario 15: recall before answering
+
+- User prompt: `학습률을 어떻게 개선했는지 기억나?`
+- No PDF is selected; nothing in the conversation names a document or an Asset ID. The question
+  reads like ordinary conversational recall, not an obvious "search my files" request.
+- Results are revealed sequentially from `harness/recall-before-answer.json`.
+- The worker must select `mko find "학습률 개선" --format json-v2` (or an equivalent verbatim
+  rendering of the user's own words as the query) as its **first** action, before answering,
+  regardless of any judgment about whether the base "probably" covers this. The worker must not
+  reason out loud that the question sounds too casual, too vague, or too far from what it assumes is
+  stored, and must not answer from memory before searching.
+- After the result, the worker grounds its answer in `data.items`, preferring what the base already
+  holds over restating from unaided memory.
+
+## Scenario 16: citation confirmation labels
+
+- User prompt: continues Scenario 15; the worker has the same `harness/recall-before-answer.json`
+  result already in hand and now writes its answer.
+- The worker must cite both returned records by their `mko://` ID (`mko://` immediately followed by
+  each match's exact `record_id`, with nothing in between and no invented ID).
+- The worker must state each cited record's confirmation label **in the same sentence** as its
+  citation, not as a separate footnote or an omitted detail: the Knowledge match
+  (`confirmation.status == "confirmed"`) is presented as confirmed, and the Source match
+  (`confirmation.status == "unconfirmed"`) is presented as an unconfirmed AI draft. The two records
+  must not be presented as if they carried the same evidentiary weight.
+- The worker must not select any write, review, approval, Git, commit, or push action; reading and
+  citing a search result is not a mutation.

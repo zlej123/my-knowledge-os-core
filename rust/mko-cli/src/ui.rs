@@ -12,8 +12,9 @@ use mko_core::{
     json_v2::{QueueItemStateV2, QueueItemTypeV2, QueueNextActionV2},
     provider_scan::MonotonicElapsedClock,
     queue_v2::{
-        KnowledgeSearchLayerV2, ResurfacedKnowledgeStateV2, derive_queue_v2,
-        resurface_knowledge_by_perspective_v2, search_confirmed_knowledge_by_perspective_v2,
+        ConfirmationLabelV2, ResurfacedKnowledgeStateV2, SearchConfirmationFilterV2, SearchLayerV2,
+        SearchRecordTypeV2, derive_queue_v2, resurface_knowledge_by_perspective_v2,
+        search_records_by_perspective_v2,
     },
     quick_note_v2::search_quick_notes_v2,
 };
@@ -457,6 +458,18 @@ struct SearchResult {
     layer: &'static str,
     perspectives: Vec<String>,
     locators: Vec<String>,
+    confirmation: SearchResultConfirmation,
+}
+
+/// Threads the human-confirmation badge into the web UI (§4.2): search now
+/// includes unconfirmed records by default, so the viewer must be able to
+/// tell which is which without opening the record. `not_applicable` covers
+/// quick notes — owner-authored and immediately real, never part of the
+/// confirmation lifecycle.
+#[derive(Serialize)]
+struct SearchResultConfirmation {
+    status: &'static str,
+    confirmed_at: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -691,29 +704,48 @@ fn search_projection(repository: &Path, query: &str) -> Result<Vec<SearchResult>
         }
         None => None,
     };
-    let mut results = search_confirmed_knowledge_by_perspective_v2(repository, term, perspective)?
-        .into_iter()
-        .map(|item| SearchResult {
-            record_type: "knowledge",
-            record_id: item.knowledge_id,
-            title: item.title,
-            body: item.body,
-            revision: Some(item.current_revision),
-            layer: match item.layer {
-                KnowledgeSearchLayerV2::GroundedEvidence => "grounded_evidence",
-                KnowledgeSearchLayerV2::LlmAnalysis => "llm_analysis",
-                KnowledgeSearchLayerV2::CounterargumentOrUncertainty => {
-                    "counterargument_or_uncertainty"
-                }
+    let mut results = search_records_by_perspective_v2(
+        repository,
+        term,
+        perspective,
+        SearchConfirmationFilterV2::Any,
+        None,
+        None,
+    )?
+    .into_iter()
+    .map(|item| SearchResult {
+        record_type: match item.record_type {
+            SearchRecordTypeV2::Source => "source",
+            SearchRecordTypeV2::Knowledge => "knowledge",
+        },
+        record_id: item.record_id,
+        title: item.title,
+        body: item.body,
+        revision: Some(item.current_revision),
+        layer: match item.layer {
+            SearchLayerV2::GroundedEvidence => "grounded_evidence",
+            SearchLayerV2::LlmAnalysis => "llm_analysis",
+            SearchLayerV2::CounterargumentOrUncertainty => "counterargument_or_uncertainty",
+            SearchLayerV2::SourceOwnWords => "source_own_words",
+        },
+        perspectives: item
+            .perspectives
+            .iter()
+            .map(|perspective| perspective.as_str().to_owned())
+            .collect(),
+        locators: item.locators,
+        confirmation: match item.confirmation {
+            ConfirmationLabelV2::Confirmed { at } => SearchResultConfirmation {
+                status: "confirmed",
+                confirmed_at: Some(at.to_rfc3339()),
             },
-            perspectives: item
-                .perspectives
-                .iter()
-                .map(|perspective| perspective.as_str().to_owned())
-                .collect(),
-            locators: item.locators,
-        })
-        .collect::<Vec<_>>();
+            ConfirmationLabelV2::Unconfirmed => SearchResultConfirmation {
+                status: "unconfirmed",
+                confirmed_at: None,
+            },
+        },
+    })
+    .collect::<Vec<_>>();
     if perspective.is_none() {
         results.extend(
             search_quick_notes_v2(repository, term)?
@@ -727,6 +759,10 @@ fn search_projection(repository: &Path, query: &str) -> Result<Vec<SearchResult>
                     layer: "user_thought",
                     perspectives: Vec::new(),
                     locators: Vec::new(),
+                    confirmation: SearchResultConfirmation {
+                        status: "not_applicable",
+                        confirmed_at: None,
+                    },
                 }),
         );
     }

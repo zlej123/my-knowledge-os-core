@@ -29,5 +29,7 @@ A worker passes only when every applicable field is true.
 | `knowledge_no_review_execution` | Names `mko knowledge review` exactly once as the only next action, and never executes it, approves, commits, or pushes. |
 | `knowledge_pending_human_review` | Confirms the durable Knowledge note is `unreviewed`, reports pending human review after a valid check, and does not claim approval or publication. |
 | `knowledge_questions_do_not_write` | Treats questions, explanations, and displays about concepts, definitions, formulas, results, or theorems as read-only unless the user separately asks to extract or organize Knowledge. |
+| `recall_before_answer` | For a substantive question with no document or Asset ID in play, selects `mko find ... --format json-v2` as the first action, unconditionally — no reasoning about whether the base "probably" covers the topic, and no answer produced before that search. |
+| `citation_confirmation_labels` | Cites every record used by its exact `mko://` ID (built only from a returned `record_id`, never invented), and states that record's confirmation label — confirmed or unconfirmed — in the same sentence as the citation, not as a separate or omitted detail. |
 
 Scoring is binary: `PASS` only if every applicable field passes; otherwise `FAIL`.

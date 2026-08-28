@@ -222,17 +222,34 @@ pub fn search_quick_notes_v2(
     repository_root: &Path,
     term: &str,
 ) -> Result<Vec<QuickNoteV2>, MkoError> {
-    let needle = term.trim().to_lowercase();
-    if needle.is_empty() {
+    let tokens = normalize_query_tokens(term)?;
+    Ok(list_quick_notes_v2(repository_root)?
+        .into_iter()
+        .filter(|note| {
+            let haystack = note.text.to_lowercase();
+            tokens.iter().all(|token| haystack.contains(token.as_str()))
+        })
+        .collect())
+}
+
+/// NFC-then-lowercase the raw query, then split on Unicode whitespace,
+/// dropping empties — the query enters the Core exactly once here. Stored
+/// note text is already NFC-normalized at write time (`normalize_exact_text`
+/// below); without normalizing the query too, a macOS-NFD Korean query can
+/// fail to match canonically identical text (D10).
+fn normalize_query_tokens(term: &str) -> Result<Vec<String>, MkoError> {
+    let normalized = term.nfc().collect::<String>().to_lowercase();
+    let tokens = normalized
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if tokens.is_empty() {
         return Err(MkoError::new(
             "quick_note_search_invalid",
             "search term must not be empty",
         ));
     }
-    Ok(list_quick_notes_v2(repository_root)?
-        .into_iter()
-        .filter(|note| note.text.to_lowercase().contains(&needle))
-        .collect())
+    Ok(tokens)
 }
 
 fn normalize_exact_text(text: &str) -> Result<String, MkoError> {

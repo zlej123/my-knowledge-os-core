@@ -40,6 +40,7 @@ pub mod provider_scan;
 pub mod question_v2;
 pub mod queue_v2;
 pub mod quick_note_v2;
+pub mod recall_log_v2;
 pub mod records_v2;
 pub mod registry;
 pub mod resurface_history_v2;
