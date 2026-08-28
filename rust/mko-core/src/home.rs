@@ -48,9 +48,12 @@ pub struct V3HomeReport {
     pub in_progress: u64,
     /// Why each of them stopped, when an attempt is on file to say so.
     pub stuck: Vec<StuckMaterialV2>,
-    pub review_pending: u64,
-    pub changes_requested: u64,
-    pub approved_knowledge: u64,
+    /// A Source or Knowledge revision is complete the moment the Core writes
+    /// it (§4.1); an unconfirmed record is not unfinished work, so home does
+    /// not surface a review-debt count. `mko queue` (or `mko confirm`)
+    /// remains the command-reachable way to see what a human has not yet
+    /// looked at.
+    pub confirmed_knowledge: u64,
     pub blocked: u64,
     /// False when provider discovery was incomplete, so a caller can say "this
     /// is what I could see" rather than "this is everything".
@@ -93,10 +96,13 @@ impl HomeReport {
                 }
             }
             Self::V3(report) => {
+                // Unconfirmed and changes-requested records are not
+                // unfinished work (§4.2): they no longer drive the
+                // recommended next action, and home never suggests "review"
+                // for a v3 repository — `mko queue` / `mko confirm` reach it
+                // by command instead.
                 if report.blocked > 0 {
                     HomeNextAction::Repair
-                } else if report.review_pending > 0 || report.changes_requested > 0 {
-                    HomeNextAction::Review
                 } else if report.new_material > 0 || report.in_progress > 0 {
                     HomeNextAction::Add
                 } else {
@@ -191,9 +197,7 @@ pub fn inspect_home(
                 registered: inbox.registered_count,
                 in_progress,
                 stuck,
-                review_pending: queue.review_pending,
-                changes_requested: queue.changes_requested,
-                approved_knowledge: queue.approved_knowledge,
+                confirmed_knowledge: queue.confirmed_knowledge,
                 blocked: inbox.blocked_count.saturating_add(queue.blocked),
                 scan_complete: inbox.scan_complete,
             }))

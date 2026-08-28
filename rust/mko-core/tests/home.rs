@@ -56,8 +56,7 @@ fn v3_home_inspection_is_read_only_and_counts_new_provider_pdfs() {
     };
     assert_eq!(report.new_material, 1);
     assert_eq!(report.registered, 0);
-    assert_eq!(report.review_pending, 0);
-    assert_eq!(report.approved_knowledge, 0);
+    assert_eq!(report.confirmed_knowledge, 0);
     assert_eq!(report.blocked, 0);
     assert_eq!(HomeReport::V3(report).next_action(), HomeNextAction::Add);
     assert!(
@@ -104,7 +103,6 @@ fn material_registered_but_not_yet_recorded_stays_visible_on_home() {
         report.in_progress, 1,
         "registered without a record is unfinished work"
     );
-    assert_eq!(report.review_pending, 0);
     assert_eq!(
         HomeReport::V3(report).next_action(),
         HomeNextAction::Add,

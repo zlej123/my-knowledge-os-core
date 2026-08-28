@@ -52,6 +52,7 @@ use mko_core::{
         ConceptKind, ConceptMatch, KnowledgeSearchQuery, WriteKnowledgeRequest, approve_knowledge,
         list_knowledge, list_unreviewed_knowledge, search_knowledge, write_knowledge_note,
     },
+    migrate_v2::migrate_v2,
     model::AssetStatus,
     pdf::{ExtractionWorkerResponse, extract_pdf_pages_from_reader, worker_executable},
     perspective_v2::{prepare_perspective_confirmation_v2, publish_perspective_confirmation_v2},
@@ -60,7 +61,7 @@ use mko_core::{
     question_v2::{QuestionRecordV2, append_question_v2, questions_for_asset_v2},
     queue_v2::{
         KnowledgeSearchLayerV2, ResurfacedKnowledgeStateV2, resurface_knowledge_by_perspective_v2,
-        search_approved_knowledge_by_perspective_v2, summarize_home_queue_v2,
+        search_confirmed_knowledge_by_perspective_v2, summarize_home_queue_v2,
     },
     quick_note_v2::{
         QuickNotePublicationOutcomeV2, prepare_quick_note_v2, publish_quick_note_v2,
@@ -286,7 +287,7 @@ enum Command {
     Setup(SetupArgs),
     /// Inbox의 새 자료를 등록합니다
     Add(AddArgs),
-    /// 승인된 지식에서 내용을 찾습니다
+    /// 확인된 지식에서 내용을 찾습니다
     Find(FindArgs),
     /// 지식과 투자 판단을 한 화면에서 읽습니다
     Ui(UiArgs),
@@ -323,8 +324,10 @@ enum Command {
     ReviewOpen(ReviewOpenArgs),
     #[command(name = "review-feedback", hide = true)]
     ReviewFeedback(ReviewFeedbackArgs),
-    /// 대기 중인 초안을 읽고 승인하거나 돌려보냅니다
-    Review(ReviewArgs),
+    /// 대기 중인 초안을 읽고 확인하거나 돌려보냅니다
+    Confirm(ConfirmArgs),
+    /// 지식 저장소를 최신 계약 버전으로 이전합니다 (git 작업 트리가 깨끗해야 합니다)
+    Migrate(MigrateArgs),
     #[command(hide = true)]
     Dashboard(DashboardArgs),
     #[command(hide = true)]
@@ -663,12 +666,21 @@ struct ReviewFeedbackArgs {
     format: OutputFormat,
 }
 #[derive(Args)]
-struct ReviewArgs {
+struct ConfirmArgs {
     #[arg(
         value_name = "TARGET_OR_QUEUE_ID",
-        help = "Source/Knowledge ID approves only that record; a queue item ID (or no ID) approves all actionable records in the displayed card"
+        help = "Source/Knowledge ID confirms only that record; a queue item ID (or no ID) confirms all actionable records in the displayed card"
     )]
     stable_id: Option<String>,
+    #[arg(long)]
+    repo: Option<PathBuf>,
+}
+/// Human-only, like `mko setup`: a one-time, consequential structural change
+/// to the KB contract that only the owner runs, never the agent (working
+/// rule: LLMs and adapters must not automatically approve, commit, or push;
+/// this is squarely in that bucket, so it carries no machine `--format`).
+#[derive(Args)]
+struct MigrateArgs {
     #[arg(long)]
     repo: Option<PathBuf>,
 }
@@ -964,11 +976,7 @@ fn home() -> Result<(), MkoError> {
             confirm_download: false,
             format: OutputFormat::Human,
         }),
-        (HomeReport::V3(_), "2") => review(ReviewArgs {
-            stable_id: None,
-            repo: Some(context.repository_root.clone()),
-        }),
-        (HomeReport::V3(_), "3") => {
+        (HomeReport::V3(_), "2") => {
             print!("찾을 내용 › ");
             std::io::stdout()
                 .flush()
@@ -983,16 +991,16 @@ fn home() -> Result<(), MkoError> {
                 repo: Some(context.repository_root),
             })
         }
-        (HomeReport::V3(_), "4") => remember(RememberArgs {
+        (HomeReport::V3(_), "3") => remember(RememberArgs {
             text: None,
             repo: Some(context.repository_root),
         }),
-        (HomeReport::V3(report), "5") if report.blocked > 0 => doctor(DoctorArgs {
+        (HomeReport::V3(report), "4") if report.blocked > 0 => doctor(DoctorArgs {
             repo: Some(context.repository_root),
             clear_stale_lock: false,
             format: OutputFormat::Human,
         }),
-        (HomeReport::V3(_), "5") => resurface(&context.repository_root),
+        (HomeReport::V3(_), "4") => resurface(&context.repository_root),
         _ => Err(MkoError::new(
             "home_selection_invalid",
             "표시된 번호나 q를 입력하세요",
@@ -1021,14 +1029,13 @@ fn render_home(report: &HomeReport) {
         }
         HomeReport::V3(report) => {
             let next_action = HomeReport::V3(report.clone()).next_action();
+            // A Source or Knowledge revision is complete the moment the Core
+            // writes it (§4.1), so this line does not carry a review-debt
+            // count. `mko queue` (or `mko confirm`) reaches the unconfirmed
+            // list by command, same as before.
             println!(
-                "새 자료 {} · 정리 중 {} · 검토 {} · 수정 필요 {} · 승인된 지식 {} · 문제 {}",
-                report.new_material,
-                report.in_progress,
-                report.review_pending,
-                report.changes_requested,
-                report.approved_knowledge,
-                report.blocked
+                "새 자료 {} · 정리 중 {} · 확인된 지식 {} · 문제 {}",
+                report.new_material, report.in_progress, report.confirmed_knowledge, report.blocked
             );
             println!(
                 "추천: {}",
@@ -1055,13 +1062,12 @@ fn render_home(report: &HomeReport) {
             } else {
                 println!("[1] 새 자료 정리");
             }
-            println!("[2] 검토 계속");
-            println!("[3] 지식 찾기");
-            println!("[4] 빠른 메모");
+            println!("[2] 지식 찾기");
+            println!("[3] 빠른 메모");
             if report.blocked > 0 {
-                println!("[5] 문제 확인");
+                println!("[4] 문제 확인");
             } else {
-                println!("[5] 다시 볼 지식");
+                println!("[4] 다시 볼 지식");
             }
             println!("[q] 닫기");
         }
@@ -1094,7 +1100,7 @@ fn legacy_home_action(
         });
     }
     if report.review_pending > 0 {
-        return review(ReviewArgs {
+        return confirm(ConfirmArgs {
             stable_id: None,
             repo: Some(repository.to_path_buf()),
         });
@@ -1123,19 +1129,23 @@ fn legacy_home_action(
 }
 
 /// Finding nothing is a normal outcome, but ending there hides the reason.
-/// Approved knowledge is the only thing search covers, so when the shelf is
-/// empty or everything is still waiting on the owner, say which it is.
+/// Confirmed knowledge is the only thing search covers in Phase 0 (search
+/// stays confirmed-only here; unconfirmed-inclusive search is Phase 1a), so
+/// when the shelf is empty or everything is still unconfirmed, say which it
+/// is. This is a search-scope explainer, not a review-debt nudge: it points
+/// at the command-reachable queue rather than at a "continue reviewing" home
+/// action, because home does not offer one (§4.2).
 fn report_search_dead_end(repository: &Path) {
     let Ok(summary) = summarize_home_queue_v2(repository) else {
         return;
     };
-    if summary.approved_knowledge == 0 {
-        println!("아직 승인된 지식이 없습니다. 검색은 승인된 지식만 찾습니다.");
+    if summary.confirmed_knowledge == 0 {
+        println!("아직 확인된 지식이 없습니다. 검색은 확인된 지식만 찾습니다.");
     }
     let waiting = summary.review_pending + summary.changes_requested;
     if waiting > 0 {
-        println!("검토를 기다리는 항목이 {waiting}개 있습니다.");
-        println!("`mko`를 열어 검토를 계속하면 검색에도 나타납니다.");
+        println!("아직 확인하지 않은 항목이 {waiting}개 있습니다.");
+        println!("`mko queue`로 볼 수 있습니다.");
     }
     // Blocked material is waiting on the owner too, and more urgently: it needs
     // diagnosis, not review. Telling someone to start organizing new material
@@ -1143,7 +1153,7 @@ fn report_search_dead_end(repository: &Path) {
     if summary.blocked > 0 {
         println!("문제가 있어 멈춘 항목이 {}개 있습니다.", summary.blocked);
         println!("`mko`를 열어 문제를 확인하면 다시 진행할 수 있습니다.");
-    } else if waiting == 0 && summary.approved_knowledge == 0 {
+    } else if waiting == 0 && summary.confirmed_knowledge == 0 {
         println!("`mko`를 열어 새 자료를 정리하는 것부터 시작할 수 있습니다.");
     }
 }
@@ -1176,7 +1186,7 @@ fn find(arguments: FindArgs) -> Result<(), MkoError> {
             }
         }
         RepositoryGeneration::V3 => {
-            let matches = search_approved_knowledge_by_perspective_v2(
+            let matches = search_confirmed_knowledge_by_perspective_v2(
                 &repository,
                 &arguments.term,
                 perspective,
@@ -1187,7 +1197,7 @@ fn find(arguments: FindArgs) -> Result<(), MkoError> {
                 Vec::new()
             };
             if matches.is_empty() && notes.is_empty() {
-                println!("승인된 지식에서 찾지 못했습니다.");
+                println!("확인된 지식에서 찾지 못했습니다.");
                 report_search_dead_end(&repository);
             } else {
                 for item in matches {
@@ -1467,7 +1477,7 @@ fn resurface(repository: &Path) -> Result<(), MkoError> {
         "{} · 검토 {} · 마지막 열람 {}",
         match selected.review_state {
             ResurfacedKnowledgeStateV2::Deferred => "나중에 보기",
-            ResurfacedKnowledgeStateV2::Approved => "승인됨",
+            ResurfacedKnowledgeStateV2::Confirmed => "확인됨",
         },
         selected.reviewed_at.format("%Y-%m-%d"),
         selected
@@ -1620,7 +1630,8 @@ fn run(cli: Cli) -> Result<Exit, MkoError> {
         Some(Command::ReviewFeedback(arguments)) => {
             review_feedback_v2(arguments).map(|_| Exit::Success)
         }
-        Some(Command::Review(arguments)) => review(arguments).map(|_| Exit::Success),
+        Some(Command::Confirm(arguments)) => confirm(arguments).map(|_| Exit::Success),
+        Some(Command::Migrate(arguments)) => migrate(arguments).map(|_| Exit::Success),
         Some(Command::Dashboard(arguments)) => dashboard(arguments).map(|_| Exit::Success),
         Some(Command::Knowledge {
             command: KnowledgeCommand::Write(arguments),
@@ -2366,16 +2377,38 @@ fn status(arguments: StatusArgs) -> Result<(), MkoError> {
     }
 }
 
-fn review(arguments: ReviewArgs) -> Result<(), MkoError> {
+fn confirm(arguments: ConfirmArgs) -> Result<(), MkoError> {
     let repository = setup_repository(arguments.repo)?;
     if crate::cli_v2::is_v2_repository(&repository)? {
-        return crate::cli_v2::review(&repository, arguments.stable_id.as_deref(), &SystemClock);
+        return crate::cli_v2::confirm(&repository, arguments.stable_id.as_deref(), &SystemClock);
     }
     match review_pending(&repository)? {
         ReviewOutcome::Deferred => println!("deferred"),
         ReviewOutcome::Approved(result) => {
             println!("approved {} {}", result.source_id, result.revision)
         }
+    }
+    Ok(())
+}
+
+/// Phase 0's contract migration (D12, §4.3). Deliberately does not gate on
+/// `crate::cli_v2::is_v2_repository`: that check reads the KB config through
+/// the strict, current-contract-only path, which is exactly what an
+/// unmigrated KB fails. `migrate_v2` reads it through the migration-specific
+/// path instead.
+fn migrate(arguments: MigrateArgs) -> Result<(), MkoError> {
+    let repository = setup_repository(arguments.repo)?;
+    let result = migrate_v2(&repository, &SystemClock)?;
+    println!(
+        "{} → {} 계약으로 이전했습니다.",
+        result.from_contract_version, result.to_contract_version
+    );
+    println!(
+        "생성 파일 {}개를 새 어휘로 갱신했습니다:",
+        result.dashboard.generated_files.len()
+    );
+    for path in result.dashboard.generated_files {
+        println!("- {path}");
     }
     Ok(())
 }

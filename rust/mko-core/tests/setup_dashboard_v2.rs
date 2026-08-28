@@ -104,7 +104,7 @@ fn setup_creates_exact_provider_profile_and_dashboard_and_is_idempotent() {
     assert_eq!(first.provider_root, provider.canonicalize().unwrap());
     assert!(provider.is_dir());
     assert!(repository.join("HOME.md").is_file());
-    assert!(repository.join("views/review-queue.base").is_file());
+    assert!(repository.join("views/unconfirmed.base").is_file());
     assert!(repository.join("views/knowledge-library.base").is_file());
     let knowledge_base =
         fs::read_to_string(repository.join("views/knowledge-library.base")).unwrap();

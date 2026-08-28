@@ -26,7 +26,7 @@ fn dashboard_json_v2_is_typed_read_only_and_repairs_only_safe_drift() {
     let root = tempdir().unwrap();
     scaffold_personal_kb_v2(root.path()).unwrap();
     ensure_dashboard_v2(root.path()).unwrap();
-    let missing = root.path().join("views/review-queue.base");
+    let missing = root.path().join("views/unconfirmed.base");
     fs::remove_file(&missing).unwrap();
 
     let output = Command::cargo_bin("mko")
@@ -49,7 +49,7 @@ fn dashboard_json_v2_is_typed_read_only_and_repairs_only_safe_drift() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|item| item["path"] == "views/review-queue.base")
+        .find(|item| item["path"] == "views/unconfirmed.base")
         .unwrap();
     assert_eq!(item["state"], "missing");
     assert_eq!(item["next_action"], "repair");

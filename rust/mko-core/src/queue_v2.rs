@@ -48,22 +48,22 @@ const RECORD_SCAN_DEADLINE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReviewCardTargetStateV2 {
-    Unreviewed,
+    Unconfirmed,
     Deferred,
     ChangesRequested,
-    RevisedUnreviewed,
-    Approved,
+    RevisedUnconfirmed,
+    Confirmed,
     Blocked,
 }
 
 impl ReviewCardTargetStateV2 {
     fn as_str(&self) -> &'static str {
         match self {
-            Self::Unreviewed => "unreviewed",
+            Self::Unconfirmed => "unconfirmed",
             Self::Deferred => "deferred",
             Self::ChangesRequested => "changes_requested",
-            Self::RevisedUnreviewed => "revised_unreviewed",
-            Self::Approved => "approved",
+            Self::RevisedUnconfirmed => "revised_unconfirmed",
+            Self::Confirmed => "confirmed",
             Self::Blocked => "blocked",
         }
     }
@@ -75,14 +75,14 @@ pub struct ReviewCardTargetV2 {
     pub state: ReviewCardTargetStateV2,
     /// Core-owned policy embedded in the exact immutable Knowledge revision.
     ///
-    /// Approval requires the human to type this value back for every pending
-    /// Knowledge target. Source targets have no domain policy.
+    /// Confirming requires the human to type this value back for every
+    /// pending Knowledge target. Source targets have no domain policy.
     pub domain_policy: Option<DomainPolicyV2>,
-    pub previous_approved_revision: Option<String>,
+    pub previous_confirmed_revision: Option<String>,
     pub previous_reviewed_revision: Option<String>,
     pub current_feedback: Option<String>,
     /// Feedback the displayed replacement revision claims to address; present
-    /// only in the revised-unreviewed state.
+    /// only in the revised-unconfirmed state.
     pub addressed_feedback: Option<String>,
     pub conflicting_review_head_ids: Vec<String>,
     pub effects: Vec<String>,
@@ -103,7 +103,7 @@ pub struct HomeQueueSummaryV2 {
     pub review_pending: u64,
     pub changes_requested: u64,
     pub blocked: u64,
-    pub approved_knowledge: u64,
+    pub confirmed_knowledge: u64,
     /// Assets that already have a Source or Knowledge record, in any state.
     pub recorded_asset_ids: BTreeSet<String>,
 }
@@ -144,7 +144,7 @@ pub struct ResurfacedKnowledgeV2 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResurfacedKnowledgeStateV2 {
     Deferred,
-    Approved,
+    Confirmed,
 }
 
 #[derive(Clone)]
@@ -208,9 +208,9 @@ pub fn summarize_home_queue_v2(repository_root: &Path) -> Result<HomeQueueSummar
     let mut summary = HomeQueueSummaryV2::default();
     for item in queue.items {
         match item.state {
-            crate::json_v2::QueueItemStateV2::Unreviewed
+            crate::json_v2::QueueItemStateV2::Unconfirmed
             | crate::json_v2::QueueItemStateV2::Deferred
-            | crate::json_v2::QueueItemStateV2::RevisedUnreviewed => {
+            | crate::json_v2::QueueItemStateV2::RevisedUnconfirmed => {
                 summary.review_pending += 1;
             }
             crate::json_v2::QueueItemStateV2::ChangesRequested => {
@@ -226,12 +226,12 @@ pub fn summarize_home_queue_v2(repository_root: &Path) -> Result<HomeQueueSummar
         .flatten()
         .map(|target| target.asset.id.clone())
         .collect();
-    summary.approved_knowledge = groups
+    summary.confirmed_knowledge = groups
         .values()
         .flatten()
         .filter(|target| {
             target.record_type == ReviewTargetTypeV2::Knowledge
-                && target.state == Some(ReviewCardTargetStateV2::Approved)
+                && target.state == Some(ReviewCardTargetStateV2::Confirmed)
         })
         .count()
         .try_into()
@@ -239,14 +239,14 @@ pub fn summarize_home_queue_v2(repository_root: &Path) -> Result<HomeQueueSummar
     Ok(summary)
 }
 
-pub fn search_approved_knowledge_v2(
+pub fn search_confirmed_knowledge_v2(
     repository_root: &Path,
     term: &str,
 ) -> Result<Vec<KnowledgeSearchMatchV2>, MkoError> {
-    search_approved_knowledge_by_perspective_v2(repository_root, term, None)
+    search_confirmed_knowledge_by_perspective_v2(repository_root, term, None)
 }
 
-pub fn search_approved_knowledge_by_perspective_v2(
+pub fn search_confirmed_knowledge_by_perspective_v2(
     repository_root: &Path,
     term: &str,
     perspective: Option<PerspectiveV2>,
@@ -264,7 +264,7 @@ pub fn search_approved_knowledge_by_perspective_v2(
         .flatten()
         .filter(|target| {
             target.record_type == ReviewTargetTypeV2::Knowledge
-                && target.state == Some(ReviewCardTargetStateV2::Approved)
+                && target.state == Some(ReviewCardTargetStateV2::Confirmed)
         })
         .flat_map(|target| {
             let RevisionV2::Knowledge(revision) = &target.revision else {
@@ -336,14 +336,14 @@ fn search_layer(kind: &KnowledgeUnitKindV2) -> KnowledgeSearchLayerV2 {
     }
 }
 
-pub fn resurface_approved_knowledge_v2(
+pub fn resurface_confirmed_knowledge_v2(
     repository_root: &Path,
     limit: usize,
 ) -> Result<Vec<ResurfacedKnowledgeV2>, MkoError> {
-    resurface_approved_knowledge_by_perspective_v2(repository_root, None, limit)
+    resurface_confirmed_knowledge_by_perspective_v2(repository_root, None, limit)
 }
 
-pub fn resurface_approved_knowledge_by_perspective_v2(
+pub fn resurface_confirmed_knowledge_by_perspective_v2(
     repository_root: &Path,
     perspective: Option<PerspectiveV2>,
     limit: usize,
@@ -372,7 +372,7 @@ fn resurface_knowledge_internal(
         .flatten()
         .filter(|target| {
             target.record_type == ReviewTargetTypeV2::Knowledge
-                && (target.state == Some(ReviewCardTargetStateV2::Approved)
+                && (target.state == Some(ReviewCardTargetStateV2::Confirmed)
                     || (include_deferred
                         && target.state == Some(ReviewCardTargetStateV2::Deferred)))
         })
@@ -402,7 +402,7 @@ fn resurface_knowledge_internal(
                 review_state: if target.state == Some(ReviewCardTargetStateV2::Deferred) {
                     ResurfacedKnowledgeStateV2::Deferred
                 } else {
-                    ResurfacedKnowledgeStateV2::Approved
+                    ResurfacedKnowledgeStateV2::Confirmed
                 },
                 reviewed_at,
                 last_opened_at: opened_at
@@ -474,7 +474,7 @@ fn queue_from_groups(
         .filter(|targets| {
             targets
                 .iter()
-                .any(|target| target.state.as_ref() != Some(&ReviewCardTargetStateV2::Approved))
+                .any(|target| target.state.as_ref() != Some(&ReviewCardTargetStateV2::Confirmed))
         })
         .map(queue_item)
         .collect::<Result<Vec<_>, _>>()?;
@@ -836,24 +836,24 @@ fn revision_json<'a>(bytes: &'a [u8], heading: &[u8]) -> Result<&'a [u8], MkoErr
 
 fn target_state(history: &ReviewTargetHistoryV2) -> ReviewCardTargetStateV2 {
     match history.derived.state {
-        ReviewDerivedStateV2::Unreviewed if history.previous_reviewed_revision.is_some() => {
-            ReviewCardTargetStateV2::RevisedUnreviewed
+        ReviewDerivedStateV2::Unconfirmed if history.previous_reviewed_revision.is_some() => {
+            ReviewCardTargetStateV2::RevisedUnconfirmed
         }
-        ReviewDerivedStateV2::Unreviewed => ReviewCardTargetStateV2::Unreviewed,
+        ReviewDerivedStateV2::Unconfirmed => ReviewCardTargetStateV2::Unconfirmed,
         ReviewDerivedStateV2::Deferred => ReviewCardTargetStateV2::Deferred,
         ReviewDerivedStateV2::ChangesRequested => ReviewCardTargetStateV2::ChangesRequested,
-        ReviewDerivedStateV2::Approved => ReviewCardTargetStateV2::Approved,
+        ReviewDerivedStateV2::Confirmed => ReviewCardTargetStateV2::Confirmed,
         ReviewDerivedStateV2::BlockedConflict => ReviewCardTargetStateV2::Blocked,
     }
 }
 
 fn projection_state(state: &ReviewCardTargetStateV2) -> ProjectionStateV2 {
     match state {
-        ReviewCardTargetStateV2::Unreviewed => ProjectionStateV2::Unreviewed,
+        ReviewCardTargetStateV2::Unconfirmed => ProjectionStateV2::Unconfirmed,
         ReviewCardTargetStateV2::Deferred => ProjectionStateV2::Deferred,
         ReviewCardTargetStateV2::ChangesRequested => ProjectionStateV2::ChangesRequested,
-        ReviewCardTargetStateV2::RevisedUnreviewed => ProjectionStateV2::RevisedUnreviewed,
-        ReviewCardTargetStateV2::Approved => ProjectionStateV2::Approved,
+        ReviewCardTargetStateV2::RevisedUnconfirmed => ProjectionStateV2::RevisedUnconfirmed,
+        ReviewCardTargetStateV2::Confirmed => ProjectionStateV2::Confirmed,
         ReviewCardTargetStateV2::Blocked => ProjectionStateV2::Blocked,
     }
 }
@@ -882,9 +882,9 @@ fn queue_item(targets: &Vec<ScannedTarget>) -> Result<QueueItemV2, MkoError> {
         next_action: match aggregate_queue_state(targets) {
             QueueItemStateV2::ChangesRequested => QueueNextActionV2::Regenerate,
             QueueItemStateV2::Blocked => QueueNextActionV2::Diagnose,
-            QueueItemStateV2::Unreviewed
+            QueueItemStateV2::Unconfirmed
             | QueueItemStateV2::Deferred
-            | QueueItemStateV2::RevisedUnreviewed => QueueNextActionV2::Display,
+            | QueueItemStateV2::RevisedUnconfirmed => QueueNextActionV2::Display,
         },
     })
 }
@@ -896,10 +896,10 @@ fn aggregate_queue_state(targets: &[ScannedTarget]) -> QueueItemStateV2 {
         QueueItemStateV2::Blocked
     } else if states.contains(&&ReviewCardTargetStateV2::ChangesRequested) {
         QueueItemStateV2::ChangesRequested
-    } else if states.contains(&&ReviewCardTargetStateV2::RevisedUnreviewed) {
-        QueueItemStateV2::RevisedUnreviewed
-    } else if states.contains(&&ReviewCardTargetStateV2::Unreviewed) {
-        QueueItemStateV2::Unreviewed
+    } else if states.contains(&&ReviewCardTargetStateV2::RevisedUnconfirmed) {
+        QueueItemStateV2::RevisedUnconfirmed
+    } else if states.contains(&&ReviewCardTargetStateV2::Unconfirmed) {
+        QueueItemStateV2::Unconfirmed
     } else {
         QueueItemStateV2::Deferred
     }
@@ -983,14 +983,14 @@ fn render_card(
     for card_target in &card_targets {
         let snapshot = &card_target.snapshot;
         card.push_str(&format!(
-            "\n### {}\n\n- Record ID: `{}`\n- Current revision: `{}`\n- Review head: `{}`\n- State: `{}`\n- Previous approved revision: `{}`\n- Effects: `{}`\n",
+            "\n### {}\n\n- Record ID: `{}`\n- Current revision: `{}`\n- Review head: `{}`\n- State: `{}`\n- Previous confirmed revision: `{}`\n- Effects: `{}`\n",
             target_type_name(&snapshot.record_type),
             snapshot.record_id,
             snapshot.displayed_revision,
             snapshot.expected_review_head_id.as_deref().unwrap_or("none"),
             card_target.state.as_str(),
             card_target
-                .previous_approved_revision
+                .previous_confirmed_revision
                 .as_deref()
                 .unwrap_or("none"),
             card_target.effects.join(", "),
@@ -1046,7 +1046,7 @@ fn render_card(
                         append_json_section(&mut card, &heading, &revision.response)?;
                     }
                 }
-                if target.state == Some(ReviewCardTargetStateV2::RevisedUnreviewed) {
+                if target.state == Some(ReviewCardTargetStateV2::RevisedUnconfirmed) {
                     if let Some(feedback) = &history.previous_feedback {
                         append_json_section(
                             &mut card,
@@ -1076,7 +1076,7 @@ fn render_card(
         }
         if !target.domain_policy_gate_satisfied {
             card.push_str(&format!(
-                "\n## Diagnostic for {}\n\nThe high-risk Knowledge revision is missing a counterargument or open question and cannot be approved.\n",
+                "\n## Diagnostic for {}\n\nThe high-risk Knowledge revision is missing a counterargument or open question and cannot be confirmed.\n",
                 target.record_id
             ));
         }
@@ -1107,15 +1107,15 @@ fn card_target(target: &ScannedTarget) -> ReviewCardTargetV2 {
         ReviewCardTargetStateV2::ChangesRequested => vec![
             "regenerate_current_revision".into(),
             "defer_current_revision".into(),
-            "approve_current_revision_via_tty".into(),
+            "confirm_current_revision_via_tty".into(),
         ],
-        ReviewCardTargetStateV2::Approved => vec!["none".into()],
-        ReviewCardTargetStateV2::Unreviewed
+        ReviewCardTargetStateV2::Confirmed => vec!["none".into()],
+        ReviewCardTargetStateV2::Unconfirmed
         | ReviewCardTargetStateV2::Deferred
-        | ReviewCardTargetStateV2::RevisedUnreviewed => vec![
+        | ReviewCardTargetStateV2::RevisedUnconfirmed => vec![
             "request_changes_current_revision".into(),
             "defer_current_revision".into(),
-            "approve_current_revision_via_tty".into(),
+            "confirm_current_revision_via_tty".into(),
         ],
     };
     ReviewCardTargetV2 {
@@ -1129,10 +1129,10 @@ fn card_target(target: &ScannedTarget) -> ReviewCardTargetV2 {
             RevisionV2::Source(_) => None,
             RevisionV2::Knowledge(revision) => Some(revision.domain_policy.clone()),
         },
-        previous_approved_revision: history.previous_approved_revision.clone(),
+        previous_confirmed_revision: history.previous_confirmed_revision.clone(),
         previous_reviewed_revision: history.previous_reviewed_revision.clone(),
         current_feedback: history.current_feedback.clone(),
-        addressed_feedback: if state == ReviewCardTargetStateV2::RevisedUnreviewed {
+        addressed_feedback: if state == ReviewCardTargetStateV2::RevisedUnconfirmed {
             history.previous_feedback.clone()
         } else {
             None
@@ -1643,7 +1643,7 @@ fn queue_scan_limit() -> MkoError {
 mod tests {
     use super::*;
     use crate::{
-        model_v2::{KnowledgeResponseV2, KnowledgeUnitV2},
+        model_v2::{AuthoredByV2, KnowledgeResponseV2, KnowledgeUnitV2},
         records_v2::{EvidenceBasisV2, KnowledgeRevisionRecordTypeV2},
     };
 
@@ -1729,6 +1729,7 @@ mod tests {
             },
             domain_policy: DomainPolicyV2::HighRisk,
             perspectives: Vec::new(),
+            authored_by: AuthoredByV2::Ai,
             response,
         };
 
@@ -1788,21 +1789,21 @@ mod tests {
         let mut items = [
             item(
                 "approved-recently-opened",
-                ResurfacedKnowledgeStateV2::Approved,
+                ResurfacedKnowledgeStateV2::Confirmed,
                 "2026-07-23T05:00:00Z",
                 Some("2026-07-23T04:00:00Z"),
                 true,
             ),
             item(
                 "approved-never-opened-newer",
-                ResurfacedKnowledgeStateV2::Approved,
+                ResurfacedKnowledgeStateV2::Confirmed,
                 "2026-07-23T03:00:00Z",
                 None,
                 true,
             ),
             item(
                 "approved-never-opened-older",
-                ResurfacedKnowledgeStateV2::Approved,
+                ResurfacedKnowledgeStateV2::Confirmed,
                 "2026-07-23T02:00:00Z",
                 None,
                 true,

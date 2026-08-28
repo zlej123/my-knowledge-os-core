@@ -12,7 +12,7 @@
         ],
         "title": "Example paper",
         "item_type": "combined",
-        "state": "unreviewed",
+        "state": "unconfirmed",
         "revisions": [
           "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
           "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"

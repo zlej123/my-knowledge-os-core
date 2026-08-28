@@ -16,9 +16,9 @@ use mko_core::{
     },
     queue_v2::{
         ResurfacedKnowledgeStateV2, ReviewCardTargetStateV2, derive_queue_v2,
-        resurface_approved_knowledge_by_perspective_v2, resurface_approved_knowledge_v2,
-        resurface_knowledge_by_perspective_v2, search_approved_knowledge_by_perspective_v2,
-        search_approved_knowledge_v2, show_review_card_v2, summarize_home_queue_v2,
+        resurface_confirmed_knowledge_by_perspective_v2, resurface_confirmed_knowledge_v2,
+        resurface_knowledge_by_perspective_v2, search_confirmed_knowledge_by_perspective_v2,
+        search_confirmed_knowledge_v2, show_review_card_v2, summarize_home_queue_v2,
     },
     records_v2::{
         AssetRecordV2, WriteKnowledgeRecordRequestV2, WriteSourceRecordRequestV2,
@@ -65,7 +65,7 @@ fn approved_records_are_excluded_from_the_default_queue_but_remain_showable() {
         &environment,
         &source,
         Some(review_id),
-        ProjectionStateV2::Approved,
+        ProjectionStateV2::Confirmed,
     );
 
     let queue = derive_queue_v2(environment.root.path()).unwrap();
@@ -76,21 +76,21 @@ fn approved_records_are_excluded_from_the_default_queue_but_remain_showable() {
 
     let card = show_review_card_v2(environment.root.path(), &source.record_id).unwrap();
     assert_eq!(card.targets.len(), 1);
-    assert_eq!(card.targets[0].state, ReviewCardTargetStateV2::Approved);
+    assert_eq!(card.targets[0].state, ReviewCardTargetStateV2::Confirmed);
     assert!(
         String::from_utf8(card.card_bytes)
             .unwrap()
-            .contains("State: `approved`")
+            .contains("State: `confirmed`")
     );
 }
 
 #[test]
-fn search_returns_only_approved_knowledge_and_home_counts_it() {
+fn search_returns_only_confirmed_knowledge_and_home_counts_it() {
     let environment = environment();
     let knowledge = write_knowledge(&environment);
 
     assert!(
-        search_approved_knowledge_v2(environment.root.path(), "reported")
+        search_confirmed_knowledge_v2(environment.root.path(), "reported")
             .unwrap()
             .is_empty()
     );
@@ -115,10 +115,10 @@ fn search_returns_only_approved_knowledge_and_home_counts_it() {
         &environment,
         &knowledge,
         Some(review_id),
-        ProjectionStateV2::Approved,
+        ProjectionStateV2::Confirmed,
     );
 
-    let matches = search_approved_knowledge_v2(environment.root.path(), "reported").unwrap();
+    let matches = search_confirmed_knowledge_v2(environment.root.path(), "reported").unwrap();
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].title, "Reported result");
     assert_eq!(matches[0].current_revision, knowledge.revision);
@@ -140,7 +140,7 @@ fn search_returns_only_approved_knowledge_and_home_counts_it() {
     assert!(document.contains(&matches[0].title));
     let summary = summarize_home_queue_v2(environment.root.path()).unwrap();
     assert_eq!(summary.review_pending, 0);
-    assert_eq!(summary.approved_knowledge, 1);
+    assert_eq!(summary.confirmed_knowledge, 1);
 }
 
 #[test]
@@ -174,10 +174,10 @@ fn confirmed_perspective_is_searchable_and_resurfacing_prioritizes_open_question
         &environment,
         &replacement,
         Some(review_id),
-        ProjectionStateV2::Approved,
+        ProjectionStateV2::Confirmed,
     );
 
-    let matches = search_approved_knowledge_v2(environment.root.path(), "technical").unwrap();
+    let matches = search_confirmed_knowledge_v2(environment.root.path(), "technical").unwrap();
     assert_eq!(matches.len(), environment.knowledge.units.len());
     assert!(
         matches
@@ -185,7 +185,7 @@ fn confirmed_perspective_is_searchable_and_resurfacing_prioritizes_open_question
             .all(|item| item.perspectives == vec![PerspectiveV2::Technical])
     );
     assert_eq!(
-        search_approved_knowledge_by_perspective_v2(
+        search_confirmed_knowledge_by_perspective_v2(
             environment.root.path(),
             "reported",
             Some(PerspectiveV2::Technical),
@@ -195,7 +195,7 @@ fn confirmed_perspective_is_searchable_and_resurfacing_prioritizes_open_question
         1
     );
     assert!(
-        search_approved_knowledge_by_perspective_v2(
+        search_confirmed_knowledge_by_perspective_v2(
             environment.root.path(),
             "reported",
             Some(PerspectiveV2::Investment),
@@ -203,12 +203,12 @@ fn confirmed_perspective_is_searchable_and_resurfacing_prioritizes_open_question
         .unwrap()
         .is_empty()
     );
-    let resurfaced = resurface_approved_knowledge_v2(environment.root.path(), 5).unwrap();
+    let resurfaced = resurface_confirmed_knowledge_v2(environment.root.path(), 5).unwrap();
     assert_eq!(resurfaced.len(), 1);
     assert_eq!(resurfaced[0].perspectives, vec![PerspectiveV2::Technical]);
     assert!(resurfaced[0].has_open_questions);
     assert!(
-        resurface_approved_knowledge_by_perspective_v2(
+        resurface_confirmed_knowledge_by_perspective_v2(
             environment.root.path(),
             Some(PerspectiveV2::Investment),
             5,
@@ -241,7 +241,7 @@ fn deferred_knowledge_resurfaces_and_opening_updates_only_local_history() {
     let canonical_before = fs::read(&knowledge.current_path).unwrap();
 
     assert!(
-        resurface_approved_knowledge_v2(environment.root.path(), 5)
+        resurface_confirmed_knowledge_v2(environment.root.path(), 5)
             .unwrap()
             .is_empty()
     );
@@ -434,12 +434,12 @@ fn changed_pointer_changes_card_digest_and_historical_evidence_basis_remains_rea
         changed.revision
     );
     assert_eq!(
-        revised.targets[0].previous_approved_revision.as_deref(),
+        revised.targets[0].previous_confirmed_revision.as_deref(),
         Some(source.revision.as_str())
     );
     assert_eq!(
         revised.targets[0].state,
-        ReviewCardTargetStateV2::RevisedUnreviewed
+        ReviewCardTargetStateV2::RevisedUnconfirmed
     );
     let text = String::from_utf8(revised.card_bytes).unwrap();
     assert!(text.contains("Previous reviewed content"));
@@ -492,12 +492,12 @@ fn regenerated_item_card_shows_addressed_feedback_and_bounded_diff() {
 
     let queue = derive_queue_v2(environment.root.path()).unwrap();
     assert_eq!(queue.items.len(), 1);
-    assert_eq!(queue.items[0].state, QueueItemStateV2::RevisedUnreviewed);
+    assert_eq!(queue.items[0].state, QueueItemStateV2::RevisedUnconfirmed);
     assert_eq!(queue.items[0].next_action, QueueNextActionV2::Display);
 
     let revised = show_review_card_v2(environment.root.path(), &source.record_id).unwrap();
     let target = &revised.targets[0];
-    assert_eq!(target.state, ReviewCardTargetStateV2::RevisedUnreviewed);
+    assert_eq!(target.state, ReviewCardTargetStateV2::RevisedUnconfirmed);
     assert_eq!(target.current_feedback, None);
     assert_eq!(target.addressed_feedback.as_deref(), Some(feedback));
     assert_eq!(
@@ -551,7 +551,7 @@ fn self_consistent_projection_with_noncanonical_semantics_blocks_the_queue() {
             title: wrong_title.into(),
             current_revision: source.revision.clone(),
             review_head_id: None,
-            derived_state: ProjectionStateV2::Unreviewed,
+            derived_state: ProjectionStateV2::Unconfirmed,
             domain: "uncategorized".into(),
             perspectives: Vec::new(),
             tags: environment.source.tags.clone(),

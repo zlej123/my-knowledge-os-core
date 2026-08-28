@@ -546,7 +546,7 @@ fn seed_target(
             title: record_id.into(),
             current_revision: revision.clone(),
             review_head_id: None,
-            derived_state: ProjectionStateV2::Unreviewed,
+            derived_state: ProjectionStateV2::Unconfirmed,
             domain: "uncategorized".into(),
             perspectives: Vec::new(),
             tags: Vec::new(),

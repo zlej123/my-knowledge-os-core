@@ -12,6 +12,7 @@
     "asset_id": { "type": "string", "pattern": "^personal-asset-[a-f0-9]{64}$" },
     "asset_fingerprint": { "$ref": "#/$defs/digest" },
     "evidence_basis": { "$ref": "#/$defs/evidence_basis" },
+    "authored_by": { "enum": ["ai", "human"] },
     "response": { "$ref": "#/$defs/response" }
   },
   "$defs": {

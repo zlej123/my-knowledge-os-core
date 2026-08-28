@@ -106,7 +106,7 @@ pub fn open_review_session_v2(
     if card.targets.iter().all(|target| {
         matches!(
             target.state,
-            ReviewCardTargetStateV2::Approved | ReviewCardTargetStateV2::Blocked
+            ReviewCardTargetStateV2::Confirmed | ReviewCardTargetStateV2::Blocked
         )
     }) {
         return Err(MkoError::new(

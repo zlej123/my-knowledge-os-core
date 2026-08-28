@@ -409,7 +409,7 @@ fn report_review_remaining(repository: &Path) {
     }
 }
 
-pub fn review(
+pub fn confirm(
     repository: &Path,
     stable_id: Option<&str>,
     clock: &dyn Clock,
@@ -425,7 +425,7 @@ pub fn review(
         },
     };
     match publish_tty_review_v2(repository, &selected_id, clock)? {
-        TtyReviewOutcomeV2::Approved(publication) => {
+        TtyReviewOutcomeV2::Confirmed(publication) => {
             report_review_publication(&publication)?;
             report_review_remaining(repository);
         }
@@ -474,7 +474,7 @@ fn report_review_publication(
         }
     }
     if blocked.is_empty() {
-        println!("approved {} (readiness current)", publication.record.id);
+        println!("confirmed {} (readiness current)", publication.record.id);
     } else {
         println!(
             "review event published {}, but readiness is blocked by {} projection(s)",
@@ -503,10 +503,10 @@ fn item_type_label(value: &QueueItemTypeV2) -> &'static str {
 
 fn state_label(value: &QueueItemStateV2) -> &'static str {
     match value {
-        QueueItemStateV2::Unreviewed => "미검토",
+        QueueItemStateV2::Unconfirmed => "미확인",
         QueueItemStateV2::Deferred => "보류",
         QueueItemStateV2::ChangesRequested => "수정 요청",
-        QueueItemStateV2::RevisedUnreviewed => "수정 후 미검토",
+        QueueItemStateV2::RevisedUnconfirmed => "수정 후 미확인",
         QueueItemStateV2::Blocked => "차단됨",
     }
 }
@@ -521,11 +521,11 @@ fn action_label(value: &QueueNextActionV2) -> &'static str {
 
 fn json_target_state(value: ReviewCardTargetStateV2) -> ReviewTargetStateV2 {
     match value {
-        ReviewCardTargetStateV2::Unreviewed => ReviewTargetStateV2::Unreviewed,
+        ReviewCardTargetStateV2::Unconfirmed => ReviewTargetStateV2::Unconfirmed,
         ReviewCardTargetStateV2::Deferred => ReviewTargetStateV2::Deferred,
         ReviewCardTargetStateV2::ChangesRequested => ReviewTargetStateV2::ChangesRequested,
-        ReviewCardTargetStateV2::RevisedUnreviewed => ReviewTargetStateV2::RevisedUnreviewed,
-        ReviewCardTargetStateV2::Approved => ReviewTargetStateV2::Approved,
+        ReviewCardTargetStateV2::RevisedUnconfirmed => ReviewTargetStateV2::RevisedUnconfirmed,
+        ReviewCardTargetStateV2::Confirmed => ReviewTargetStateV2::Confirmed,
         ReviewCardTargetStateV2::Blocked => ReviewTargetStateV2::Blocked,
     }
 }

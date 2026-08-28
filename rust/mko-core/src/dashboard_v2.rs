@@ -21,7 +21,15 @@ use crate::{
 
 const GENERATED_FILE_BYTE_LIMIT: u64 = 8 * 1024 * 1024;
 
-const GENERATED_FILES: &[(&str, &str)] = &[
+/// The generated Obsidian dashboard body, in one place.
+///
+/// `setup_plan_v2` writes the same three files at scaffold time (plus its own
+/// `.mko/.gitignore` entry, which is not dashboard content) and used to carry
+/// a second, independently drifting copy of this array. It now reuses this
+/// one instead — a Phase 0 cleanup, since the two copies had already drifted
+/// (`views/review-queue.base` differed in `properties` and column order
+/// between them).
+pub(crate) const GENERATED_FILES: &[(&str, &str)] = &[
     (
         "HOME.md",
         r#"---
@@ -31,23 +39,23 @@ generated_by: my-knowledge-os
 
 # My Knowledge OS
 
-## 검토 대기
+## 미확인 지식
 
-![[views/review-queue.base]]
+![[views/unconfirmed.base]]
 
-## 승인된 지식
+## 확인된 지식
 
 ![[views/knowledge-library.base]]
 
-터미널에서는 `mko queue`로 같은 검토 대기열을 확인할 수 있습니다.
+터미널에서는 `mko queue`로 같은 미확인 목록을 확인할 수 있습니다.
 "#,
     ),
     (
-        "views/review-queue.base",
+        "views/unconfirmed.base",
         r#"filters:
   and:
     - file.inFolder("views/records")
-    - 'derived_state != "approved"'
+    - 'derived_state != "confirmed"'
 properties:
   summary:
     displayName: 한 줄 요약
@@ -55,7 +63,7 @@ properties:
     displayName: 상태
 views:
   - type: table
-    name: Review Queue
+    name: Unconfirmed
     order:
       - title
       - summary
@@ -71,7 +79,7 @@ views:
   and:
     - file.inFolder("views/records")
     - 'record_type == "knowledge"'
-    - 'derived_state == "approved"'
+    - 'derived_state == "confirmed"'
 properties:
   perspectives:
     displayName: 관점
@@ -136,6 +144,11 @@ views:
 "#,
     ),
 ];
+
+/// The pre-Phase-0 path `views/unconfirmed.base` replaces. Kept as a named
+/// constant so the migration that retires it (`migrate_v2`) and its test
+/// fixtures do not repeat the literal.
+pub(crate) const LEGACY_REVIEW_QUEUE_VIEW_PATH: &str = "views/review-queue.base";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DashboardOutcomeV2 {

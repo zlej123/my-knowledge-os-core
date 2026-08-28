@@ -30,7 +30,7 @@ fn inspection_is_read_only_and_missing_owned_definition_has_safe_repair_state() 
     let root = tempdir().unwrap();
     scaffold_personal_kb_v2(root.path()).unwrap();
     ensure_dashboard_v2(root.path()).unwrap();
-    let path = root.path().join("views/review-queue.base");
+    let path = root.path().join("views/unconfirmed.base");
     fs::remove_file(&path).unwrap();
 
     let status = inspect_dashboard_v2(root.path()).unwrap();
@@ -38,7 +38,7 @@ fn inspection_is_read_only_and_missing_owned_definition_has_safe_repair_state() 
     let item = status
         .items
         .iter()
-        .find(|item| item.path == "views/review-queue.base")
+        .find(|item| item.path == "views/unconfirmed.base")
         .unwrap();
     assert!(item.manifest_owned);
     assert_eq!(item.state, DashboardFileStateV2::Missing);
@@ -55,7 +55,7 @@ fn inspection_is_read_only_and_missing_owned_definition_has_safe_repair_state() 
         repaired
             .items
             .iter()
-            .find(|item| item.path == "views/review-queue.base")
+            .find(|item| item.path == "views/unconfirmed.base")
             .unwrap()
             .state,
         DashboardFileStateV2::Current
@@ -92,7 +92,7 @@ fn repair_preflights_all_definitions_before_any_mutation() {
     ensure_dashboard_v2(root.path()).unwrap();
     let missing = root.path().join("HOME.md");
     fs::remove_file(&missing).unwrap();
-    let modified = root.path().join("views/review-queue.base");
+    let modified = root.path().join("views/unconfirmed.base");
     let user_edit = b"my query\n";
     fs::write(&modified, user_edit).unwrap();
 
@@ -120,7 +120,7 @@ fn manifest_digest_cannot_make_an_orphan_projection_semantically_current() {
             title: "Orphan projection".into(),
             current_revision: format!("sha256:{}", "b".repeat(64)),
             review_head_id: None,
-            derived_state: ProjectionStateV2::Unreviewed,
+            derived_state: ProjectionStateV2::Unconfirmed,
             domain: "uncategorized".into(),
             perspectives: Vec::new(),
             tags: Vec::new(),
@@ -173,7 +173,7 @@ fn repair_regenerates_missing_and_semantically_stale_unmodified_projection() {
             title: "self-consistent but noncanonical title".into(),
             current_revision: record.revision.clone(),
             review_head_id: None,
-            derived_state: ProjectionStateV2::Unreviewed,
+            derived_state: ProjectionStateV2::Unconfirmed,
             domain: "uncategorized".into(),
             perspectives: Vec::new(),
             tags: response.tags.clone(),

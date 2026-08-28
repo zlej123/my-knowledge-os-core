@@ -251,13 +251,13 @@ fn regeneration_closes_the_request_changes_loop_with_typed_surfaces() {
 
     let (queue, ok) = run_json(&environment, &["queue"], None);
     assert!(ok);
-    assert_eq!(queue["data"]["items"][0]["state"], "revised_unreviewed");
+    assert_eq!(queue["data"]["items"][0]["state"], "revised_unconfirmed");
     assert_eq!(queue["data"]["items"][0]["next_action"], "display");
 
     let (revised, ok) = run_json(&environment, &["show", &record_id], None);
     assert!(ok);
     let target = &revised["data"]["targets"][0];
-    assert_eq!(target["state"], "revised_unreviewed");
+    assert_eq!(target["state"], "revised_unconfirmed");
     assert_eq!(target["current_feedback"], Value::Null);
     assert_eq!(target["addressed_feedback"], FEEDBACK);
     assert_eq!(target["previous_reviewed_revision"], first_revision);

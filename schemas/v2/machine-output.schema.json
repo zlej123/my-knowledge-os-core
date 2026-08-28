@@ -308,10 +308,10 @@
         },
         "state": {
           "enum": [
-            "unreviewed",
+            "unconfirmed",
             "deferred",
             "changes_requested",
-            "revised_unreviewed",
+            "revised_unconfirmed",
             "blocked"
           ]
         },
@@ -686,11 +686,11 @@
         },
         "state": {
           "enum": [
-            "unreviewed",
+            "unconfirmed",
             "deferred",
             "changes_requested",
-            "revised_unreviewed",
-            "approved",
+            "revised_unconfirmed",
+            "confirmed",
             "blocked"
           ]
         },

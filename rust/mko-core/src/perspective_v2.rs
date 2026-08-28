@@ -71,7 +71,7 @@ pub fn prepare_perspective_confirmation_v2(
         .collect::<Vec<_>>()
         .join(", ");
     let confirmation_card = format!(
-        "# Perspective confirmation\n\n- Knowledge ID: `{knowledge_id}`\n- Current revision: `{}`\n- Perspectives: `{labels}`\n- Derived policy: `{}`\n- Effect digest: `{effect_digest}`\n\nThis publishes a new pending Knowledge revision. It does not approve, commit, push, or promote anything.\n",
+        "# Perspective confirmation\n\n- Knowledge ID: `{knowledge_id}`\n- Current revision: `{}`\n- Perspectives: `{labels}`\n- Derived policy: `{}`\n- Effect digest: `{effect_digest}`\n\nThis publishes a new, complete, unconfirmed Knowledge revision. It does not confirm, commit, push, or promote anything.\n",
         current.pointer.revision,
         match domain_policy {
             DomainPolicyV2::Standard => "standard",

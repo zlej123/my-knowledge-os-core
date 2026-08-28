@@ -188,16 +188,17 @@ mko show <stable-id>
 mko dashboard
 ```
 
-`mko queue`와 Obsidian `HOME.md`는 같은 검토 상태를 보여줍니다. Source와 Knowledge가 같은
-PDF에서 나왔다면 하나의 결합 카드로 표시됩니다. 승인된 지식 Base에는 복수 관점 열과
+`mko queue`와 Obsidian `HOME.md`는 같은 미확인 상태를 보여줍니다. Source와 Knowledge가 같은
+PDF에서 나왔다면 하나의 결합 카드로 표시됩니다. 확인된 지식 Base에는 복수 관점 열과
 생활·학습·기술·프로젝트·투자 뷰가 생성됩니다. 생성 파일에 사용자 수정이 있으면 자동으로
 덮어쓰지 않습니다.
 
-Codex는 정확한 카드를 보여준 뒤 `request_changes` 또는 `defer` 피드백만 전달할 수 있습니다.
-최종 승인은 실제 터미널에서 수행합니다.
+Source나 Knowledge revision은 Core가 쓰는 순간 완결됩니다 — 승인 대기 상태가 아닙니다. Codex는
+정확한 카드를 보여준 뒤 `request_changes` 또는 `defer` 피드백만 전달할 수 있습니다. 사람의 확인
+배지는 실제 터미널에서 기록합니다.
 
 ```bash
-mko review <stable-id>
+mko confirm <stable-id>
 ```
 
 이 명령은 현재 revision과 효과를 다시 표시하고 revision-bound 확인을 요구합니다. 비대화형

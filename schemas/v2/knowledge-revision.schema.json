@@ -20,6 +20,7 @@
       "uniqueItems": true,
       "items": { "enum": ["life", "learning", "technical", "project", "investment"] }
     },
+    "authored_by": { "enum": ["ai", "human"] },
     "response": { "$ref": "#/$defs/response" }
   },
   "$defs": {

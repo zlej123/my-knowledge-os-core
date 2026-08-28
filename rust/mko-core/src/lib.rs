@@ -26,6 +26,7 @@ pub mod json_v2;
 pub mod judgment_v2;
 pub mod knowledge;
 pub mod lock;
+pub mod migrate_v2;
 pub mod model;
 pub mod model_v2;
 pub mod path_policy;

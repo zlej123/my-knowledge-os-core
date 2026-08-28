@@ -48,15 +48,15 @@ mod macos {
 
         assert!(output.status.success());
         let screen = String::from_utf8_lossy(&output.stdout);
-        for expected in [
-            "새 자료 정리",
-            "검토 계속",
-            "지식 찾기",
-            "빠른 메모",
-            "다시 볼 지식",
-        ] {
+        for expected in ["새 자료 정리", "지식 찾기", "빠른 메모", "다시 볼 지식"]
+        {
             assert!(screen.contains(expected), "missing {expected}: {screen}");
         }
+        assert!(
+            !screen.contains("검토 계속") && !screen.contains("확인 계속"),
+            "an unconfirmed record is not unfinished work; home must not offer to \
+             continue reviewing/confirming (§4.2): {screen}"
+        );
         assert_eq!(snapshot(&repository), before);
     }
 
@@ -157,7 +157,7 @@ mod macos {
         fs::create_dir(&provider).unwrap();
         let before = snapshot(&repository);
 
-        let script = "set timeout 10\nset bin $env(MKO_TEST_BIN)\nspawn -noecho $bin\nexpect {\n  \"선택 ›\" { send -- \"5\\r\"; exp_continue }\n  \"관점 필터 ›\" { send -- \"\\r\"; exp_continue }\n  eof {}\n}\nset status [wait]\nexit [lindex $status 3]\n";
+        let script = "set timeout 10\nset bin $env(MKO_TEST_BIN)\nspawn -noecho $bin\nexpect {\n  \"선택 ›\" { send -- \"4\\r\"; exp_continue }\n  \"관점 필터 ›\" { send -- \"\\r\"; exp_continue }\n  eof {}\n}\nset status [wait]\nexit [lindex $status 3]\n";
         let output = Command::new("/usr/bin/expect")
             .args(["-c", script])
             .env("MKO_TEST_BIN", assert_cmd::cargo::cargo_bin("mko"))
@@ -372,9 +372,11 @@ mod macos {
             }
         }
     }
-    // Finding nothing used to end the conversation. Search only covers approved
-    // knowledge, so an owner whose material is all still waiting on them was
-    // told "not found" about a shelf they had never filled.
+    // Finding nothing used to end the conversation. Search only covers
+    // confirmed knowledge (Phase 0 keeps search confirmed-only; Phase 1a
+    // makes it unconfirmed-inclusive), so an owner whose material is all
+    // still unconfirmed was told "not found" about a shelf they had never
+    // filled.
     #[test]
     #[allow(deprecated)]
     fn an_empty_search_says_why_and_where_to_go() {
@@ -394,9 +396,9 @@ mod macos {
 
         assert!(output.status.success());
         let screen = String::from_utf8_lossy(&output.stdout);
-        assert!(screen.contains("승인된 지식에서 찾지 못했습니다."));
+        assert!(screen.contains("확인된 지식에서 찾지 못했습니다."));
         assert!(
-            screen.contains("아직 승인된 지식이 없습니다"),
+            screen.contains("아직 확인된 지식이 없습니다"),
             "an empty shelf must be named as such: {screen}"
         );
         assert!(
@@ -728,7 +730,7 @@ mod macos {
         #[allow(deprecated)]
         fn review_with_stdin_status(&self, input: &[u8]) -> (String, bool) {
             let output = Command::new(assert_cmd::cargo::cargo_bin("mko"))
-                .arg("review")
+                .arg("confirm")
                 .env("MKO_PERSONAL_PROVIDER_ROOT", &self.provider)
                 .env("HOME", &self.home)
                 .current_dir(&self.repository)
