@@ -71,10 +71,10 @@ pub fn queue(repository: &Path) -> Result<(), MkoError> {
     let stdout = io::stdout();
     let mut output = stdout.lock();
     if queue.items.is_empty() {
-        writeln!(output, "검토 대기 항목이 없습니다.")
+        writeln!(output, "미확인 항목이 없습니다.")
             .map_err(|error| output_error(error.to_string()))?;
     } else {
-        writeln!(output, "검토 대기열 ({}개)", queue.items.len())
+        writeln!(output, "미확인 목록 ({}개)", queue.items.len())
             .map_err(|error| output_error(error.to_string()))?;
         for (index, item) in queue.items.iter().enumerate() {
             writeln!(
@@ -328,7 +328,7 @@ fn choose_review_item(repository: &Path) -> Result<Option<String>, MkoError> {
     }
 
     println!();
-    println!("검토 대기 {}개", items.len());
+    println!("미확인 {}개", items.len());
     for (index, item) in items.iter().enumerate() {
         println!(
             "{}. {} [{} / {}]",
@@ -348,7 +348,7 @@ fn choose_review_item(repository: &Path) -> Result<Option<String>, MkoError> {
     println!();
 
     for attempt in 1..=REVIEW_SELECTION_ATTEMPTS {
-        print!("검토할 항목 번호 [Enter: 1번 · q: 닫기] › ");
+        print!("확인할 항목 번호 [Enter: 1번 · q: 닫기] › ");
         std::io::stdout()
             .flush()
             .map_err(|error| MkoError::new("output_failed", error.to_string()))?;
@@ -402,9 +402,9 @@ fn report_review_remaining(repository: &Path) {
         return;
     };
     match queue.items.len() {
-        0 => println!("검토할 항목이 모두 끝났습니다."),
+        0 => println!("확인할 항목이 모두 끝났습니다."),
         remaining => {
-            println!("검토 대기 {remaining}개가 남았습니다: `mko`로 이어서 볼 수 있습니다.")
+            println!("미확인 {remaining}개가 남았습니다: `mko`로 이어서 볼 수 있습니다.")
         }
     }
 }
@@ -432,18 +432,18 @@ pub fn confirm(
         TtyReviewOutcomeV2::ChangesRequested(publication) => {
             println!("수정을 요청했습니다: {}", publication.record.id);
             println!(
-                "이 항목은 수정 요청 상태로 대기열에 남아 있고, 다음 초안이 준비되면 다시 검토할 수 있습니다."
+                "이 항목은 수정 요청 상태로 미확인 목록에 남아 있고, 다음 초안이 준비되면 다시 확인할 수 있습니다."
             );
             report_review_remaining(repository);
         }
         TtyReviewOutcomeV2::Deferred(publication) => {
             println!("나중에 보기로 했습니다: {}", publication.record.id);
-            println!("이 항목은 검토 대기열에 그대로 남아 있습니다.");
+            println!("이 항목은 미확인 목록에 그대로 남아 있습니다.");
             report_review_remaining(repository);
         }
         TtyReviewOutcomeV2::Cancelled => {
             println!("아무것도 바꾸지 않았습니다.");
-            println!("이 항목은 검토 대기열에 남아 있습니다: `mko`로 다시 열 수 있습니다.");
+            println!("이 항목은 미확인 목록에 남아 있습니다: `mko`로 다시 열 수 있습니다.");
         }
     }
     Ok(())

@@ -19,7 +19,7 @@ use cap_std::fs::Dir;
 use crate::{
     atomic::write_replace_capability_compare_exchange_validated_at_commit,
     clock::Clock,
-    config_v2::{CONTRACT_VERSION_V2, KnowledgeConfigV2},
+    config_v2::{CONTRACT_VERSION_V2, KnowledgeConfigV2, MIGRATABLE_CONTRACT_VERSION_V2},
     dashboard_v2::{DashboardResultV2, LEGACY_REVIEW_QUEUE_VIEW_PATH, repair_dashboard_v2},
     error::MkoError,
     lock::{RepositoryMutationLock, StaleRepositoryLockPolicy},
@@ -31,6 +31,13 @@ pub struct MigrationResultV2 {
     pub from_contract_version: String,
     pub to_contract_version: String,
     pub dashboard: DashboardResultV2,
+    /// True when the contract was already current when this run started —
+    /// either a repeat invocation with nothing left to do, or a resume of a
+    /// prior `mko migrate` that crashed after stamping the contract but
+    /// before finishing the idempotent regeneration work. In this case the
+    /// clean-tree gate and the contract stamp are both skipped: only the
+    /// idempotent retire/regenerate steps run.
+    pub resumed: bool,
 }
 
 /// Runs the Phase 0 contract migration against `repository_root`.
@@ -47,10 +54,44 @@ pub struct MigrationResultV2 {
 /// dashboard --repair` would also refuse) leaves the contract version bumped
 /// and the repository in a state `git status` describes exactly — commit,
 /// stash, or `git checkout .` and retry after resolving it.
+///
+/// If the contract is found to be already current, the clean-tree gate and
+/// the stamp are both skipped and only the idempotent retire/regenerate
+/// steps run (see `resumed` on `MigrationResultV2`). Without this, a crash
+/// between the stamp and the dashboard regeneration would leave a
+/// stamped-but-dirty KB that no re-run could recover from: the clean-tree
+/// gate would refuse the very tree state the interrupted migration itself
+/// left behind, and `read_for_migration` would refuse the now-current
+/// contract as "not migratable". Git is still the rollback for the
+/// stamp-and-retire step itself; it is not required to resume finishing an
+/// already-stamped migration, because there is no contract change left to
+/// roll back.
 pub fn migrate_v2(
     repository_root: &Path,
     clock: &dyn Clock,
 ) -> Result<MigrationResultV2, MkoError> {
+    if KnowledgeConfigV2::read(repository_root).is_ok() {
+        {
+            let _lock = RepositoryMutationLock::acquire(
+                repository_root,
+                "v2 contract migration",
+                clock,
+                StaleRepositoryLockPolicy::Preserve,
+            )?;
+            retire_generated_dashboard_file_locked_v2(
+                repository_root,
+                LEGACY_REVIEW_QUEUE_VIEW_PATH,
+            )?;
+        }
+        let dashboard = repair_dashboard_v2(repository_root)?;
+        return Ok(MigrationResultV2 {
+            from_contract_version: MIGRATABLE_CONTRACT_VERSION_V2.into(),
+            to_contract_version: CONTRACT_VERSION_V2.into(),
+            dashboard,
+            resumed: true,
+        });
+    }
+
     require_clean_git_tree(repository_root)?;
     let from_contract_version = KnowledgeConfigV2::read_for_migration(repository_root)?
         .contract_version
@@ -73,6 +114,7 @@ pub fn migrate_v2(
         from_contract_version,
         to_contract_version: CONTRACT_VERSION_V2.into(),
         dashboard,
+        resumed: false,
     })
 }
 
@@ -105,7 +147,12 @@ fn require_clean_git_tree(repository_root: &Path) -> Result<(), MkoError> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repository_root)
-        .args(["status", "--porcelain"])
+        // `--untracked-files=normal` is explicit, not the default: a local
+        // `git config status.showUntrackedFiles no` (or a `[status]` section
+        // in the tree's own config) otherwise makes `git status --porcelain`
+        // silently omit untracked files, so an owner (or a repo) that set
+        // that config would pass this gate with a genuinely dirty tree.
+        .args(["status", "--porcelain", "--untracked-files=normal"])
         .output()
         .map_err(|error| MkoError::new("git_unavailable", error.to_string()))?;
     if !output.status.success() {

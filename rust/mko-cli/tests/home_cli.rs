@@ -616,7 +616,7 @@ mod macos {
         let third = &queue["data"]["items"][2];
         let screen = fixture.review_with_stdin(b"3\n");
 
-        assert!(screen.contains("검토 대기 3개"), "{screen}");
+        assert!(screen.contains("미확인 3개"), "{screen}");
         for item in queue["data"]["items"].as_array().unwrap() {
             assert!(
                 screen.contains(item["title"].as_str().unwrap()),
