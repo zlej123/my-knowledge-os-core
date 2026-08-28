@@ -1043,7 +1043,15 @@ fn read_manifest(repository_root: &Path) -> Result<(GeneratedManifestV2, Vec<u8>
     }
     let mut dashboard_paths = HashSet::new();
     for entry in &manifest.dashboard_files {
-        if !is_canonical_dashboard_path(&entry.path)
+        // Reading tolerates the retired pre-Phase-0 review-queue path: a
+        // manifest still carrying it is exactly the state `mko migrate`
+        // exists to repair, and rejecting it here would refuse the very
+        // migration that retires the entry. Writing stays canonical-only
+        // (`set_generated_dashboard_digest_locked_v2` rejects non-canonical
+        // paths).
+        let readable_path = is_canonical_dashboard_path(&entry.path)
+            || entry.path == crate::dashboard_v2::LEGACY_REVIEW_QUEUE_VIEW_PATH;
+        if !readable_path
             || !dashboard_paths.insert(entry.path.as_str())
             || entry
                 .content_digest
