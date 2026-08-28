@@ -207,7 +207,7 @@ pub(crate) fn media_spec_for_extension(extension: &str) -> LocalFileMediaSpecV2 
         .unwrap_or(TEXT_FALLBACK_SPEC)
 }
 
-fn media_spec_for_path(path: &Path) -> LocalFileMediaSpecV2 {
+pub(crate) fn media_spec_for_path(path: &Path) -> LocalFileMediaSpecV2 {
     match path.extension().and_then(|extension| extension.to_str()) {
         Some(extension) => media_spec_for_extension(extension),
         None => TEXT_FALLBACK_SPEC,

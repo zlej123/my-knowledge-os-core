@@ -599,6 +599,46 @@ fn read_json_input<T: DeserializeOwned>(
     serde_json::from_slice(&bytes).map_err(|error| MkoError::new(error_code, error.to_string()))
 }
 
+/// A bounded, no-follow byte read for a CLI-side file input that is not
+/// JSON — mirrors `mko_core::asset_v2::read_bounded_nofollow`'s shape
+/// (`{subject}_unreadable` for an I/O failure opening/reading the file,
+/// `{subject}_invalid` for one that is missing, a symlink, not a regular
+/// file, or over `limit`) so a CLI-side reader is held to the same
+/// bounded/no-follow discipline as a Core-side one, instead of falling back
+/// to an unbounded, symlink-following `std::fs::read`.
+pub(crate) fn read_bounded_nofollow(
+    path: &Path,
+    limit: u64,
+    subject: &str,
+) -> Result<Vec<u8>, MkoError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_nofollow(&mut options);
+    let file = options
+        .open(path)
+        .map_err(|error| MkoError::new(format!("{subject}_unreadable"), error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| MkoError::new(format!("{subject}_unreadable"), error.to_string()))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > limit {
+        return Err(MkoError::new(
+            format!("{subject}_invalid"),
+            format!("{subject} must be a bounded regular non-link file"),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| MkoError::new(format!("{subject}_unreadable"), error.to_string()))?;
+    if bytes.len() as u64 > limit {
+        return Err(MkoError::new(
+            format!("{subject}_invalid"),
+            format!("{subject} exceeds its bounded input size"),
+        ));
+    }
+    Ok(bytes)
+}
+
 #[cfg(target_os = "linux")]
 fn configure_nofollow(options: &mut OpenOptions) {
     options.custom_flags(0x20_000 | 0x800);

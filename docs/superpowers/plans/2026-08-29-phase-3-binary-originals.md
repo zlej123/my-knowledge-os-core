@@ -241,3 +241,7 @@ Gate: `scripts/fmt.sh --check`, `cargo clippy --workspace --all-targets -- -D wa
 - **A `check` severity tier (warning vs. error)** — Task 3's decided scope: the orphan finding reuses
   the existing single-tier `CheckIssue` model. A general severity redesign is a separate, larger
   change touching JSON-v1 output and every existing consumer.
+- **Bounded/no-follow reads for `--paste`/`--snapshot`/`--conversation`** — `cli.rs`'s readers for
+  these three predate this branch and still use plain `std::fs::read_to_string`, unlike
+  `--extracted-text`'s reader (Task 2, fixed in review to use `read_bounded_nofollow`). Recorded here
+  as a follow-up, not fixed in this change.
