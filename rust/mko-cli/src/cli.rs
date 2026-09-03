@@ -296,7 +296,7 @@ enum Command {
     Setup(SetupArgs),
     /// Inbox의 새 자료를 등록합니다
     Add(AddArgs),
-    /// 확인된 지식에서 내용을 찾습니다
+    /// 미확인 지식을 포함해 내용을 찾습니다
     Find(FindArgs),
     /// 지식과 투자 판단을 한 화면에서 읽습니다
     Ui(UiArgs),
@@ -1690,9 +1690,12 @@ fn resurface(repository: &Path) -> Result<(), MkoError> {
     println!("다시 볼 지식");
     for (index, item) in items.iter().enumerate() {
         println!(
-            "{}. {}{}{}",
+            "{}. {} · {}{}{}",
             index + 1,
             item.title,
+            // Reuses `mko find`'s confirmation badge (§4.2) so unconfirmed
+            // resurfaced knowledge reads the same way search results do.
+            confirmation_label_text(&item.confirmation),
             if item.review_state == ResurfacedKnowledgeStateV2::Deferred {
                 " · 나중에 보기"
             } else {
@@ -1742,18 +1745,26 @@ fn resurface(repository: &Path) -> Result<(), MkoError> {
     let selected = &items[selected_index - 1];
     println!();
     println!("{}", selected.title);
-    println!(
-        "{} · 검토 {} · 마지막 열람 {}",
-        match selected.review_state {
-            ResurfacedKnowledgeStateV2::Deferred => "나중에 보기",
-            ResurfacedKnowledgeStateV2::Confirmed => "확인됨",
-        },
-        selected.reviewed_at.format("%Y-%m-%d"),
+    // Deferred keeps its own explicit "come back to this" label; confirmed
+    // and unconfirmed both reuse `mko find`'s confirmation badge (§4.2).
+    let status_label = match selected.review_state {
+        ResurfacedKnowledgeStateV2::Deferred => "나중에 보기".to_owned(),
+        ResurfacedKnowledgeStateV2::Confirmed | ResurfacedKnowledgeStateV2::Unconfirmed => {
+            confirmation_label_text(&selected.confirmation)
+        }
+    };
+    let mut detail_line = status_label;
+    if let Some(reviewed_at) = selected.reviewed_at {
+        detail_line.push_str(&format!(" · 검토 {}", reviewed_at.format("%Y-%m-%d")));
+    }
+    detail_line.push_str(&format!(
+        " · 마지막 열람 {}",
         selected
             .last_opened_at
             .map(|opened_at| opened_at.format("%Y-%m-%d").to_string())
             .unwrap_or_else(|| "처음".to_owned())
-    );
+    ));
+    println!("{detail_line}");
     println!();
     println!("{}", selected.synthesis);
     record_resurfaced_knowledge_open_v2(

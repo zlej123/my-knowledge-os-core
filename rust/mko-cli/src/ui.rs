@@ -444,7 +444,12 @@ struct CoreKnowledgeItem {
     synthesis: String,
     perspectives: Vec<String>,
     review_state: &'static str,
-    reviewed_at: String,
+    /// The same shape `SearchResult.confirmation` uses (§4.2), so the web UI
+    /// can render unconfirmed resurfaced knowledge with the same badge logic
+    /// as search results instead of a second vocabulary.
+    confirmation: SearchResultConfirmation,
+    /// Absent for knowledge no human has reviewed yet.
+    reviewed_at: Option<String>,
     has_open_questions: bool,
 }
 
@@ -562,8 +567,19 @@ fn build_core_projection(repository: &Path, provider: &Path) -> Result<CoreProje
                     review_state: match item.review_state {
                         ResurfacedKnowledgeStateV2::Confirmed => "confirmed",
                         ResurfacedKnowledgeStateV2::Deferred => "deferred",
+                        ResurfacedKnowledgeStateV2::Unconfirmed => "unconfirmed",
                     },
-                    reviewed_at: item.reviewed_at.to_rfc3339(),
+                    confirmation: match item.confirmation {
+                        ConfirmationLabelV2::Confirmed { at } => SearchResultConfirmation {
+                            status: "confirmed",
+                            confirmed_at: Some(at.to_rfc3339()),
+                        },
+                        ConfirmationLabelV2::Unconfirmed => SearchResultConfirmation {
+                            status: "unconfirmed",
+                            confirmed_at: None,
+                        },
+                    },
+                    reviewed_at: item.reviewed_at.map(|at| at.to_rfc3339()),
                     has_open_questions: item.has_open_questions,
                 })
                 .collect();
