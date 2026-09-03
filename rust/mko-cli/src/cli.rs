@@ -71,7 +71,7 @@ use mko_core::{
         QuickNotePublicationOutcomeV2, QuickNoteV2, prepare_quick_note_v2, publish_quick_note_v2,
         search_quick_notes_v2,
     },
-    recall_log_v2::append_recall_log_v2,
+    recall_log_v2::{RecallViaV2, append_recall_log_v2},
     records_v2::RecordWriteOutcomeV2,
     registry::{
         AssetOperationRequest, CaptureRequest, accept_changed_asset, capture_asset, inspect_asset,
@@ -415,6 +415,13 @@ struct FindArgs {
     /// Core's internal origin enum.
     #[arg(long, value_enum)]
     origin: Option<FindOriginArg>,
+    /// Marks this search as the agent's recall-contract search, logged as
+    /// `via: agent`. Without it the search is logged as the owner's own
+    /// (`via: owner`), which is what a plain terminal or home-menu search
+    /// is. Only agent recalls count toward the home screen's headline (§5,
+    /// D7).
+    #[arg(long)]
+    recall: bool,
     #[arg(long)]
     repo: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -1172,6 +1179,9 @@ fn home() -> Result<(), MkoError> {
                 layer: None,
                 topic: None,
                 origin: None,
+                // The owner typing into the home menu is not the agent
+                // recalling: it is logged as an owner search.
+                recall: false,
                 repo: Some(context.repository_root),
                 format: OutputFormat::Human,
             })
@@ -1224,13 +1234,25 @@ fn render_home(report: &HomeReport) {
             );
             // The design's success measure lives on the first screen (§5,
             // D7): whether recall is actually happening, measured, not just
-            // hoped for.
+            // hoped for. The headline counts agent recalls only — the
+            // owner's own terminal and web searches say nothing about
+            // whether the contract fired, so they sit on their own line.
+            // "검색 결과" is what search returned, not what an answer cited.
             println!(
-                "최근 {}일 recall {}회 · 빈 결과 {}회 · 제시한 기록 {}건",
+                "최근 {}일 에이전트 recall {}회 · 빈 결과 {}회 · 검색 결과 {}건",
                 report.recall.window_days,
-                report.recall.recall_count,
-                report.recall.zero_result_count,
-                report.recall.surfaced_total
+                report.recall.agent_recall_count,
+                report.recall.agent_zero_result_count,
+                report.recall.agent_surfaced_total
+            );
+            println!(
+                "직접 검색 {}회 (터미널 {}회 · 웹 {}회)",
+                report
+                    .recall
+                    .owner_search_count
+                    .saturating_add(report.recall.web_search_count),
+                report.recall.owner_search_count,
+                report.recall.web_search_count
             );
             println!(
                 "추천: {}",
@@ -1430,10 +1452,17 @@ fn find(arguments: FindArgs) -> Result<(), MkoError> {
             };
 
             // Recall is unconditional and measured (D7): every v3 `mko find`
-            // execution logs, regardless of format or result count. A
-            // logging failure must never swallow the results themselves —
-            // it is surfaced separately, on stderr, so it never corrupts a
-            // json-v2 stdout envelope.
+            // execution logs, regardless of format or result count, marked
+            // with who searched — `--recall` is the agent's contract search,
+            // anything else is the owner by hand. A logging failure must
+            // never swallow the results themselves — it is surfaced
+            // separately, on stderr, so it never corrupts a json-v2 stdout
+            // envelope.
+            let via = if arguments.recall {
+                RecallViaV2::Agent
+            } else {
+                RecallViaV2::Owner
+            };
             let surfaced = matches
                 .iter()
                 .map(|item| item.record_id.clone())
@@ -1444,6 +1473,7 @@ fn find(arguments: FindArgs) -> Result<(), MkoError> {
                 &arguments.term,
                 surfaced.len() as u64,
                 &surfaced,
+                via,
                 &SystemClock,
             )
             .err();

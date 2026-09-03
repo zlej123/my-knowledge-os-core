@@ -67,7 +67,8 @@ fn find_is_a_first_class_command() {
         .assert()
         .success()
         .stdout(predicate::str::contains("<TERM>"))
-        .stdout(predicate::str::contains("--perspective"));
+        .stdout(predicate::str::contains("--perspective"))
+        .stdout(predicate::str::contains("--recall"));
 }
 
 #[test]

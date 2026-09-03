@@ -62,32 +62,78 @@ mod macos {
 
     // The design's success measure lives on the first screen (§5, D7): the
     // owner must see whether recall is actually happening without a
-    // separate report.
+    // separate report. The headline is agent recalls (`--recall`) only; the
+    // owner's own searches are shown on their own line so the two are never
+    // read as one number.
     #[test]
     #[allow(deprecated)]
-    fn home_surfaces_recall_metrics_from_a_prior_find() {
+    fn home_surfaces_agent_recalls_apart_from_owner_searches() {
         let root = tempdir().unwrap();
         let repository = root.path().join("v3-kb");
         let provider = root.path().join("provider");
         scaffold_personal_kb_v2(&repository).unwrap();
         fs::create_dir(&provider).unwrap();
 
-        let find = Command::new(assert_cmd::cargo::cargo_bin("mko"))
-            .args(["find", "sampling"])
-            .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
-            .env("HOME", root.path())
-            .current_dir(&repository)
-            .output()
-            .unwrap();
-        assert!(find.status.success());
+        for args in [
+            ["find", "sampling", "--recall"].as_slice(),
+            ["find", "sampling"].as_slice(),
+            ["find", "another"].as_slice(),
+        ] {
+            let find = Command::new(assert_cmd::cargo::cargo_bin("mko"))
+                .args(args)
+                .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+                .env("HOME", root.path())
+                .current_dir(&repository)
+                .output()
+                .unwrap();
+            assert!(find.status.success());
+        }
 
         let output = run_home_and_quit(&repository, &provider, root.path());
         assert!(output.status.success());
         let screen = String::from_utf8_lossy(&output.stdout);
         assert!(
-            screen.contains("최근 30일 recall 1회"),
-            "recall metric missing from home: {screen}"
+            screen.contains("최근 30일 에이전트 recall 1회 · 빈 결과 1회 · 검색 결과 0건"),
+            "agent recall headline missing from home: {screen}"
         );
+        assert!(
+            screen.contains("직접 검색 2회 (터미널 2회 · 웹 0회)"),
+            "owner search line missing from home: {screen}"
+        );
+        assert!(
+            !screen.contains("제시한 기록"),
+            "search results must not be labelled as if they were cited: {screen}"
+        );
+    }
+
+    // The home menu's own `지식 찾기` is the owner searching by hand: it is
+    // logged as `via: owner` and must not move the agent headline.
+    #[test]
+    #[allow(deprecated)]
+    fn home_menu_search_is_logged_as_an_owner_search() {
+        let root = tempdir().unwrap();
+        let repository = root.path().join("v3-kb");
+        let provider = root.path().join("provider");
+        scaffold_personal_kb_v2(&repository).unwrap();
+        fs::create_dir(&provider).unwrap();
+
+        let script = "set timeout 10\nset bin $env(MKO_TEST_BIN)\nspawn -noecho $bin\nexpect {\n  \"찾을 내용 ›\" { send -- \"sampling\\r\"; exp_continue }\n  \"선택 ›\" { send -- \"2\\r\"; exp_continue }\n  eof {}\n}\nset status [wait]\nexit [lindex $status 3]\n";
+        let output = Command::new("/usr/bin/expect")
+            .args(["-c", script])
+            .env("MKO_TEST_BIN", assert_cmd::cargo::cargo_bin("mko"))
+            .env("MKO_PERSONAL_PROVIDER_ROOT", &provider)
+            .env("HOME", root.path())
+            .current_dir(&repository)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let log = fs::read_to_string(repository.join("logs/recall.jsonl")).unwrap();
+        let lines = log.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1, "{log}");
+        let entry: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(entry["via"], "owner");
+        assert_eq!(entry["query"], "sampling");
     }
 
     // The count is useless if it stops at the report: this is the screen the
