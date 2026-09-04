@@ -50,7 +50,7 @@ This Skill is written for exactly one Core version. Before the first `mko` comma
 (after installation checks), verify the contract:
 
 ```bash
-mko handshake --skill-version "0.4.6" --format json-v2
+mko handshake --skill-version "0.4.7" --format json-v2
 ```
 
 Pass the pinned version string above exactly; never substitute the CLI's own reported version.
@@ -223,7 +223,7 @@ simulate terminal approval, type into the approval window, or use computer-contr
 the phrase. A setup approval never authorizes review approval, judgment, Git, or another mutation.
 
 For ordinary human use, direct the owner to run bare `mko` in a real terminal. It displays current
-state and routes Inbox registration, confirmed-knowledge search, quick notes, and diagnosis without
+state and routes Inbox registration, unconfirmed-inclusive search, quick notes, and diagnosis without
 IDs or flags. It does not offer to continue confirming: an unconfirmed record is not unfinished
 work, so the unconfirmed list and the confirmation command (`mko confirm "STABLE_ID"`) are reached
 only by name, never as a suggested home action. Bare `mko` is never an agent automation surface.
