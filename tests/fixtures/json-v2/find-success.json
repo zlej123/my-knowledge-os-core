@@ -18,7 +18,8 @@
         "confirmation": {
           "status": "confirmed",
           "confirmed_at": "2026-07-23T01:00:00+00:00"
-        }
+        },
+        "authored_by": "ai"
       },
       {
         "record_type": "source",
@@ -34,13 +35,15 @@
         "confirmation": {
           "status": "unconfirmed",
           "confirmed_at": null
-        }
+        },
+        "authored_by": "ai"
       }
     ],
     "notes": [
       {
         "note_id": "personal-note-ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-        "text": "학습률을 낮췄더니 결과가 안정적이었다."
+        "text": "학습률을 낮췄더니 결과가 안정적이었다.",
+        "authored_by": "human"
       }
     ],
     "scan_complete": true

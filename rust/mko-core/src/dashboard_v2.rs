@@ -39,13 +39,13 @@ generated_by: my-knowledge-os
 
 # My Knowledge OS
 
-## 미확인 지식
-
-![[views/unconfirmed.base]]
-
-## 확인된 지식
+## 지식 라이브러리
 
 ![[views/knowledge-library.base]]
+
+## 미확인 지식 — Thesis 승격 전에 확인할 때 보는 목록
+
+![[views/unconfirmed.base]]
 
 터미널에서는 `mko queue`로 같은 미확인 목록을 확인할 수 있습니다.
 "#,
@@ -79,15 +79,17 @@ views:
   and:
     - file.inFolder("views/records")
     - 'record_type == "knowledge"'
-    - 'derived_state == "confirmed"'
 properties:
   perspectives:
     displayName: 관점
+  derived_state:
+    displayName: 상태
 views:
   - type: table
     name: 전체 지식
     order:
       - title
+      - derived_state
       - perspectives
       - tags
       - current_revision
@@ -98,6 +100,7 @@ views:
         - 'list(perspectives).contains("life")'
     order:
       - title
+      - derived_state
       - perspectives
       - tags
       - current_revision
@@ -108,6 +111,7 @@ views:
         - 'list(perspectives).contains("learning")'
     order:
       - title
+      - derived_state
       - perspectives
       - tags
       - current_revision
@@ -118,6 +122,7 @@ views:
         - 'list(perspectives).contains("technical")'
     order:
       - title
+      - derived_state
       - perspectives
       - tags
       - current_revision
@@ -128,6 +133,7 @@ views:
         - 'list(perspectives).contains("project")'
     order:
       - title
+      - derived_state
       - perspectives
       - tags
       - current_revision
@@ -138,6 +144,7 @@ views:
         - 'list(perspectives).contains("investment")'
     order:
       - title
+      - derived_state
       - perspectives
       - tags
       - current_revision

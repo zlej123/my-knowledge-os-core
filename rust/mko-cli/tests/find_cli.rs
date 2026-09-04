@@ -200,7 +200,14 @@ fn find_json_v2_returns_unified_labelled_matches_and_matches_schema() {
 
     let output = Command::cargo_bin("mko")
         .unwrap()
-        .args(["find", "reported example", "--format", "json-v2", "--repo"])
+        .args([
+            "find",
+            "reported example",
+            "--recall",
+            "--format",
+            "json-v2",
+            "--repo",
+        ])
         .arg(fixture.root.path())
         .assert()
         .success()
@@ -232,6 +239,10 @@ fn find_json_v2_returns_unified_labelled_matches_and_matches_schema() {
     assert_eq!(knowledge_item["title"], "Reported result");
     assert_eq!(knowledge_item["confirmation"]["status"], "confirmed");
     assert!(knowledge_item["confirmation"]["confirmed_at"].is_string());
+    // §4.1 provenance: every record the current prepare pipeline writes is
+    // agent-drafted, so `authored_by` must read `ai` until a human-authored
+    // record path exists.
+    assert_eq!(knowledge_item["authored_by"], "ai");
 
     let source_item = items
         .iter()
@@ -240,20 +251,66 @@ fn find_json_v2_returns_unified_labelled_matches_and_matches_schema() {
     assert_eq!(source_item["layer"], "source_own_words");
     assert_eq!(source_item["confirmation"]["status"], "unconfirmed");
     assert!(source_item["confirmation"]["confirmed_at"].is_null());
+    assert_eq!(source_item["authored_by"], "ai");
 
     // Recall is unconditional and measured (D7): every v3 `mko find`
     // execution appends one line to logs/recall.jsonl, naming every
-    // returned record ID as `surfaced`.
+    // returned record ID as `surfaced`. `--recall` marks it as the agent's
+    // contract search (`via: agent`).
     let log = fs::read_to_string(fixture.root.path().join("logs/recall.jsonl")).unwrap();
     let lines = log.lines().collect::<Vec<_>>();
     assert_eq!(lines.len(), 1);
     let entry: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(entry["query"], "reported example");
     assert_eq!(entry["results"], 2);
+    assert_eq!(entry["via"], "agent");
     let surfaced = entry["surfaced"].as_array().unwrap();
     assert_eq!(surfaced.len(), 2);
     assert!(surfaced.iter().any(|id| *id == knowledge_item["record_id"]));
     assert!(surfaced.iter().any(|id| *id == source_item["record_id"]));
+}
+
+// A `remember`d quick note is always owner-typed — it has no agent-drafted
+// form — so `find` must report `authored_by: human` for it (§4.1) even
+// though every Source/Knowledge hit in this KB is `ai`.
+#[test]
+#[allow(deprecated)]
+fn find_reports_human_authored_by_for_quick_notes() {
+    let fixture = seeded_fixture();
+
+    let prepared = mko_core::quick_note_v2::prepare_quick_note_v2(
+        "불변 텍스트 메모",
+        clock("2026-08-01T02:00:00Z").0,
+    )
+    .unwrap();
+    mko_core::quick_note_v2::publish_quick_note_v2(
+        fixture.root.path(),
+        &prepared,
+        &prepared.confirmation_phrase,
+        &clock("2026-08-01T02:00:00Z"),
+    )
+    .unwrap();
+
+    let output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["find", "불변 텍스트 메모", "--format", "json-v2", "--repo"])
+        .arg(fixture.root.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/v2/machine-output.schema.json"
+    ))
+    .unwrap();
+    assert!(jsonschema::validator_for(&schema).unwrap().is_valid(&value));
+
+    let notes = value["data"]["notes"].as_array().unwrap();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes[0]["authored_by"], "human");
 }
 
 #[test]
@@ -518,4 +575,27 @@ fn find_with_no_matches_still_logs_a_zero_result_recall() {
     let entry: serde_json::Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
     assert_eq!(entry["results"], 0);
     assert_eq!(entry["surfaced"].as_array().unwrap().len(), 0);
+    // Without `--recall` this is the owner searching by hand, not the agent
+    // honouring the recall contract: it must never count as an agent recall.
+    assert_eq!(entry["via"], "owner");
+}
+
+// The same search, run with `--recall` in human format, is the agent's.
+// The marker follows the flag, not the output format or the result count.
+#[test]
+#[allow(deprecated)]
+fn find_recall_flag_marks_the_entry_as_agent_regardless_of_format() {
+    let fixture = seeded_fixture();
+
+    Command::cargo_bin("mko")
+        .unwrap()
+        .args(["find", "no-such-term-anywhere", "--recall", "--repo"])
+        .arg(fixture.root.path())
+        .assert()
+        .success();
+
+    let log = fs::read_to_string(fixture.root.path().join("logs/recall.jsonl")).unwrap();
+    let entry: serde_json::Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["via"], "agent");
+    assert_eq!(entry["results"], 0);
 }

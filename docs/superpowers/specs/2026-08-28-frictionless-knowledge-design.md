@@ -230,6 +230,10 @@ below are new behavior.
   - **Filters over data that exists today**: confirmation state and time
     range. Topic and origin-form filters arrive with the phases that create
     those fields.
+    **Status:** the time-range filter was descoped during Phase 1a delivery
+    — an unconfirmed revision carries no write timestamp to filter on — and
+    is not implemented; only confirmation-state filtering shipped. Revisit
+    once a revision write timestamp exists.
   - **Source-record search**, built new (no source search exists today). If
     its cost proves larger than planned, the plan may descope it to a
     follow-up, recorded with the reason.
@@ -241,6 +245,24 @@ below are new behavior.
   where conversation content becomes a first-class input form. Until then,
   the recall log's zero-result entries accumulate as the occurrence record
   that grounds its design. The agent never stores on its own initiative.
+
+**Measurement honesty (2026-09-03).** Verified drift: the log counted every
+`mko find`, so the owner's own terminal and home-menu searches were reported
+as recall, the web UI's search was never logged at all, and "substantive
+question" was an undefined term that quietly reintroduced the domain
+judgment D7 removes. Corrections: each log line carries `via` —
+`agent` (`mko find --recall`, the Skill's contract search), `owner` (a plain
+`mko find` or the home menu's `지식 찾기`), or `web` (`/api/search`, which
+now logs too, tolerating a logging failure the same way `find` does); a line
+without `via` predates the marker and reads as `owner`, the weaker claim.
+`mko home`'s headline is agent recalls only — recall count, empty results,
+and results returned (labelled as search results, not citations) — with
+owner and web searches on their own line, never summed into it. The Skill's
+rule replaces "substantive" with an explicit one: recall fires for every
+message asking for a fact, a judgment, an explanation, or a recommendation,
+and is skipped only for greetings/acknowledgements and questions about
+operating the tool — never on a guess about coverage — and the Skill's
+trigger description is broadened so it loads for such questions at all.
 
 ## 6. Unified ingestion (Phases 2–4)
 
@@ -370,6 +392,15 @@ Phase 3 defers `.hwp` to the backlog and keeps `.hwpx` as a candidate.
 - A semantic search engine, embeddings, or any nondeterministic index inside
   the Core.
 - Automatic storage without the owner's yes (store-on-miss always asks).
+  **Deliberate exception, inherited unchanged from the 2026-08-06
+  question-enrichment design** (`docs/superpowers/specs/
+  2026-08-06-mko-question-enrichment-design.md`): the Skill's
+  studying-by-asking flow and the web/video workflows register a page the
+  agent cites, or a video's transcript, as a snapshot *while answering* —
+  that registration is not store-on-miss and is not gated on a yes, because
+  a cited source is working evidence, not conversation content. The
+  owner's explicit yes is still required before any conversation content
+  itself is stored.
 
 ## 10. Testing
 

@@ -23,7 +23,7 @@ fn version_reports_the_product_release() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("mko 0.4.5"));
+        .stdout(predicate::str::contains("mko 0.4.8"));
 }
 
 #[test]
@@ -67,7 +67,8 @@ fn find_is_a_first_class_command() {
         .assert()
         .success()
         .stdout(predicate::str::contains("<TERM>"))
-        .stdout(predicate::str::contains("--perspective"));
+        .stdout(predicate::str::contains("--perspective"))
+        .stdout(predicate::str::contains("--recall"));
 }
 
 #[test]

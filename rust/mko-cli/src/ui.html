@@ -152,18 +152,20 @@
       if(!items.length){list.append(empty('표시할 지식이 없습니다.'));return;}
       items.forEach(item=>{
         const card=element('article','card');
-        // Search results (§4.2) carry `confirmation` — unconfirmed records are
-        // included by default now, so the badge must say which is which
-        // without the viewer opening the record. The resurface list has no
-        // `confirmation` field and keeps its own deferred/confirmed badge.
+        // Both search results and resurfaced knowledge (§4.2) carry
+        // `confirmation` — unconfirmed records are included by default now,
+        // so the badge must say which is which without the viewer opening
+        // the record. Resurfaced knowledge also carries its own `deferred`
+        // review_state, a human's explicit "come back to this" — checked
+        // first so it is never masked by the (also-unconfirmed) badge.
         let state,tone;
         if(item.record_type==='quick_note'){state='내 생각';tone='';}
+        else if(item.review_state==='deferred'){state='나중에 보기';tone='amber';}
         else if(item.confirmation){
           if(item.confirmation.status==='confirmed'){state=`확인됨 (${(item.confirmation.confirmed_at||'').slice(0,10)})`;tone='';}
           else if(item.confirmation.status==='unconfirmed'){state='AI 작성 · 미확인';tone='amber';}
           else {state='내 생각';tone='';}
         }
-        else if(item.review_state==='deferred'){state='나중에 보기';tone='amber';}
         else {state='확인된 지식';tone='';}
         card.append(badge(state,tone),element('h3','',item.title),element('p','',compact(item.synthesis||item.body,300)));
         const meta=element('div','meta',item.current_revision||item.revision||item.record_id||item.knowledge_id); card.append(meta); list.append(card);

@@ -6,6 +6,7 @@ use std::{
 };
 
 use mko_core::{
+    clock::SystemClock,
     config_v2::PerspectiveV2,
     error::MkoError,
     home::{HomeNextAction, HomeReport, inspect_home},
@@ -17,6 +18,7 @@ use mko_core::{
         search_records_by_perspective_v2,
     },
     quick_note_v2::search_quick_notes_v2,
+    recall_log_v2::{RecallViaV2, append_recall_log_v2},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -444,7 +446,12 @@ struct CoreKnowledgeItem {
     synthesis: String,
     perspectives: Vec<String>,
     review_state: &'static str,
-    reviewed_at: String,
+    /// The same shape `SearchResult.confirmation` uses (§4.2), so the web UI
+    /// can render unconfirmed resurfaced knowledge with the same badge logic
+    /// as search results instead of a second vocabulary.
+    confirmation: SearchResultConfirmation,
+    /// Absent for knowledge no human has reviewed yet.
+    reviewed_at: Option<String>,
     has_open_questions: bool,
 }
 
@@ -562,8 +569,19 @@ fn build_core_projection(repository: &Path, provider: &Path) -> Result<CoreProje
                     review_state: match item.review_state {
                         ResurfacedKnowledgeStateV2::Confirmed => "confirmed",
                         ResurfacedKnowledgeStateV2::Deferred => "deferred",
+                        ResurfacedKnowledgeStateV2::Unconfirmed => "unconfirmed",
                     },
-                    reviewed_at: item.reviewed_at.to_rfc3339(),
+                    confirmation: match item.confirmation {
+                        ConfirmationLabelV2::Confirmed { at } => SearchResultConfirmation {
+                            status: "confirmed",
+                            confirmed_at: Some(at.to_rfc3339()),
+                        },
+                        ConfirmationLabelV2::Unconfirmed => SearchResultConfirmation {
+                            status: "unconfirmed",
+                            confirmed_at: None,
+                        },
+                    },
+                    reviewed_at: item.reviewed_at.map(|at| at.to_rfc3339()),
                     has_open_questions: item.has_open_questions,
                 })
                 .collect();
@@ -774,6 +792,29 @@ fn search_projection(repository: &Path, query: &str) -> Result<Vec<SearchResult>
             .then(left.title.cmp(&right.title))
             .then(left.record_id.cmp(&right.record_id))
     });
+    // The web UI's search is a search too (§5, 2026-09-03): it is logged as
+    // `via: web`, apart from agent recalls, so a term typed here neither
+    // vanishes from the record nor inflates the headline. The UI mutates no
+    // KB record — the recall log is the one append it makes. As in `mko
+    // find`, a logging failure must not swallow the results the owner is
+    // waiting on.
+    let surfaced = results
+        .iter()
+        .map(|item| item.record_id.clone())
+        .collect::<Vec<_>>();
+    if let Err(error) = append_recall_log_v2(
+        repository,
+        term,
+        surfaced.len() as u64,
+        &surfaced,
+        RecallViaV2::Web,
+        &SystemClock,
+    ) {
+        eprintln!(
+            "주의: recall 기록에 실패했지만 검색 결과는 반환했습니다 ({})",
+            error.code()
+        );
+    }
     Ok(results)
 }
 
@@ -1670,6 +1711,31 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.code(), "ui_search_invalid");
+    }
+
+    // A search from the web UI is logged like any other, marked `via: web`
+    // so it is never mistaken for the agent's recall (§5, 2026-09-03).
+    #[test]
+    fn search_projection_logs_a_web_search() {
+        let root = tempdir().unwrap();
+        let repository = root.path().join("kb");
+        scaffold_personal_kb_v2(&repository).unwrap();
+
+        let results = search_projection(&repository, "q=%EB%B3%91%EB%AA%A9").unwrap();
+        assert!(results.is_empty());
+
+        let log = fs::read_to_string(repository.join("logs/recall.jsonl")).unwrap();
+        let lines = log.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1);
+        let entry: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(entry["via"], "web");
+        assert_eq!(entry["query"], "병목");
+        assert_eq!(entry["results"], 0);
+
+        // A rejected query is never logged: nothing was searched.
+        assert!(search_projection(&repository, "q=").is_err());
+        let log = fs::read_to_string(repository.join("logs/recall.jsonl")).unwrap();
+        assert_eq!(log.lines().count(), 1);
     }
 
     #[test]

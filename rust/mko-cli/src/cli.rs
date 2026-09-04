@@ -44,10 +44,10 @@ use mko_core::{
         AddOutcomeV2, AddSingleDataV2, AskedQuestionV2, DashboardCanonicalStateDataV2,
         DashboardDataV2, DashboardFileDataV2, DashboardFileKindDataV2, DashboardFileStateDataV2,
         DashboardProjectionStateDataV2, DoctorCheckDataV2, DoctorCheckStatusV2, DoctorDataV2,
-        FindConfirmationStatusV2, FindConfirmationV2, FindDataV2, FindLayerV2, FindMatchV2,
-        FindNoteV2, FindRecordTypeV2, HandshakeDataV2, JsonV2Command, JsonV2Success, NextActionV2,
-        PendingDraftReasonV2, PendingDraftV2, QuestionsAppendDataV2, QuestionsListDataV2,
-        QueueDraftsDataV2, SetupApplyDataV2, TopicsDataV2,
+        FindAuthoredByV2, FindConfirmationStatusV2, FindConfirmationV2, FindDataV2, FindLayerV2,
+        FindMatchV2, FindNoteV2, FindRecordTypeV2, HandshakeDataV2, JsonV2Command, JsonV2Success,
+        NextActionV2, PendingDraftReasonV2, PendingDraftV2, QuestionsAppendDataV2,
+        QuestionsListDataV2, QueueDraftsDataV2, SetupApplyDataV2, TopicsDataV2,
     },
     knowledge::{
         ConceptKind, KnowledgeSearchQuery, WriteKnowledgeRequest, approve_knowledge,
@@ -56,6 +56,7 @@ use mko_core::{
     local_file_v2::{RegisterLocalFileRequestV2, register_local_file_asset_v2},
     migrate_v2::migrate_v2,
     model::AssetStatus,
+    model_v2::AuthoredByV2,
     pdf::{ExtractionWorkerResponse, extract_pdf_pages_from_reader, worker_executable},
     perspective_v2::{prepare_perspective_confirmation_v2, publish_perspective_confirmation_v2},
     prepare::{PrepareRequest, prepare_source},
@@ -71,7 +72,7 @@ use mko_core::{
         QuickNotePublicationOutcomeV2, QuickNoteV2, prepare_quick_note_v2, publish_quick_note_v2,
         search_quick_notes_v2,
     },
-    recall_log_v2::append_recall_log_v2,
+    recall_log_v2::{RecallViaV2, append_recall_log_v2},
     records_v2::RecordWriteOutcomeV2,
     registry::{
         AssetOperationRequest, CaptureRequest, accept_changed_asset, capture_asset, inspect_asset,
@@ -296,7 +297,7 @@ enum Command {
     Setup(SetupArgs),
     /// Inbox의 새 자료를 등록합니다
     Add(AddArgs),
-    /// 확인된 지식에서 내용을 찾습니다
+    /// 미확인 지식을 포함해 내용을 찾습니다
     Find(FindArgs),
     /// 지식과 투자 판단을 한 화면에서 읽습니다
     Ui(UiArgs),
@@ -415,6 +416,13 @@ struct FindArgs {
     /// Core's internal origin enum.
     #[arg(long, value_enum)]
     origin: Option<FindOriginArg>,
+    /// Marks this search as the agent's recall-contract search, logged as
+    /// `via: agent`. Without it the search is logged as the owner's own
+    /// (`via: owner`), which is what a plain terminal or home-menu search
+    /// is. Only agent recalls count toward the home screen's headline (§5,
+    /// D7).
+    #[arg(long)]
+    recall: bool,
     #[arg(long)]
     repo: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -482,6 +490,13 @@ fn find_record_type_data(record_type: SearchRecordTypeV2) -> FindRecordTypeV2 {
     }
 }
 
+fn find_authored_by_data(authored_by: &AuthoredByV2) -> FindAuthoredByV2 {
+    match authored_by {
+        AuthoredByV2::Ai => FindAuthoredByV2::Ai,
+        AuthoredByV2::Human => FindAuthoredByV2::Human,
+    }
+}
+
 fn find_confirmation_data(label: ConfirmationLabelV2) -> FindConfirmationV2 {
     match label {
         ConfirmationLabelV2::Confirmed { at } => FindConfirmationV2 {
@@ -513,25 +528,44 @@ fn find_match_data(item: SearchMatchV2) -> FindMatchV2 {
         layer: find_layer_data(item.layer),
         locators: item.locators,
         confirmation: find_confirmation_data(item.confirmation),
+        authored_by: find_authored_by_data(&item.authored_by),
     }
 }
 
+// A stored quick note has no agent-drafted form (§4.1): it is always
+// owner-typed, so its `authored_by` is unconditionally `human` rather than
+// derived from a per-note field.
 fn find_note_data(note: QuickNoteV2) -> FindNoteV2 {
     FindNoteV2 {
         note_id: note.id,
         text: note.text,
+        authored_by: FindAuthoredByV2::Human,
     }
 }
 
-fn confirmation_label_text(label: &ConfirmationLabelV2) -> String {
+// Authorship prefix per §4.2's example labelling (`AI 작성 · 미검토`) —
+// `authored_by` (§4.1) says whose words they are, independent of whether a
+// human has since confirmed the exact revision.
+fn authored_by_label(authored_by: &AuthoredByV2) -> &'static str {
+    match authored_by {
+        AuthoredByV2::Ai => "AI 작성",
+        AuthoredByV2::Human => "사람 작성",
+    }
+}
+
+fn confirmation_label_text(label: &ConfirmationLabelV2, authored_by: &AuthoredByV2) -> String {
     match label {
         // Matches the vocabulary `mko queue`/`mko confirm` already use for
         // this state (cli_v2::state_label's `미확인`), prefixed with
         // authorship per §4.2's example labelling.
         ConfirmationLabelV2::Confirmed { at } => {
-            format!("확인됨 ({})", at.format("%Y-%m-%d"))
+            format!(
+                "{} · 확인됨 ({})",
+                authored_by_label(authored_by),
+                at.format("%Y-%m-%d")
+            )
         }
-        ConfirmationLabelV2::Unconfirmed => "AI 작성 · 미확인".to_owned(),
+        ConfirmationLabelV2::Unconfirmed => format!("{} · 미확인", authored_by_label(authored_by)),
     }
 }
 
@@ -1172,6 +1206,9 @@ fn home() -> Result<(), MkoError> {
                 layer: None,
                 topic: None,
                 origin: None,
+                // The owner typing into the home menu is not the agent
+                // recalling: it is logged as an owner search.
+                recall: false,
                 repo: Some(context.repository_root),
                 format: OutputFormat::Human,
             })
@@ -1224,13 +1261,25 @@ fn render_home(report: &HomeReport) {
             );
             // The design's success measure lives on the first screen (§5,
             // D7): whether recall is actually happening, measured, not just
-            // hoped for.
+            // hoped for. The headline counts agent recalls only — the
+            // owner's own terminal and web searches say nothing about
+            // whether the contract fired, so they sit on their own line.
+            // "검색 결과" is what search returned, not what an answer cited.
             println!(
-                "최근 {}일 recall {}회 · 빈 결과 {}회 · 제시한 기록 {}건",
+                "최근 {}일 에이전트 recall {}회 · 빈 결과 {}회 · 검색 결과 {}건",
                 report.recall.window_days,
-                report.recall.recall_count,
-                report.recall.zero_result_count,
-                report.recall.surfaced_total
+                report.recall.agent_recall_count,
+                report.recall.agent_zero_result_count,
+                report.recall.agent_surfaced_total
+            );
+            println!(
+                "직접 검색 {}회 (터미널 {}회 · 웹 {}회)",
+                report
+                    .recall
+                    .owner_search_count
+                    .saturating_add(report.recall.web_search_count),
+                report.recall.owner_search_count,
+                report.recall.web_search_count
             );
             println!(
                 "추천: {}",
@@ -1430,10 +1479,17 @@ fn find(arguments: FindArgs) -> Result<(), MkoError> {
             };
 
             // Recall is unconditional and measured (D7): every v3 `mko find`
-            // execution logs, regardless of format or result count. A
-            // logging failure must never swallow the results themselves —
-            // it is surfaced separately, on stderr, so it never corrupts a
-            // json-v2 stdout envelope.
+            // execution logs, regardless of format or result count, marked
+            // with who searched — `--recall` is the agent's contract search,
+            // anything else is the owner by hand. A logging failure must
+            // never swallow the results themselves — it is surfaced
+            // separately, on stderr, so it never corrupts a json-v2 stdout
+            // envelope.
+            let via = if arguments.recall {
+                RecallViaV2::Agent
+            } else {
+                RecallViaV2::Owner
+            };
             let surfaced = matches
                 .iter()
                 .map(|item| item.record_id.clone())
@@ -1444,6 +1500,7 @@ fn find(arguments: FindArgs) -> Result<(), MkoError> {
                 &arguments.term,
                 surfaced.len() as u64,
                 &surfaced,
+                via,
                 &SystemClock,
             )
             .err();
@@ -1464,7 +1521,7 @@ fn find(arguments: FindArgs) -> Result<(), MkoError> {
                                 "[{}] {} · {}",
                                 find_layer_label(item.layer),
                                 item.title,
-                                confirmation_label_text(&item.confirmation)
+                                confirmation_label_text(&item.confirmation, &item.authored_by)
                             );
                             println!("  {}", compact_excerpt(&item.body, 140));
                             if !item.perspectives.is_empty() {
@@ -1690,9 +1747,12 @@ fn resurface(repository: &Path) -> Result<(), MkoError> {
     println!("다시 볼 지식");
     for (index, item) in items.iter().enumerate() {
         println!(
-            "{}. {}{}{}",
+            "{}. {} · {}{}{}",
             index + 1,
             item.title,
+            // Reuses `mko find`'s confirmation badge (§4.2) so unconfirmed
+            // resurfaced knowledge reads the same way search results do.
+            confirmation_label_text(&item.confirmation, &item.authored_by),
             if item.review_state == ResurfacedKnowledgeStateV2::Deferred {
                 " · 나중에 보기"
             } else {
@@ -1742,18 +1802,26 @@ fn resurface(repository: &Path) -> Result<(), MkoError> {
     let selected = &items[selected_index - 1];
     println!();
     println!("{}", selected.title);
-    println!(
-        "{} · 검토 {} · 마지막 열람 {}",
-        match selected.review_state {
-            ResurfacedKnowledgeStateV2::Deferred => "나중에 보기",
-            ResurfacedKnowledgeStateV2::Confirmed => "확인됨",
-        },
-        selected.reviewed_at.format("%Y-%m-%d"),
+    // Deferred keeps its own explicit "come back to this" label; confirmed
+    // and unconfirmed both reuse `mko find`'s confirmation badge (§4.2).
+    let status_label = match selected.review_state {
+        ResurfacedKnowledgeStateV2::Deferred => "나중에 보기".to_owned(),
+        ResurfacedKnowledgeStateV2::Confirmed | ResurfacedKnowledgeStateV2::Unconfirmed => {
+            confirmation_label_text(&selected.confirmation, &selected.authored_by)
+        }
+    };
+    let mut detail_line = status_label;
+    if let Some(reviewed_at) = selected.reviewed_at {
+        detail_line.push_str(&format!(" · 검토 {}", reviewed_at.format("%Y-%m-%d")));
+    }
+    detail_line.push_str(&format!(
+        " · 마지막 열람 {}",
         selected
             .last_opened_at
             .map(|opened_at| opened_at.format("%Y-%m-%d").to_string())
             .unwrap_or_else(|| "처음".to_owned())
-    );
+    ));
+    println!("{detail_line}");
     println!();
     println!("{}", selected.synthesis);
     record_resurfaced_knowledge_open_v2(

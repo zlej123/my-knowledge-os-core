@@ -11,7 +11,7 @@ use mko_core::{
         ProjectionInputV2, ProjectionRecordTypeV2, ProjectionStateV2, write_projection_v2,
     },
     records_v2::{AssetRecordV2, WriteSourceRecordRequestV2, write_source_record_v2},
-    revision_v2::{canonical_json_bytes, canonical_json_sha256},
+    revision_v2::{canonical_json_bytes, canonical_json_sha256, sha256_digest},
     scaffold_v2::scaffold_personal_kb_v2,
 };
 use tempfile::tempdir;
@@ -246,6 +246,88 @@ fn repair_preserves_user_modified_projection_and_prepares_recovery() {
     assert!(recovery[0].path().join("projection.original.md").is_file());
     assert!(recovery[0].path().join("projection.expected.md").is_file());
     assert!(recovery[0].path().join("projection.diff").is_file());
+}
+
+/// A KB scaffolded by a previous `mko` generation still has the old
+/// confirmed-only `views/knowledge-library.base` on disk, with the manifest
+/// recording that older generation's own digest (never user-edited).
+/// `mko dashboard --repair` (§4.2: unconfirmed knowledge is visible by
+/// default) must treat this as ordinary generator drift and regenerate the
+/// current, filter-free content rather than refusing as a user edit.
+#[test]
+fn repair_regenerates_previous_generation_library_view_content() {
+    let root = tempdir().unwrap();
+    scaffold_personal_kb_v2(root.path()).unwrap();
+    ensure_dashboard_v2(root.path()).unwrap();
+
+    let previous_generation: &[u8] = r#"filters:
+  and:
+    - file.inFolder("views/records")
+    - 'record_type == "knowledge"'
+    - 'derived_state == "confirmed"'
+properties:
+  perspectives:
+    displayName: 관점
+views:
+  - type: table
+    name: 전체 지식
+    order:
+      - title
+      - perspectives
+      - tags
+      - current_revision
+"#
+    .as_bytes();
+    let path = root.path().join("views/knowledge-library.base");
+    fs::write(&path, previous_generation).unwrap();
+    let manifest_path = root.path().join(".mko/generated-manifest.yaml");
+    let manifest = fs::read_to_string(&manifest_path).unwrap();
+    let mut lines = manifest.lines().map(str::to_owned).collect::<Vec<_>>();
+    let digest_index = lines
+        .iter()
+        .position(|line| line.trim() == "- path: views/knowledge-library.base")
+        .expect("manifest carries a knowledge-library.base entry")
+        + 1;
+    lines[digest_index] = format!("  content_digest: {}", sha256_digest(previous_generation));
+    fs::write(&manifest_path, lines.join("\n") + "\n").unwrap();
+
+    let status = inspect_dashboard_v2(root.path()).unwrap();
+    assert_eq!(
+        status
+            .items
+            .iter()
+            .find(|item| item.path == "views/knowledge-library.base")
+            .unwrap()
+            .state,
+        DashboardFileStateV2::Stale
+    );
+
+    let result = repair_dashboard_v2(root.path()).unwrap();
+    assert_eq!(
+        result.outcome,
+        mko_core::dashboard_v2::DashboardOutcomeV2::Repaired
+    );
+
+    let repaired = fs::read_to_string(&path).unwrap();
+    assert!(
+        !repaired.contains("derived_state == \"confirmed\""),
+        "repair must drop the confirmed-only filter, got: {repaired}"
+    );
+    assert!(
+        repaired.contains("displayName: 상태"),
+        "repair must add the visible derived_state label, got: {repaired}"
+    );
+    assert_eq!(
+        inspect_dashboard_v2(root.path())
+            .unwrap()
+            .items
+            .iter()
+            .find(|item| item.path == "views/knowledge-library.base")
+            .unwrap()
+            .state,
+        DashboardFileStateV2::Current,
+        "repaired bytes must exactly match the current generator output"
+    );
 }
 
 fn projection_path(root: &std::path::Path, record_id: &str) -> std::path::PathBuf {

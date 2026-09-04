@@ -20,11 +20,11 @@ tree, not anywhere in git history. They are retired; do not go looking for them.
 
 | Path | Contents |
 |---|---|
-| `rust/mko-core` | The Core. Deterministic mutations; `version::PRODUCT_VERSION`; `config_v2.rs` holds `CONTRACT_VERSION_V2` (on-disk KB contract, see below). |
+| `rust/mko-core` | The Core. Deterministic mutations; `version::PRODUCT_VERSION`; `config_v2.rs` holds `CONTRACT_VERSION_V2` (on-disk KB contract, see below); `recall_log_v2.rs` (append-only recall log), `local_file_v2.rs` (local-file Asset registration), and `migrate_v2.rs` (the v0.3→v3 migration) are also here. |
 | `rust/mko-cli` | The `mko` binary. `cli.rs` carries command dispatch and `handshake`. |
 | `rust/mko-windows-acl` | Windows file-permission handling. |
 | `schemas/` | json-v2 envelope schemas — an agent-facing surface, so edits here force a version bump. |
-| `skills/codex/` | The installed Skills: `my-knowledge-os`, `capture-asset`, `process-asset`. Each has its own `SKILL.md`. |
+| `skills/codex/` | The installed Skills. `my-knowledge-os` is the current, actively developed Skill (json-v2). `capture-asset` and `process-asset` are frozen legacy v0.1 Skills — not part of ongoing development. Each has its own `SKILL.md`. |
 | `tests/skill-forward/` | Forward tests for the Skill: `*-scenarios.md`, `*-rubric.md`, and `harness/` fixtures. Not run by `cargo test`. |
 | `docs/superpowers/specs/`, `docs/superpowers/plans/` | Dated design and plan documents (see above). |
 | `scripts/pre-commit` | Shipped for the *user's* knowledge repository (`mko check --staged`), not a hook for this repo's own development. |
@@ -43,8 +43,10 @@ agent-facing machine surface — CLI commands or flags, json-v2 envelopes, `sche
 SKILL.md workflow contract — must bump `workspace.package.version` in `rust/Cargo.toml`
 (patch level at minimum) in the same change. Tests pin the version in three places
 (`contract_version.rs`, the CLI `--version` test, and the Skill handshake pin) so a bump is
-always an explicit, reviewed act. `CONTRACT_VERSION_V2` in `config_v2.rs` is the on-disk KB
-contract, not the product version; it must not change for a surface bump.
+always an explicit, reviewed act. `contract_version.rs` pins both: `PRODUCT_VERSION` (and the
+legacy v1 `KNOWLEDGE_CONTRACT_VERSION`) alongside `CONTRACT_VERSION_V2` in `config_v2.rs`, the
+on-disk KB contract — a separate value, not the product version, that must not change for a
+surface bump.
 
 ## Verification
 

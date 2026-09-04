@@ -215,6 +215,10 @@ mko setup plan --format json-v2
 mko setup apply --plan <core-plan-id> --format json-v2
 mko add --inbox --format json-v2
 mko add <inbox-pdf> --format json-v2
+mko add --paste <text-file> --format json-v2
+mko add --local-file <path> --format json-v2
+mko add --conversation <text-file> --format json-v2
+mko add --video-transcript <text-file> --url <video-url> --format json-v2
 mko source prepare --asset-id <asset-id> --format json-v2
 mko source write-draft --bundle <bundle> --response <source-response.json> --format json-v2
 mko knowledge write --asset-id <asset-id> --bundle <bundle> --response <knowledge-response.json> --format json-v2
@@ -222,6 +226,9 @@ mko queue --format json-v2
 mko show <stable-id> --format json-v2
 mko review-open <stable-id> --format json-v2
 mko review-feedback --input <decision.json> --format json-v2
+mko find <term> --format json-v2
+mko topics --format json-v2
+mko ask --asset <asset-id> --text <question> --format json-v2
 ```
 
 계약은 [schemas/v2](schemas/v2), 예시는 [tests/fixtures/json-v2](tests/fixtures/json-v2)에 있습니다.

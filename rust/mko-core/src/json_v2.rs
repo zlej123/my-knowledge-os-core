@@ -121,6 +121,19 @@ pub struct FindConfirmationV2 {
     pub confirmed_at: Option<String>,
 }
 
+/// Who wrote the words a `find` hit or note returns (§4.1): `ai` for the
+/// agent-drafted prepare pipeline that produces every Source and Knowledge
+/// record today, `human` for owner-typed content. Mirrors
+/// `model_v2::AuthoredByV2` in the envelope's own vocabulary, the same way
+/// `FindLayerV2`/`FindRecordTypeV2` mirror their Core counterparts rather
+/// than reusing them directly.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindAuthoredByV2 {
+    Ai,
+    Human,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FindMatchV2 {
@@ -135,16 +148,19 @@ pub struct FindMatchV2 {
     pub layer: FindLayerV2,
     pub locators: Vec<String>,
     pub confirmation: FindConfirmationV2,
+    pub authored_by: FindAuthoredByV2,
 }
 
 /// A quick note match — carries no confirmation label, unlike Source and
 /// Knowledge (§4.2): a `remember`d note is owner-authored and immediately
-/// real, not part of the human-confirmation lifecycle.
+/// real, not part of the human-confirmation lifecycle. `authored_by` is
+/// always `human` (§4.1): a stored note has no agent-drafted form.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FindNoteV2 {
     pub note_id: String,
     pub text: String,
+    pub authored_by: FindAuthoredByV2,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

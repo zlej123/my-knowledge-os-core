@@ -46,8 +46,9 @@ as one placed in the Inbox directly — not the transport.
 
 **Related.** Thesis references MKO records through `mko://` IDs only (see the
 MKO reference contract in the Thesis repository). Investment material
-reaching Thesis is a human promotion of an approved MKO source into evidence;
-it is never automatic, so messenger capture would not change that path.
+reaching Thesis is a human promotion of a human-confirmed MKO source into
+evidence; it is never automatic, so messenger capture would not change that
+path.
 
 ## Usability review findings — 2026-07-29
 
