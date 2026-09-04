@@ -66,12 +66,17 @@ pub struct V3HomeReport {
     pub recall: RecallSummaryV2,
 }
 
+/// Mirrors `recall_log_v2::RecallMetricsV2`: the headline is agent recalls
+/// only (`mko find --recall`); the owner's own terminal and web searches are
+/// carried beside it so the two are never added together.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RecallSummaryV2 {
     pub window_days: u32,
-    pub recall_count: u64,
-    pub zero_result_count: u64,
-    pub surfaced_total: u64,
+    pub agent_recall_count: u64,
+    pub agent_zero_result_count: u64,
+    pub agent_surfaced_total: u64,
+    pub owner_search_count: u64,
+    pub web_search_count: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -212,9 +217,11 @@ pub fn inspect_home(
             let recall = recall_metrics_v2(repository_root, SystemClock.now_utc())
                 .map(|metrics| RecallSummaryV2 {
                     window_days: metrics.window_days,
-                    recall_count: metrics.recall_count,
-                    zero_result_count: metrics.zero_result_count,
-                    surfaced_total: metrics.surfaced_total,
+                    agent_recall_count: metrics.agent_recall_count,
+                    agent_zero_result_count: metrics.agent_zero_result_count,
+                    agent_surfaced_total: metrics.agent_surfaced_total,
+                    owner_search_count: metrics.owner_search_count,
+                    web_search_count: metrics.web_search_count,
                 })
                 .unwrap_or_default();
             Ok(HomeReport::V3(V3HomeReport {

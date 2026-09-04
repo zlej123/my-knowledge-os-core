@@ -1,6 +1,6 @@
 ---
 name: my-knowledge-os
-description: Use when the user asks to install, start, 설정, 등록, 요약, 정리, or review a personal PDF, 논문, or Inbox item as durable Source or Knowledge records in My Knowledge OS or a knowledge base.
+description: Use whenever the user asks a question their own knowledge base could answer — any request for a fact, a judgment, an explanation, or a recommendation, in any domain, including 기억나?, 뭐였지?, 어떻게 생각해?, 정리해줘, 추천해줘 — as well as when they ask to install, start, 설정, 등록, 요약, 정리, or review a personal PDF, 논문, Inbox item, or conversation as durable Source or Knowledge records in My Knowledge OS. Not for greetings or questions about how to operate the mko tool itself.
 ---
 
 # My Knowledge OS
@@ -50,7 +50,7 @@ This Skill is written for exactly one Core version. Before the first `mko` comma
 (after installation checks), verify the contract:
 
 ```bash
-mko handshake --skill-version "0.4.5" --format json-v2
+mko handshake --skill-version "0.4.6" --format json-v2
 ```
 
 Pass the pinned version string above exactly; never substitute the CLI's own reported version.
@@ -78,17 +78,30 @@ Use these terms consistently:
 ## Recall contract
 
 Retrieval, not capture, is the point of a knowledge base: nothing stored has ever helped the owner
-later if it never comes back. So for **every** substantive question the owner asks — in any
-conversation, about any topic — search Core first, unconditionally:
+later if it never comes back. So recall fires for **every message that asks for a fact, a judgment,
+an explanation, or a recommendation** — in any conversation, about any topic, whether or not it
+mentions files, records, or this tool. Search Core first, unconditionally:
 
 ```bash
-mko find "QUERY" --format json-v2
+mko find "QUERY" --recall --format json-v2
 ```
 
-Run this before answering, with no domain judgment about whether the base "might" cover it. An
-empty result costs one query; skipping the search costs the owner material they already stored. Do
-not decide in advance that a question is too casual, too technical, or too far from what you assume
-is in the base — search anyway.
+`--recall` marks the entry in the recall log as the agent's contract search (`via: agent`); the
+home screen's headline counts only those, so a search without the flag is invisible as recall.
+Never omit it here.
+
+Skip the search **only** for these two kinds of message, and for nothing else:
+
+- a greeting or acknowledgement with nothing asked (인사, 고마워, 알겠어, ㅇㅇ);
+- a question about operating this tool itself (how to run `mko`, what a flag does, why a command
+  failed).
+
+Whether the base "might" cover the topic is never a reason to skip: that guess is exactly the
+judgment this contract removes. An empty result costs one query; skipping the search costs the
+owner material they already stored. Do not decide in advance that a question is too casual, too
+technical, too personal, or too far from what you assume is in the base — search anyway. "Is this
+question substantive enough?" is not a question this contract asks; the four kinds above are the
+whole rule.
 
 Then:
 
@@ -120,7 +133,7 @@ exactly the domain judgment this contract exists to remove.
 ## Store-on-miss
 
 A recall miss (above) is the trigger to offer storage; it is never automatic storage. When the
-recall search returned no relevant items or notes for a substantive question, and the conversation
+recall search returned no relevant items or notes for a recall-contract question, and the conversation
 that followed produced knowledge worth keeping, offer **exactly once**, in these words:
 
 > 저장소에 없네요 — 이번에 정리한 내용을 저장할까요?
@@ -520,11 +533,24 @@ mko ask --asset "ASSET_ID" --text "USER_QUESTION" --format json-v2
 Record the user's question as they asked it. Do not paraphrase it into something tidier; what they
 were trying to understand is the thing being kept.
 
-3. Answer from the prepared document first, citing block IDs and locators as you would in a draft.
-   Where the document does not answer, **say that it does not** and then answer from what you know.
-   That answer is a `background` claim, never a `fact`. You may also search the web and snapshot a
-   page you cite, using the web page workflow above; a snapshotted page is real evidence, so a
-   claim resting on it is an ordinary grounded unit.
+3. Answer in this order of precedence, and label which level each part of the answer came from:
+
+   1. **Document grounding.** Answer from the prepared document first, citing block IDs and
+      locators as you would in a draft.
+   2. **KB recall.** Where the document does not answer, **say that it does not**, then run the
+      recall contract against the whole base before reaching for your own knowledge — the same
+      `mko find "QUERY" --recall --format json-v2` call, with the same citation and
+      confirmation-label rules. A question inside one document is still a question the owner's
+      other records may already answer, and "we are studying this file" is not a reason to skip
+      the search.
+   3. **Own knowledge.** Only when the document and the base both come up empty, answer from what
+      you know, and say so. That answer is a `background` claim, never a `fact`. You may also
+      search the web and snapshot a page you cite, using the web page workflow above; a
+      snapshotted page is real evidence, so a claim resting on it is an ordinary grounded unit.
+
+   A KB hit does not become part of this document's record on its own: it is cited by its `mko://`
+   ID like any recall hit, and the keep-offer in step 4 still applies only to claims the document
+   does not hold.
 
 4. Offer to keep a claim when **all three** hold:
 
