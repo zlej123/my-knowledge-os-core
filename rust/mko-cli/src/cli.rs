@@ -1752,7 +1752,7 @@ fn resurface(repository: &Path) -> Result<(), MkoError> {
             item.title,
             // Reuses `mko find`'s confirmation badge (§4.2) so unconfirmed
             // resurfaced knowledge reads the same way search results do.
-            confirmation_label_text(&item.confirmation),
+            confirmation_label_text(&item.confirmation, &item.authored_by),
             if item.review_state == ResurfacedKnowledgeStateV2::Deferred {
                 " · 나중에 보기"
             } else {
@@ -1807,7 +1807,7 @@ fn resurface(repository: &Path) -> Result<(), MkoError> {
     let status_label = match selected.review_state {
         ResurfacedKnowledgeStateV2::Deferred => "나중에 보기".to_owned(),
         ResurfacedKnowledgeStateV2::Confirmed | ResurfacedKnowledgeStateV2::Unconfirmed => {
-            confirmation_label_text(&selected.confirmation)
+            confirmation_label_text(&selected.confirmation, &selected.authored_by)
         }
     };
     let mut detail_line = status_label;

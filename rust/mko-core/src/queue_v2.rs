@@ -212,6 +212,9 @@ pub struct ResurfacedKnowledgeV2 {
     /// callers can render unconfirmed resurfaced knowledge with the exact
     /// wording search already uses instead of inventing a second vocabulary.
     pub confirmation: ConfirmationLabelV2,
+    /// Who authored the current revision (§4.1), so the badge can say
+    /// "AI 작성" or "직접 작성" honestly instead of assuming AI.
+    pub authored_by: AuthoredByV2,
     /// Absent for knowledge no human has ever reviewed (§4.2: unconfirmed
     /// knowledge resurfaces too, but it has no review event to date).
     pub reviewed_at: Option<DateTime<Utc>>,
@@ -677,6 +680,7 @@ fn resurface_knowledge_internal(
                     _ => ResurfacedKnowledgeStateV2::Confirmed,
                 },
                 confirmation: confirmation_label_for_target(target),
+                authored_by: revision.authored_by.clone(),
                 reviewed_at: history.current_reviewed_at,
                 last_opened_at: opened_at
                     .get(&(target.record_id.clone(), target.pointer.revision.clone()))
@@ -2223,6 +2227,7 @@ mod tests {
                 has_open_questions,
                 review_state: state,
                 confirmation,
+                authored_by: AuthoredByV2::Ai,
                 reviewed_at,
                 last_opened_at: last_opened_at.map(timestamp),
             }
