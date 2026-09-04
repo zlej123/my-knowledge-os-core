@@ -23,6 +23,10 @@ use crate::{
     clock::{Clock, SystemClock},
     config_v2::{DerivedArtifactsPolicyV2, KnowledgeConfigV2},
     error::MkoError,
+    extraction_v2::{
+        AGENT_READ_EXTRACTOR_NAME, AGENT_READ_EXTRACTOR_VERSION, extraction_digest_v2,
+        write_extraction_text_v2,
+    },
     fingerprint::{FileSnapshot, fingerprint_open_file, validate_pdf_content},
     local_file_v2::read_original_text_v2,
     lock::{RepositoryMutationLock, StaleRepositoryLockPolicy},
@@ -311,8 +315,16 @@ fn prepare_snapshot_inner(
         ));
     }
 
-    let bundle = build_pdf_prepared_content_v2(&asset, std::slice::from_ref(&text), metadata)?;
-    persist_prepared_session_v2(repository_root, bundle, clock, "v2 snapshot prepare")
+    // The stored snapshot text *is* what the bundle is built from, and its
+    // digest is the Asset's own fingerprint — so the evidence linkage (§6.2)
+    // comes for free here: point at the snapshot store, write nothing new.
+    let bundle = build_agent_read_prepared_content_v2(
+        &asset,
+        &text,
+        Some(asset.fingerprint.clone()),
+        metadata,
+    )?;
+    persist_prepared_session_v2(repository_root, bundle, None, clock, "v2 snapshot prepare")
 }
 
 /// Prepares a local file's original bytes for drafting (§6.1, §6.2).
@@ -404,7 +416,11 @@ fn prepare_local_file_inner(
             "this Asset's media type is not a recognized local-file form",
         )
     })?;
-    let text = match kind {
+    // What the bundle is built from, the digest that names it in the
+    // knowledge base, and — for agent-read text that is not yet stored
+    // anywhere — the text the extraction store must persist (§6.2, decided
+    // 2026-09-03).
+    let (text, extraction_digest, store_extraction) = match kind {
         crate::local_file_v2::LocalFileMediaKindV2::Text => {
             if extracted_text.is_some() {
                 return Err(MkoError::new(
@@ -419,7 +435,9 @@ fn prepare_local_file_inner(
                     "the stored original no longer matches the identity it was registered under",
                 ));
             }
-            text
+            // The original is the text and already sits in the originals
+            // store under its own fingerprint: point at it, write nothing.
+            (text, asset.fingerprint.clone(), None)
         }
         crate::local_file_v2::LocalFileMediaKindV2::Image
         | crate::local_file_v2::LocalFileMediaKindV2::Document => {
@@ -429,12 +447,7 @@ fn prepare_local_file_inner(
                     "this Asset's original carries no text of its own; supply the agent-read text (OCR output or a converted document body)",
                 )
             })?;
-            if supplied.trim().is_empty() {
-                return Err(MkoError::new(
-                    "local_file_extracted_text_empty",
-                    "supplied extracted text has no readable content",
-                ));
-            }
+            let digest = extraction_digest_v2(supplied)?;
             let original = crate::local_file_v2::read_original_bytes_v2(repository_root, &asset)?;
             if sha256_digest(&original) != asset.fingerprint {
                 return Err(MkoError::new(
@@ -442,12 +455,19 @@ fn prepare_local_file_inner(
                     "the stored original no longer matches the identity it was registered under",
                 ));
             }
-            supplied.to_owned()
+            (supplied.to_owned(), digest, Some(supplied))
         }
     };
 
-    let bundle = build_pdf_prepared_content_v2(&asset, std::slice::from_ref(&text), metadata)?;
-    persist_prepared_session_v2(repository_root, bundle, clock, "v2 local-file prepare")
+    let bundle =
+        build_agent_read_prepared_content_v2(&asset, &text, Some(extraction_digest), metadata)?;
+    persist_prepared_session_v2(
+        repository_root,
+        bundle,
+        store_extraction,
+        clock,
+        "v2 local-file prepare",
+    )
 }
 
 /// Finishes preparation once a bundle exists: writes it to the local runtime
@@ -455,9 +475,16 @@ fn prepare_local_file_inner(
 /// validation. Shared by every origin that skips the PDF path's provider
 /// re-inspection and child-process extraction (a snapshot, a paste, a
 /// captured conversation, and a local file).
+///
+/// `store_extraction` is agent-read text that exists nowhere in the knowledge
+/// base yet (an image or document original's OCR/conversion): it is written
+/// to the extraction store, under the same mutation lock, before the session
+/// that cites it is published — so no bundle ever names a digest the
+/// knowledge base cannot resolve.
 fn persist_prepared_session_v2(
     repository_root: &Path,
     bundle: PreparedContentV2,
+    store_extraction: Option<&str>,
     clock: &dyn Clock,
     lock_label: &str,
 ) -> Result<PreparedPdfResultV2, MkoError> {
@@ -476,6 +503,15 @@ fn persist_prepared_session_v2(
         clock,
         StaleRepositoryLockPolicy::Preserve,
     )?;
+    if let Some(text) = store_extraction {
+        let stored = write_extraction_text_v2(repository_root, text)?;
+        if bundle.extraction_digest.as_deref() != Some(stored.as_str()) {
+            return Err(MkoError::new(
+                "prepared_bundle_invalid",
+                "the prepared bundle does not name the extraction it was built from",
+            ));
+        }
+    }
     cleanup_expired_sessions(&runtime.prepared, clock)?;
     let filename = published_session_filename(&bundle)?;
     let bundle_path = runtime.prepared_path.join(&filename);
@@ -615,12 +651,58 @@ fn validate_bundle_integrity(bundle: &PreparedContentV2) -> Result<(), MkoError>
 /// The PDF extractor currently supplies page text rather than stable paragraph
 /// geometry, so every locator explicitly advertises `granularity:coarse`.
 /// Chunks already-extracted text into the bundle every downstream surface
-/// consumes. Named for the PDF path it was written for; a web snapshot arrives
-/// here as one page, having never needed an extractor.
+/// consumes. Stamped with the PDF extractor's identity; the pages are not
+/// stored anywhere in the knowledge base, so the bundle names no extraction
+/// digest.
 pub fn build_pdf_prepared_content_v2(
     asset: &AssetRecordV2,
     pages: &[String],
     metadata: PreparedMetadataV2,
+) -> Result<PreparedContentV2, MkoError> {
+    build_prepared_content_v2(
+        asset,
+        pages,
+        metadata,
+        ExtractorIdentityV2 {
+            name: EXTRACTOR_NAME.into(),
+            version: EXTRACTOR_VERSION.into(),
+        },
+        None,
+    )
+}
+
+/// Builds the bundle for text the agent read rather than the Core extracted
+/// (§6.2): a web page, a paste, a captured conversation, a video transcript,
+/// a text local file, or OCR/conversion output for an image or document.
+/// Arrives as one page. Stamped `agent-read` at the product version that
+/// accepted it — never the PDF extractor's name, which would claim a
+/// provenance the text does not have — and names the digest of the stored
+/// text it was built from, so the evidence stays resolvable after the
+/// prepared session expires.
+pub fn build_agent_read_prepared_content_v2(
+    asset: &AssetRecordV2,
+    text: &str,
+    extraction_digest: Option<String>,
+    metadata: PreparedMetadataV2,
+) -> Result<PreparedContentV2, MkoError> {
+    build_prepared_content_v2(
+        asset,
+        std::slice::from_ref(&text.to_owned()),
+        metadata,
+        ExtractorIdentityV2 {
+            name: AGENT_READ_EXTRACTOR_NAME.into(),
+            version: AGENT_READ_EXTRACTOR_VERSION.into(),
+        },
+        extraction_digest,
+    )
+}
+
+fn build_prepared_content_v2(
+    asset: &AssetRecordV2,
+    pages: &[String],
+    metadata: PreparedMetadataV2,
+    extractor: ExtractorIdentityV2,
+    extraction_digest: Option<String>,
 ) -> Result<PreparedContentV2, MkoError> {
     validate_asset(asset)?;
     validate_extracted_pages(pages)?;
@@ -652,10 +734,8 @@ pub fn build_pdf_prepared_content_v2(
         asset_fingerprint: asset.fingerprint.clone(),
         media_type: asset.media_type.clone(),
         trust: PreparedTrustV2::UntrustedDocumentContent,
-        extractor: ExtractorIdentityV2 {
-            name: EXTRACTOR_NAME.into(),
-            version: EXTRACTOR_VERSION.into(),
-        },
+        extractor,
+        extraction_digest,
         metadata: normalize_metadata(metadata)?,
         content_blocks,
         artifacts: Vec::new(),

@@ -16,6 +16,10 @@ const OWNED_DIRECTORIES: &[&str] = &[
     // are stored verbatim, content-addressed. Binaries wait for Phase 3's
     // check-budget decision (§8).
     "assets/originals",
+    // Agent-read text for image/document originals (§6.2, decided
+    // 2026-09-03): stored content-addressed so a revision's evidence stays
+    // resolvable after the prepared session under `.mko/runtime` expires.
+    "assets/extractions",
     "sources",
     "knowledge",
     "notes",

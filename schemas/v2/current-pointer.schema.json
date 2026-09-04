@@ -20,6 +20,7 @@
       "properties": {
         "bundle_id": { "type": "string", "pattern": "^prepared-content-sha256-[a-f0-9]{64}$" },
         "content_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "extraction_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
         "asset_fingerprint": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
         "extractor_name": { "type": "string", "minLength": 1, "maxLength": 128 },
         "extractor_version": { "type": "string", "minLength": 1, "maxLength": 128 }

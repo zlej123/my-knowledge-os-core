@@ -527,6 +527,7 @@ fn seed_target(
             asset_fingerprint: format!("sha256:{}", "a".repeat(64)),
             extractor_name: "test".into(),
             extractor_version: "1".into(),
+            extraction_digest: None,
         },
     };
     fs::write(
@@ -610,6 +611,7 @@ fn set_current(root: &Path, record_id: &str, revision: &str, bundle_id: &str) {
             asset_fingerprint: format!("sha256:{}", "a".repeat(64)),
             extractor_name: "test".into(),
             extractor_version: "2".into(),
+            extraction_digest: None,
         },
     };
     fs::write(

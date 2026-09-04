@@ -140,6 +140,15 @@ pub struct PreparedContentV2 {
     pub media_type: String,
     pub trust: PreparedTrustV2,
     pub extractor: ExtractorIdentityV2,
+    /// The digest of the stored text this bundle was built from (§6.2,
+    /// decided 2026-09-03): agent-read text in `assets/extractions/` for an
+    /// image or document original, or the Asset's own stored text for a
+    /// snapshot, paste, conversation, transcript, or text local file. A PDF
+    /// bundle carries none — its pages come from the extractor at prepare
+    /// time and are not stored. Defaulted and elided when absent so a bundle
+    /// written before this field existed keeps its digest and bundle ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction_digest: Option<String>,
     pub metadata: PreparedMetadataV2,
     pub content_blocks: Vec<ContentBlockV2>,
     pub artifacts: Vec<PreparedArtifactV2>,

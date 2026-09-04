@@ -24,6 +24,7 @@ fn creates_an_idempotent_v2_personal_kb() {
     assert_eq!(config.schema_version, SCHEMA_VERSION_V2);
     for relative in [
         "assets/registry",
+        "assets/extractions",
         "sources",
         "knowledge",
         "reviews",
