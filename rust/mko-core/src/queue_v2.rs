@@ -208,7 +208,13 @@ pub struct ResurfacedKnowledgeV2 {
     pub perspectives: Vec<PerspectiveV2>,
     pub has_open_questions: bool,
     pub review_state: ResurfacedKnowledgeStateV2,
-    pub reviewed_at: DateTime<Utc>,
+    /// The same stable confirmation badge `mko find` shows (§4.2), so
+    /// callers can render unconfirmed resurfaced knowledge with the exact
+    /// wording search already uses instead of inventing a second vocabulary.
+    pub confirmation: ConfirmationLabelV2,
+    /// Absent for knowledge no human has ever reviewed (§4.2: unconfirmed
+    /// knowledge resurfaces too, but it has no review event to date).
+    pub reviewed_at: Option<DateTime<Utc>>,
     pub last_opened_at: Option<DateTime<Utc>>,
 }
 
@@ -216,6 +222,7 @@ pub struct ResurfacedKnowledgeV2 {
 pub enum ResurfacedKnowledgeStateV2 {
     Deferred,
     Confirmed,
+    Unconfirmed,
 }
 
 #[derive(Clone)]
@@ -617,11 +624,16 @@ pub fn resurface_knowledge_by_perspective_v2(
     resurface_knowledge_internal(repository_root, perspective, limit, true)
 }
 
+/// `include_unreviewed` widens the default resurfacing pool beyond
+/// confirmed knowledge (§4.2: search, projections, and listings include
+/// unconfirmed records by default). `resurface_confirmed_knowledge_v2`
+/// keeps the narrower confirmed-only pool as an explicit, non-default
+/// option, mirroring `SearchConfirmationFilterV2::ConfirmedOnly`.
 fn resurface_knowledge_internal(
     repository_root: &Path,
     perspective: Option<PerspectiveV2>,
     limit: usize,
-    include_deferred: bool,
+    include_unreviewed: bool,
 ) -> Result<Vec<ResurfacedKnowledgeV2>, MkoError> {
     let groups = derive_groups(repository_root)?;
     let opened_at = read_resurface_opened_at_v2(repository_root)?;
@@ -631,15 +643,15 @@ fn resurface_knowledge_internal(
         .filter(|target| {
             target.record_type == ReviewTargetTypeV2::Knowledge
                 && (target.state == Some(ReviewCardTargetStateV2::Confirmed)
-                    || (include_deferred
-                        && target.state == Some(ReviewCardTargetStateV2::Deferred)))
+                    || (include_unreviewed
+                        && (target.state == Some(ReviewCardTargetStateV2::Deferred)
+                            || target.state == Some(ReviewCardTargetStateV2::Unconfirmed))))
         })
         .filter_map(|target| {
             let RevisionV2::Knowledge(revision) = &target.revision else {
                 return None;
             };
             let history = target.history.as_ref()?;
-            let reviewed_at = history.current_reviewed_at?;
             if perspective
                 .as_ref()
                 .is_some_and(|selected| !revision.perspectives.contains(selected))
@@ -657,12 +669,15 @@ fn resurface_knowledge_internal(
                     .units
                     .iter()
                     .any(|unit| unit.kind == KnowledgeUnitKindV2::OpenQuestion),
-                review_state: if target.state == Some(ReviewCardTargetStateV2::Deferred) {
-                    ResurfacedKnowledgeStateV2::Deferred
-                } else {
-                    ResurfacedKnowledgeStateV2::Confirmed
+                review_state: match target.state {
+                    Some(ReviewCardTargetStateV2::Deferred) => ResurfacedKnowledgeStateV2::Deferred,
+                    Some(ReviewCardTargetStateV2::Unconfirmed) => {
+                        ResurfacedKnowledgeStateV2::Unconfirmed
+                    }
+                    _ => ResurfacedKnowledgeStateV2::Confirmed,
                 },
-                reviewed_at,
+                confirmation: confirmation_label_for_target(target),
+                reviewed_at: history.current_reviewed_at,
                 last_opened_at: opened_at
                     .get(&(target.record_id.clone(), target.pointer.revision.clone()))
                     .copied(),
@@ -674,9 +689,18 @@ fn resurface_knowledge_internal(
     Ok(items)
 }
 
-impl ResurfacedKnowledgeV2 {
-    fn is_deferred(&self) -> bool {
-        self.review_state == ResurfacedKnowledgeStateV2::Deferred
+/// Resurfacing priority (§4.2, D8): deferred knowledge — a human explicitly
+/// asked to revisit it — ranks first; confirmed knowledge next; unconfirmed
+/// knowledge (no human has looked at it yet) ranks last, so resurfacing
+/// still leads with human-reviewed knowledge and only then offers
+/// not-yet-looked-at material. Deliberate: unconfirmed knowledge ranking
+/// after confirmed is this function's own ordering choice, not a
+/// side effect of missing data.
+fn resurface_rank(item: &ResurfacedKnowledgeV2) -> u8 {
+    match item.review_state {
+        ResurfacedKnowledgeStateV2::Deferred => 0,
+        ResurfacedKnowledgeStateV2::Confirmed => 1,
+        ResurfacedKnowledgeStateV2::Unconfirmed => 2,
     }
 }
 
@@ -684,9 +708,8 @@ fn compare_resurfaced_knowledge(
     left: &ResurfacedKnowledgeV2,
     right: &ResurfacedKnowledgeV2,
 ) -> std::cmp::Ordering {
-    right
-        .is_deferred()
-        .cmp(&left.is_deferred())
+    resurface_rank(left)
+        .cmp(&resurface_rank(right))
         .then(
             left.last_opened_at
                 .is_some()
@@ -2181,47 +2204,64 @@ mod tests {
         let timestamp = |value: &str| value.parse::<DateTime<Utc>>().unwrap();
         let item = |id: &str,
                     state: ResurfacedKnowledgeStateV2,
-                    reviewed_at: &str,
+                    reviewed_at: Option<&str>,
                     last_opened_at: Option<&str>,
-                    has_open_questions: bool| ResurfacedKnowledgeV2 {
-            knowledge_id: id.into(),
-            current_revision: format!("sha256:{}", "1".repeat(64)),
-            title: id.into(),
-            synthesis: "synthesis".into(),
-            perspectives: Vec::new(),
-            has_open_questions,
-            review_state: state,
-            reviewed_at: timestamp(reviewed_at),
-            last_opened_at: last_opened_at.map(timestamp),
+                    has_open_questions: bool| {
+            let reviewed_at = reviewed_at.map(timestamp);
+            let confirmation = match (state, reviewed_at) {
+                (ResurfacedKnowledgeStateV2::Confirmed, Some(at)) => {
+                    ConfirmationLabelV2::Confirmed { at }
+                }
+                _ => ConfirmationLabelV2::Unconfirmed,
+            };
+            ResurfacedKnowledgeV2 {
+                knowledge_id: id.into(),
+                current_revision: format!("sha256:{}", "1".repeat(64)),
+                title: id.into(),
+                synthesis: "synthesis".into(),
+                perspectives: Vec::new(),
+                has_open_questions,
+                review_state: state,
+                confirmation,
+                reviewed_at,
+                last_opened_at: last_opened_at.map(timestamp),
+            }
         };
         let mut items = [
             item(
                 "approved-recently-opened",
                 ResurfacedKnowledgeStateV2::Confirmed,
-                "2026-07-23T05:00:00Z",
+                Some("2026-07-23T05:00:00Z"),
                 Some("2026-07-23T04:00:00Z"),
                 true,
             ),
             item(
                 "approved-never-opened-newer",
                 ResurfacedKnowledgeStateV2::Confirmed,
-                "2026-07-23T03:00:00Z",
+                Some("2026-07-23T03:00:00Z"),
                 None,
                 true,
             ),
             item(
                 "approved-never-opened-older",
                 ResurfacedKnowledgeStateV2::Confirmed,
-                "2026-07-23T02:00:00Z",
+                Some("2026-07-23T02:00:00Z"),
                 None,
                 true,
             ),
             item(
                 "deferred",
                 ResurfacedKnowledgeStateV2::Deferred,
-                "2026-07-23T01:00:00Z",
+                Some("2026-07-23T01:00:00Z"),
                 Some("2026-07-23T06:00:00Z"),
                 false,
+            ),
+            item(
+                "never-reviewed",
+                ResurfacedKnowledgeStateV2::Unconfirmed,
+                None,
+                None,
+                true,
             ),
         ];
 
@@ -2237,6 +2277,10 @@ mod tests {
                 "approved-never-opened-newer",
                 "approved-never-opened-older",
                 "approved-recently-opened",
+                // Unconfirmed knowledge (no human signal yet) ranks after
+                // every confirmed and deferred item, deliberately (§4.2,
+                // D8) — see `resurface_rank`.
+                "never-reviewed",
             ]
         );
     }

@@ -426,7 +426,7 @@ fn deferred_knowledge_resurfaces_and_opening_updates_only_local_history() {
     );
     assert_eq!(
         initial[0].reviewed_at,
-        "2026-07-23T03:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        Some("2026-07-23T03:00:00Z".parse::<DateTime<Utc>>().unwrap())
     );
     assert_eq!(initial[0].last_opened_at, None);
 

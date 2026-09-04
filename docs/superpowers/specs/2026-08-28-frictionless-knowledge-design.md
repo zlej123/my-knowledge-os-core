@@ -246,6 +246,24 @@ below are new behavior.
   the recall log's zero-result entries accumulate as the occurrence record
   that grounds its design. The agent never stores on its own initiative.
 
+**Measurement honesty (2026-09-03).** Verified drift: the log counted every
+`mko find`, so the owner's own terminal and home-menu searches were reported
+as recall, the web UI's search was never logged at all, and "substantive
+question" was an undefined term that quietly reintroduced the domain
+judgment D7 removes. Corrections: each log line carries `via` —
+`agent` (`mko find --recall`, the Skill's contract search), `owner` (a plain
+`mko find` or the home menu's `지식 찾기`), or `web` (`/api/search`, which
+now logs too, tolerating a logging failure the same way `find` does); a line
+without `via` predates the marker and reads as `owner`, the weaker claim.
+`mko home`'s headline is agent recalls only — recall count, empty results,
+and results returned (labelled as search results, not citations) — with
+owner and web searches on their own line, never summed into it. The Skill's
+rule replaces "substantive" with an explicit one: recall fires for every
+message asking for a fact, a judgment, an explanation, or a recommendation,
+and is skipped only for greetings/acknowledgements and questions about
+operating the tool — never on a guess about coverage — and the Skill's
+trigger description is broadened so it loads for such questions at all.
+
 ## 6. Unified ingestion (Phases 2–4)
 
 One registration contract for every form. The Core accepts:

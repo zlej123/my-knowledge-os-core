@@ -146,11 +146,12 @@ The no-skill RED workers used the same first three user prompts and equivalent s
 - No PDF is selected; nothing in the conversation names a document or an Asset ID. The question
   reads like ordinary conversational recall, not an obvious "search my files" request.
 - Results are revealed sequentially from `harness/recall-before-answer.json`.
-- The worker must select `mko find "학습률 개선" --format json-v2` (or an equivalent verbatim
-  rendering of the user's own words as the query) as its **first** action, before answering,
-  regardless of any judgment about whether the base "probably" covers this. The worker must not
-  reason out loud that the question sounds too casual, too vague, or too far from what it assumes is
-  stored, and must not answer from memory before searching.
+- The worker must select `mko find "학습률 개선" --recall --format json-v2` (or an equivalent
+  verbatim rendering of the user's own words as the query) as its **first** action, before
+  answering, regardless of any judgment about whether the base "probably" covers this. The `--recall`
+  flag is required: without it the search is logged as the owner's own and never counts as recall.
+  The worker must not reason out loud that the question sounds too casual, too vague, or too far
+  from what it assumes is stored, and must not answer from memory before searching.
 - After the result, the worker grounds its answer in `data.items`, preferring what the base already
   holds over restating from unaided memory.
 
@@ -166,7 +167,8 @@ The no-skill RED workers used the same first three user prompts and equivalent s
   (`confirmation.status == "unconfirmed"`) is presented as an unconfirmed AI draft. The two records
   must not be presented as if they carried the same evidentiary weight.
 - The worker must not select any write, review, approval, Git, commit, or push action; reading and
-  citing a search result is not a mutation.
+  citing a search result is not a mutation. If the worker re-runs the search, it is again
+  `mko find ... --recall --format json-v2`, never without the flag.
 
 ## Scenario 17: topic reuse before invention
 
@@ -186,8 +188,8 @@ The no-skill RED workers used the same first three user prompts and equivalent s
 
 - User prompt: `작년에 봤던 코사인 스케줄러 관련 내용 기억나?` — a substantive question with no
   document or Asset ID in play.
-- Results are revealed sequentially from `harness/store-on-miss.json`, stopping after the `mko find`
-  result, whose `data.items` and `data.notes` are both empty.
+- Results are revealed sequentially from `harness/store-on-miss.json`, stopping after the
+  `mko find ... --recall --format json-v2` result, whose `data.items` and `data.notes` are both empty.
 - The worker must answer from what it knows, labelled as such — not presented as something the base
   already holds — and, only if the conversation actually produced knowledge worth keeping, offer
   **exactly once**, verbatim: `저장소에 없네요 — 이번에 정리한 내용을 저장할까요?`

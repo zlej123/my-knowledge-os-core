@@ -200,7 +200,14 @@ fn find_json_v2_returns_unified_labelled_matches_and_matches_schema() {
 
     let output = Command::cargo_bin("mko")
         .unwrap()
-        .args(["find", "reported example", "--format", "json-v2", "--repo"])
+        .args([
+            "find",
+            "reported example",
+            "--recall",
+            "--format",
+            "json-v2",
+            "--repo",
+        ])
         .arg(fixture.root.path())
         .assert()
         .success()
@@ -248,13 +255,15 @@ fn find_json_v2_returns_unified_labelled_matches_and_matches_schema() {
 
     // Recall is unconditional and measured (D7): every v3 `mko find`
     // execution appends one line to logs/recall.jsonl, naming every
-    // returned record ID as `surfaced`.
+    // returned record ID as `surfaced`. `--recall` marks it as the agent's
+    // contract search (`via: agent`).
     let log = fs::read_to_string(fixture.root.path().join("logs/recall.jsonl")).unwrap();
     let lines = log.lines().collect::<Vec<_>>();
     assert_eq!(lines.len(), 1);
     let entry: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(entry["query"], "reported example");
     assert_eq!(entry["results"], 2);
+    assert_eq!(entry["via"], "agent");
     let surfaced = entry["surfaced"].as_array().unwrap();
     assert_eq!(surfaced.len(), 2);
     assert!(surfaced.iter().any(|id| *id == knowledge_item["record_id"]));
@@ -566,4 +575,27 @@ fn find_with_no_matches_still_logs_a_zero_result_recall() {
     let entry: serde_json::Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
     assert_eq!(entry["results"], 0);
     assert_eq!(entry["surfaced"].as_array().unwrap().len(), 0);
+    // Without `--recall` this is the owner searching by hand, not the agent
+    // honouring the recall contract: it must never count as an agent recall.
+    assert_eq!(entry["via"], "owner");
+}
+
+// The same search, run with `--recall` in human format, is the agent's.
+// The marker follows the flag, not the output format or the result count.
+#[test]
+#[allow(deprecated)]
+fn find_recall_flag_marks_the_entry_as_agent_regardless_of_format() {
+    let fixture = seeded_fixture();
+
+    Command::cargo_bin("mko")
+        .unwrap()
+        .args(["find", "no-such-term-anywhere", "--recall", "--repo"])
+        .arg(fixture.root.path())
+        .assert()
+        .success();
+
+    let log = fs::read_to_string(fixture.root.path().join("logs/recall.jsonl")).unwrap();
+    let entry: serde_json::Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+    assert_eq!(entry["via"], "agent");
+    assert_eq!(entry["results"], 0);
 }
