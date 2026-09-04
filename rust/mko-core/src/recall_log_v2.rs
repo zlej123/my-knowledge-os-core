@@ -26,24 +26,70 @@ const RECALL_LOG_RELATIVE_PATH: &str = "logs/recall.jsonl";
 const MAX_TAIL_READ_BYTES: u64 = 8 * 1024 * 1024;
 pub const RECALL_METRICS_WINDOW_DAYS: i64 = 30;
 
+/// Which path ran the search. D7's success measure is whether the *agent*
+/// recalled before answering; the owner typing a term into the terminal or
+/// the web UI is a search too, but it is not evidence that the recall
+/// contract fired. Every line says which one it was, so the two are never
+/// added together (§5, 2026-09-03 note).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecallViaV2 {
+    /// `mko find --recall`: the agent's recall-contract search.
+    Agent,
+    /// Plain `mko find` or the home menu's `지식 찾기`: the owner searching
+    /// by hand. Also the reading for lines written before `via` existed —
+    /// nothing in those lines can tell the two apart, so they are counted as
+    /// the weaker claim rather than inflating the agent figure.
+    #[default]
+    Owner,
+    /// The web UI's `/api/search`.
+    Web,
+}
+
+impl RecallViaV2 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Owner => "owner",
+            Self::Web => "web",
+        }
+    }
+}
+
 /// One line of `logs/recall.jsonl`. Field name is `surfaced`, not `cited`:
 /// the Core knows only what search returned, never whether the agent's
 /// answer actually cited it — that would need a second round-trip this
-/// phase does not add (§5, D7).
+/// phase does not add (§5, D7). `via` (added 2026-09-03) says which path
+/// searched; a line without it predates the marker and reads as `owner`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct RecallLogEntryV2 {
     at: DateTime<Utc>,
     query: String,
     results: u64,
     surfaced: Vec<String>,
+    #[serde(default)]
+    via: RecallViaV2,
 }
 
+/// Recent-window aggregate. The `agent_*` figures are the headline: they
+/// count only `via: agent` lines, because only those say the recall
+/// contract fired. Owner and web searches are reported beside them, never
+/// folded in.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RecallMetricsV2 {
     pub window_days: u32,
-    pub recall_count: u64,
-    pub zero_result_count: u64,
-    pub surfaced_total: u64,
+    /// Agent recalls (`mko find --recall`) in the window.
+    pub agent_recall_count: u64,
+    /// Agent recalls that returned nothing.
+    pub agent_zero_result_count: u64,
+    /// Records and notes search returned to the agent, summed over the
+    /// window. Search results, not citations: the Core never learns what
+    /// the answer used.
+    pub agent_surfaced_total: u64,
+    /// Plain `mko find` / home-menu searches, and every pre-marker line.
+    pub owner_search_count: u64,
+    /// Web UI `/api/search` calls.
+    pub web_search_count: u64,
 }
 
 /// Appends one recall event. Holds the repository mutation lock for the
@@ -59,6 +105,7 @@ pub fn append_recall_log_v2(
     query: &str,
     results: u64,
     surfaced: &[String],
+    via: RecallViaV2,
     clock: &dyn Clock,
 ) -> Result<(), MkoError> {
     KnowledgeConfigV2::read(repository_root)?;
@@ -76,6 +123,7 @@ pub fn append_recall_log_v2(
         query: query.to_owned(),
         results,
         surfaced: surfaced.to_vec(),
+        via,
     };
     let mut line = serde_json::to_vec(&entry)
         .map_err(|error| MkoError::new("recall_log_invalid", error.to_string()))?;
@@ -102,8 +150,9 @@ pub fn append_recall_log_v2(
         .map_err(|error| MkoError::new("recall_log_write_failed", error.to_string()))
 }
 
-/// Recent-window recall metrics for `mko home` (§5, D7): how many recalls
-/// happened, how many came back empty, and how much was surfaced in total,
+/// Recent-window recall metrics for `mko home` (§5, D7): how many agent
+/// recalls happened, how many came back empty, how many results they
+/// returned, and — separately — how often the owner or the web UI searched,
 /// over the last `RECALL_METRICS_WINDOW_DAYS` days. A single bounded tail
 /// read; malformed or partial lines are skipped rather than failing the
 /// whole aggregate, because a corrupt log line must never take down the
@@ -134,11 +183,17 @@ pub fn recall_metrics_v2(
         if entry.at < cutoff || entry.at > now {
             continue;
         }
-        metrics.recall_count += 1;
-        if entry.results == 0 {
-            metrics.zero_result_count += 1;
+        match entry.via {
+            RecallViaV2::Agent => {
+                metrics.agent_recall_count += 1;
+                if entry.results == 0 {
+                    metrics.agent_zero_result_count += 1;
+                }
+                metrics.agent_surfaced_total += entry.surfaced.len() as u64;
+            }
+            RecallViaV2::Owner => metrics.owner_search_count += 1,
+            RecallViaV2::Web => metrics.web_search_count += 1,
         }
-        metrics.surfaced_total += entry.surfaced.len() as u64;
     }
     Ok(metrics)
 }
@@ -261,6 +316,7 @@ mod tests {
                 "personal-knowledge-aaaa".into(),
                 "personal-source-bbbb".into(),
             ],
+            RecallViaV2::Agent,
             &clock("2026-08-01T00:00:00Z"),
         )
         .unwrap();
@@ -269,6 +325,7 @@ mod tests {
             "no matches at all",
             0,
             &[],
+            RecallViaV2::Agent,
             &clock("2026-08-02T00:00:00Z"),
         )
         .unwrap();
@@ -278,12 +335,15 @@ mod tests {
             "ancient query",
             5,
             &["personal-knowledge-old".into()],
+            RecallViaV2::Agent,
             &clock("2026-01-01T00:00:00Z"),
         )
         .unwrap();
 
         let text = fs::read_to_string(root.path().join("logs/recall.jsonl")).unwrap();
         assert_eq!(text.lines().count(), 3);
+        let first: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(first["via"], "agent");
 
         let metrics = recall_metrics_v2(
             root.path(),
@@ -292,9 +352,111 @@ mod tests {
                 .into(),
         )
         .unwrap();
-        assert_eq!(metrics.recall_count, 2);
-        assert_eq!(metrics.zero_result_count, 1);
-        assert_eq!(metrics.surfaced_total, 2);
+        assert_eq!(metrics.agent_recall_count, 2);
+        assert_eq!(metrics.agent_zero_result_count, 1);
+        assert_eq!(metrics.agent_surfaced_total, 2);
+        assert_eq!(metrics.owner_search_count, 0);
+        assert_eq!(metrics.web_search_count, 0);
+    }
+
+    // The headline is agent recalls only: an owner typing into the terminal
+    // or the web UI is a search, not evidence that the recall contract
+    // fired. Each path is written with its own marker and counted apart.
+    #[test]
+    fn metrics_count_agent_owner_and_web_searches_separately() {
+        let root = tempdir().unwrap();
+        scaffold_personal_kb_v2(root.path()).unwrap();
+
+        append_recall_log_v2(
+            root.path(),
+            "agent hit",
+            1,
+            &["personal-knowledge-aaaa".into()],
+            RecallViaV2::Agent,
+            &clock("2026-08-01T00:00:00Z"),
+        )
+        .unwrap();
+        append_recall_log_v2(
+            root.path(),
+            "owner miss",
+            0,
+            &[],
+            RecallViaV2::Owner,
+            &clock("2026-08-01T01:00:00Z"),
+        )
+        .unwrap();
+        append_recall_log_v2(
+            root.path(),
+            "owner hit",
+            3,
+            &["a".into(), "b".into(), "c".into()],
+            RecallViaV2::Owner,
+            &clock("2026-08-01T02:00:00Z"),
+        )
+        .unwrap();
+        append_recall_log_v2(
+            root.path(),
+            "web miss",
+            0,
+            &[],
+            RecallViaV2::Web,
+            &clock("2026-08-01T03:00:00Z"),
+        )
+        .unwrap();
+
+        let text = fs::read_to_string(root.path().join("logs/recall.jsonl")).unwrap();
+        let vias = text
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["via"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(vias, vec!["agent", "owner", "owner", "web"]);
+
+        let metrics = recall_metrics_v2(
+            root.path(),
+            DateTime::parse_from_rfc3339("2026-08-02T00:00:00Z")
+                .unwrap()
+                .into(),
+        )
+        .unwrap();
+        assert_eq!(metrics.agent_recall_count, 1);
+        assert_eq!(metrics.agent_zero_result_count, 0);
+        assert_eq!(metrics.agent_surfaced_total, 1);
+        // Owner and web misses and results never leak into the agent figures.
+        assert_eq!(metrics.owner_search_count, 2);
+        assert_eq!(metrics.web_search_count, 1);
+    }
+
+    // Lines written before `via` existed carry no marker. They were written
+    // by every `mko find`, owner and agent alike, so nothing in them supports
+    // the stronger claim: they read as owner searches.
+    #[test]
+    fn lines_without_via_parse_as_owner_searches() {
+        let root = tempdir().unwrap();
+        scaffold_personal_kb_v2(root.path()).unwrap();
+        fs::create_dir_all(root.path().join("logs")).unwrap();
+        fs::write(
+            root.path().join("logs/recall.jsonl"),
+            concat!(
+                "{\"at\":\"2026-08-01T00:00:00Z\",\"query\":\"legacy hit\",\"results\":2,",
+                "\"surfaced\":[\"personal-knowledge-aaaa\",\"personal-source-bbbb\"]}\n",
+                "{\"at\":\"2026-08-01T01:00:00Z\",\"query\":\"legacy miss\",\"results\":0,",
+                "\"surfaced\":[]}\n",
+            ),
+        )
+        .unwrap();
+
+        let metrics = recall_metrics_v2(
+            root.path(),
+            DateTime::parse_from_rfc3339("2026-08-02T00:00:00Z")
+                .unwrap()
+                .into(),
+        )
+        .unwrap();
+        assert_eq!(metrics.owner_search_count, 2);
+        assert_eq!(metrics.agent_recall_count, 0);
+        assert_eq!(metrics.agent_zero_result_count, 0);
+        assert_eq!(metrics.agent_surfaced_total, 0);
+        assert_eq!(metrics.web_search_count, 0);
     }
 
     #[test]
@@ -303,13 +465,15 @@ mod tests {
         scaffold_personal_kb_v2(root.path()).unwrap();
 
         let missing = recall_metrics_v2(root.path(), Utc::now()).unwrap();
-        assert_eq!(missing.recall_count, 0);
+        assert_eq!(missing.agent_recall_count, 0);
+        assert_eq!(missing.owner_search_count, 0);
 
         append_recall_log_v2(
             root.path(),
             "valid",
             1,
             &["personal-knowledge-aaaa".into()],
+            RecallViaV2::Agent,
             &clock("2026-08-01T00:00:00Z"),
         )
         .unwrap();
@@ -317,6 +481,10 @@ mod tests {
         let mut existing = fs::read_to_string(&log_path).unwrap();
         existing.push_str("not json at all\n");
         existing.push_str("{\"at\":\"2026-08-02T00:00:00Z\"}\n");
+        // An unknown marker is a corrupt line too, not a silent owner search.
+        existing.push_str(
+            "{\"at\":\"2026-08-02T00:00:00Z\",\"query\":\"x\",\"results\":0,\"surfaced\":[],\"via\":\"robot\"}\n",
+        );
         fs::write(&log_path, existing).unwrap();
 
         let metrics = recall_metrics_v2(
@@ -326,6 +494,8 @@ mod tests {
                 .into(),
         )
         .unwrap();
-        assert_eq!(metrics.recall_count, 1);
+        assert_eq!(metrics.agent_recall_count, 1);
+        assert_eq!(metrics.owner_search_count, 0);
+        assert_eq!(metrics.web_search_count, 0);
     }
 }

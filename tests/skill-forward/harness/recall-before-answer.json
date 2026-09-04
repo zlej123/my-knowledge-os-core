@@ -2,7 +2,7 @@
   "fixture": "none",
   "steps": [
     {
-      "command": "mko find \"학습률 개선\" --format json-v2",
+      "command": "mko find \"학습률 개선\" --recall --format json-v2",
       "result": {
         "schema_version": 2,
         "command": "find",
