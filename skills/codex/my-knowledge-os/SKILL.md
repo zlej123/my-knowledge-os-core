@@ -415,7 +415,10 @@ mko source prepare --asset-id "ASSET_ID" --extracted-text ".mko/runtime/extracte
 
    Be honest in the Source you draft about extraction quality — a blurry screenshot or a
    layout-mangled conversion does not read the same way twice, and the original stays in the
-   knowledge base precisely so a better pass can replace this one. Re-running the prepare step with
+   knowledge base precisely so a better pass can replace this one. The text you supply is itself
+   kept in the knowledge base, content-addressed under `assets/extractions/`, and labelled
+   `agent-read` in the bundle and the Source revision — so what you read stays checkable after the
+   prepared session expires, and an earlier pass stays alongside a later one. Re-running the prepare step with
    different extracted text, then writing the Source again with the prior displayed revision passed
    as its expected revision, lands as a new revision of the same registered Asset — never a
    duplicate registration.

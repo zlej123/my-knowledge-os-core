@@ -19,6 +19,7 @@ use crate::{
     asset_v2::read_asset_v2,
     config_v2::{DomainPolicyV2, KnowledgeConfigV2, PerspectiveV2},
     error::MkoError,
+    extraction_v2::locate_extraction_text_v2,
     front_matter::parse_markdown,
     json_v2::{QueueDataV2, QueueItemStateV2, QueueItemTypeV2, QueueItemV2, QueueNextActionV2},
     judgment_v2::{JudgmentAnnotationV2, prepare_judgment_v2},
@@ -242,6 +243,15 @@ impl RevisionV2 {
         match self {
             Self::Source(revision) => &revision.asset_fingerprint,
             Self::Knowledge(revision) => &revision.asset_fingerprint,
+        }
+    }
+
+    /// The digest of the stored text this revision's evidence was built
+    /// from (§6.2), when the revision carries one.
+    fn extraction_digest(&self) -> Option<&str> {
+        match self {
+            Self::Source(revision) => revision.evidence_basis.extraction_digest.as_deref(),
+            Self::Knowledge(revision) => revision.evidence_basis.extraction_digest.as_deref(),
         }
     }
 }
@@ -1286,7 +1296,7 @@ fn render_card(
     card.push_str(&format!("- Asset ID: `{asset_id}`\n"));
     card.push_str(&format!("- Effect digest: `{effect_digest}`\n"));
     card.push_str("\n## Exact targets and effects\n");
-    for card_target in &card_targets {
+    for (target, card_target) in targets.iter().zip(&card_targets) {
         let snapshot = &card_target.snapshot;
         card.push_str(&format!(
             "\n### {}\n\n- Record ID: `{}`\n- Current revision: `{}`\n- Review head: `{}`\n- State: `{}`\n- Previous confirmed revision: `{}`\n- Effects: `{}`\n",
@@ -1312,6 +1322,16 @@ fn render_card(
                 "- Conflicting review heads: `{}`\n",
                 card_target.conflicting_review_head_ids.join("`, `")
             ));
+        }
+        // Where the text behind this revision's evidence lives (§6.2), so a
+        // reviewer can open exactly what the agent read. A revision written
+        // before the digest existed carries none and its card is unchanged.
+        if let Some(digest) = target.revision.extraction_digest() {
+            let location = locate_extraction_text_v2(repository_root, digest)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "(not found in the knowledge base)".into());
+            card.push_str(&format!("- Agent-read text: `{digest}` at `{location}`\n"));
         }
     }
     append_json_section(&mut card, "Provenance", &targets[0].asset)?;
@@ -2032,6 +2052,7 @@ mod tests {
                 asset_fingerprint: format!("sha256:{}", "2".repeat(64)),
                 extractor_name: "test".into(),
                 extractor_version: "1".into(),
+                extraction_digest: None,
             },
             domain_policy: DomainPolicyV2::HighRisk,
             perspectives: Vec::new(),
@@ -2091,6 +2112,7 @@ mod tests {
                 asset_fingerprint: format!("sha256:{}", "2".repeat(64)),
                 extractor_name: "test".into(),
                 extractor_version: "1".into(),
+                extraction_digest: None,
             },
             domain_policy: DomainPolicyV2::Standard,
             perspectives: Vec::new(),
@@ -2171,6 +2193,88 @@ mod tests {
             json_bytes,
             "re-serializing the parsed revision must reproduce the original bytes exactly"
         );
+    }
+
+    /// A revision written before `extraction_digest` existed (§6.2, decided
+    /// 2026-09-03) carries no such key in its evidence basis. `parse_revision`
+    /// must accept those exact bytes and reproduce them byte-for-byte: the
+    /// absent digest stays elided on re-serialization, never written back in
+    /// as `null`.
+    #[test]
+    fn parse_revision_round_trips_a_revision_written_before_extraction_digest_existed() {
+        let revision = sample_knowledge_revision(AuthoredByV2::Ai);
+        assert_eq!(revision.evidence_basis.extraction_digest, None);
+        let json_bytes = canonical_json_bytes(&revision).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&json_bytes).contains("extraction_digest"),
+            "a pre-existing revision never carried this key: {}",
+            String::from_utf8_lossy(&json_bytes)
+        );
+        let mut bytes = b"# Knowledge revision\n\n    ".to_vec();
+        bytes.extend_from_slice(&json_bytes);
+        bytes.push(b'\n');
+
+        let parsed = parse_revision(
+            &ReviewTargetTypeV2::Knowledge,
+            &revision.record_id,
+            None,
+            &bytes,
+        )
+        .unwrap();
+
+        let RevisionV2::Knowledge(parsed) = parsed else {
+            panic!("expected a Knowledge revision");
+        };
+        assert_eq!(parsed.evidence_basis.extraction_digest, None);
+        assert_eq!(
+            canonical_json_bytes(&parsed).unwrap(),
+            json_bytes,
+            "re-serializing the parsed revision must reproduce the original bytes exactly"
+        );
+    }
+
+    /// The mirror case: a revision that names its stored text keeps the key
+    /// through the same round-trip, and a pointer whose evidence basis
+    /// carries the same digest is accepted as consistent.
+    #[test]
+    fn parse_revision_round_trips_a_revision_carrying_an_extraction_digest() {
+        let mut revision = sample_knowledge_revision(AuthoredByV2::Ai);
+        let digest = format!("sha256:{}", "4".repeat(64));
+        revision.evidence_basis.extraction_digest = Some(digest.clone());
+        let json_bytes = canonical_json_bytes(&revision).unwrap();
+        assert!(
+            String::from_utf8_lossy(&json_bytes)
+                .contains(&format!("\"extraction_digest\":\"{digest}\"")),
+            "{}",
+            String::from_utf8_lossy(&json_bytes)
+        );
+        let mut bytes = b"# Knowledge revision\n\n    ".to_vec();
+        bytes.extend_from_slice(&json_bytes);
+        bytes.push(b'\n');
+        let pointer = CurrentPointerV2 {
+            schema_version: 2,
+            record_type: SemanticRecordTypeV2::Knowledge,
+            record_id: revision.record_id.clone(),
+            revision: sha256_digest(&bytes),
+            evidence_basis: revision.evidence_basis.clone(),
+        };
+
+        let parsed = parse_revision(
+            &ReviewTargetTypeV2::Knowledge,
+            &revision.record_id,
+            Some(&pointer),
+            &bytes,
+        )
+        .unwrap();
+
+        let RevisionV2::Knowledge(parsed) = parsed else {
+            panic!("expected a Knowledge revision");
+        };
+        assert_eq!(
+            parsed.evidence_basis.extraction_digest.as_deref(),
+            Some(digest.as_str())
+        );
+        assert_eq!(canonical_json_bytes(&parsed).unwrap(), json_bytes);
     }
 
     #[test]

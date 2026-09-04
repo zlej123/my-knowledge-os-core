@@ -26,12 +26,15 @@
 //! bytes, signature-validated. The agent-read text (OCR output for an image,
 //! a converted document body) is supplied later, at prepare time, exactly
 //! once per prepare call — see `prepared_v2::prepare_local_file_asset_v2`.
-//! This mirrors the PDF path's shape (an extractor supplies pages at prepare
-//! time, never at registration) rather than inventing a second persistent
-//! text store: re-extraction (a better OCR pass) is simply another prepare
-//! call with different supplied text, landing as a new Source/Knowledge
-//! revision of the same immutable Asset — never a duplicate Asset, and no
-//! extra Asset-level bookkeeping is required for it.
+//! Like the PDF path, text arrives at prepare time, never at registration;
+//! unlike it, the supplied text is then persisted content-addressed in the
+//! extraction store (`extraction_v2`, `assets/extractions/`; owner decision
+//! 2026-09-03) so a revision's evidence stays resolvable after the prepared
+//! session expires. Re-extraction (a better OCR pass) is simply another
+//! prepare call with different supplied text — a second stored extraction
+//! beside the first — landing as a new Source/Knowledge revision of the same
+//! immutable Asset: never a duplicate Asset, and no extra Asset-level
+//! bookkeeping is required for it.
 //!
 //! Registration deliberately does not route through the Google Drive Inbox
 //! provider machinery (`inspect_provider_file`/`validated_disjoint_roots`):

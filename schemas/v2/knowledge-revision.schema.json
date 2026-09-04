@@ -32,6 +32,7 @@
       "properties": {
         "bundle_id": { "type": "string", "pattern": "^prepared-content-sha256-[a-f0-9]{64}$" },
         "content_digest": { "$ref": "#/$defs/digest" },
+        "extraction_digest": { "$ref": "#/$defs/digest" },
         "asset_fingerprint": { "$ref": "#/$defs/digest" },
         "extractor_name": { "type": "string", "minLength": 1, "maxLength": 128 },
         "extractor_version": { "type": "string", "minLength": 1, "maxLength": 128 }

@@ -50,23 +50,37 @@ Gate: `rust/mko-core/tests/ingestion_v2.rs` — `image_local_file_is_signature_v
 
 ## Task 2 — Extraction is supplied at prepare time, not registration time (§6.2, D2)
 
-- **[IMPLEMENTATION CHOICE, not owner-ratified but the natural reading of D2 + the PDF precedent.]**
-  The design brief describes registration as where "the agent supplies the extracted text exactly as
-  for text files." For a *text* local file the original bytes are simultaneously the identity and
-  the evidence, so no separate text ever needs to be supplied. An image or document has no text of
-  its own — the Core cannot decide at registration time whether a caller will ever prepare it, or
-  with what quality of OCR/conversion, so storing extracted text as a second persistent artifact
-  keyed to the Asset would need its own revisioning story. The PDF path already solves exactly this
-  shape: an extractor supplies `pages: Vec<String>` at *prepare* time, ephemeral to that one prepared
-  bundle, never persisted outside the 24-hour local runtime session. Phase 3 follows the same shape
-  for images/documents: registration (`register_local_file_asset_v2`) stores only the
-  signature-validated original bytes; `prepared_v2::prepare_local_file_asset_v2` gained an
-  `extracted_text: Option<&str>` parameter — required (and non-empty) for `Image`/`Document` kinds,
-  forbidden for `Text` kind (a text local file's original already *is* its text; accepting a second,
-  different text there would silently discard whichever one the caller thought was in effect). The
-  original is still re-read and re-hashed against its own registered fingerprint on every prepare
-  call, even though its bytes never become bundle content — so a damaged or tampered original is
-  still caught.
+- **[DECIDED by the owner, 2026-09-03] Extracted text is supplied at prepare time and persisted
+  content-addressed.** For a *text* local file the original bytes are simultaneously the identity
+  and the evidence, so no separate text ever needs to be supplied. An image or document has no text
+  of its own, so registration (`register_local_file_asset_v2`) stores only the signature-validated
+  original bytes, and `prepared_v2::prepare_local_file_asset_v2` takes `extracted_text: Option<&str>`
+  — required (and non-empty) for `Image`/`Document` kinds, forbidden for `Text` kind (a text local
+  file's original already *is* its text; accepting a second, different text there would silently
+  discard whichever one the caller thought was in effect). The original is still re-read and
+  re-hashed against its own registered fingerprint on every prepare call, even though its bytes
+  never become bundle content — so a damaged or tampered original is still caught.
+
+  Phase 3 as first shipped kept the supplied text *only* in the prepared bundle under
+  `.mko/runtime` (gitignored, 24-hour TTL), on the PDF precedent. That was a verified violation of
+  §6.2: after the session expired, the Source revision's `evidence_basis` and every per-claim
+  evidence locator pointed at text that existed nowhere, and two OCR passes over the same original
+  could never be compared. The owner's decision replaces it with an extraction store
+  (`extraction_v2`): at prepare time the supplied text is written to
+  `assets/extractions/<sha256-of-text>.txt` (bounded by the existing 2 MiB text cap, atomic
+  write-new with the same damage-repair semantics as the snapshot and originals stores), under
+  the mutation lock, before the session that cites it is published. The prepared bundle and every
+  Source/Knowledge revision written from it carry the digest (`extraction_digest`, optional,
+  elided when absent so pre-existing revisions round-trip byte-identically); text-fingerprint
+  origins and text local files point at the store their text already lives in, so nothing new is
+  written for them, and `extraction_v2::read_extraction_text_v2` resolves a digest across all
+  three stores with the content re-verified against the digest. A Source/Knowledge write refuses a
+  bundle whose digest resolves to nothing. `check` verifies each extraction's filename hash against
+  its content (`asset_extraction_damaged`) and reports no orphans — a prepare never followed by a
+  write legitimately leaves one, and an earlier revision keeps its extraction after re-extraction.
+  Every non-PDF bundle is stamped `extractor: {name: "agent-read", version: <product version>}`;
+  only a PDF names `pdf-extract`. Revisions written under the earlier label still read: nothing
+  compares a v2 extractor identity against a constant.
 - **Re-extraction is simply another prepare call, no new Asset-level bookkeeping.** Calling prepare
   again with different supplied text (a better OCR pass) yields a different prepared bundle (a
   different `bundle_id`, since the bundle's content digest covers `content_blocks`) bound to the

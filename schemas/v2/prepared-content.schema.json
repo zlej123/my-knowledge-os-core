@@ -23,6 +23,7 @@
     "artifact_type": { "const": "prepared_content" },
     "bundle_id": { "$ref": "#/$defs/bundle_id" },
     "content_digest": { "$ref": "#/$defs/sha256" },
+    "extraction_digest": { "$ref": "#/$defs/sha256" },
     "asset_id": { "$ref": "#/$defs/asset_id" },
     "asset_fingerprint": { "$ref": "#/$defs/sha256" },
     "media_type": { "type": "string", "minLength": 1, "maxLength": 255 },

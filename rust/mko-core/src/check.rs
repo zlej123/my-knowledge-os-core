@@ -46,6 +46,8 @@ const MAX_RUNTIME_LOCK_BYTES: u64 = 16 * 1024;
 /// Prefix every original the binary originals store (Phase 3, §8's named
 /// budget decision) files under.
 const ORIGINALS_PREFIX: &str = "assets/originals/";
+/// Prefix every agent-read extraction (§6.2, decided 2026-09-03) lives under.
+const EXTRACTIONS_PREFIX: &str = "assets/extractions/";
 
 /// A file under `assets/originals/` is exempt from the text-oriented scans
 /// (secret scan, conflict-marker scan) and from the text-oriented byte
@@ -134,6 +136,7 @@ pub fn check_repository(request: CheckRequest) -> Result<CheckReport, MkoError> 
     files.sort_by(|left, right| left.path.cmp(&right.path));
     inspect_files(&repository_root, &files, &mut issues);
     inspect_originals(&files, &mut issues);
+    inspect_extractions(&files, &mut issues);
     inspect_locks(&repository_root, &mut issues);
     inspect_hook(&repository_root, &files, &mut issues);
     sort_and_deduplicate(&mut issues);
@@ -462,6 +465,57 @@ fn inspect_originals(files: &[RepositoryFile], issues: &mut Vec<CheckIssue>) {
                 None,
                 "warning: original is not referenced by any Asset registry record",
                 None,
+            ));
+        }
+    }
+}
+
+/// Validates the extraction store (§6.2, decided 2026-09-03): for each
+/// `assets/extractions/<hash>.txt` entry, its filename hash must match its
+/// actual content hash — the same content-addressed integrity rule
+/// `inspect_originals` applies. Extractions are plain text and stay under
+/// the ordinary 2 MiB text budget, secret scan, and conflict-marker scan
+/// like every other text file; only the integrity rule is added here.
+///
+/// Deliberately no orphan report: a prepare that is never followed by a
+/// Source write legitimately leaves an unreferenced extraction behind (its
+/// only referrer was the ephemeral prepared session), and an earlier
+/// revision keeps referencing its extraction after a re-extraction replaces
+/// it — so "unreferenced by the current pointer" is not damage, and
+/// flagging it would fail `check` on a routine workflow.
+fn inspect_extractions(files: &[RepositoryFile], issues: &mut Vec<CheckIssue>) {
+    for file in files {
+        let Some(name) = file.path.strip_prefix(EXTRACTIONS_PREFIX) else {
+            continue;
+        };
+        if name.is_empty() || name.contains('/') {
+            continue;
+        }
+        let Some(hash) = name
+            .strip_suffix(".txt")
+            .filter(|hash| valid_lower_hex_64(hash))
+        else {
+            issues.push(issue(
+                "asset_extraction_invalid",
+                Some(&file.path),
+                None,
+                "extraction filename must be <lowercase sha256 hex>.txt",
+                None,
+            ));
+            continue;
+        };
+        let actual_hash = sha256_digest(&file.bytes);
+        let actual_hash = actual_hash.strip_prefix("sha256:").unwrap_or(&actual_hash);
+        if actual_hash != hash {
+            issues.push(issue(
+                "asset_extraction_damaged",
+                Some(&file.path),
+                None,
+                "stored extracted text does not match the identity its filename claims",
+                Some(
+                    "restore the extraction from Git history, or prepare the Asset again with the same text"
+                        .into(),
+                ),
             ));
         }
     }

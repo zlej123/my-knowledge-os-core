@@ -13,6 +13,7 @@ use crate::{
     clock::Clock,
     config_v2::{DomainPolicyV2, KnowledgeConfigV2, PerspectiveV2},
     error::MkoError,
+    extraction_v2::read_extraction_text_v2,
     lock::{RepositoryMutationLock, StaleRepositoryLockPolicy},
     model_v2::{
         AuthoredByV2, ContentBlockV2, EvidenceRefV2, KnowledgeBasisV2, KnowledgeResponseV2,
@@ -166,6 +167,15 @@ pub struct EvidenceBasisV2 {
     pub asset_fingerprint: String,
     pub extractor_name: String,
     pub extractor_version: String,
+    /// The digest of the stored text the evidence was built from (§6.2,
+    /// decided 2026-09-03) — resolvable with
+    /// `extraction_v2::read_extraction_text_v2` long after the prepared
+    /// session that carried the text has expired. `None` for a PDF, whose
+    /// pages are extracted at prepare time and not stored, and for every
+    /// revision written before this field existed; defaulted and elided so
+    /// those revisions still round-trip to their original bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction_digest: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -282,6 +292,7 @@ pub fn write_source_record_v2(
 ) -> Result<RecordWriteResultV2, MkoError> {
     KnowledgeConfigV2::read(request.repository_root)?;
     validate_asset_and_bundle(request.asset, request.bundle)?;
+    require_resolvable_extraction(request.repository_root, request.bundle)?;
     validate_source_response(request.bundle, request.response)?;
     let mut response = request.response.clone();
     response.topics = normalize_topics(&response.topics)?;
@@ -333,6 +344,7 @@ pub fn write_knowledge_record_v2(
 ) -> Result<RecordWriteResultV2, MkoError> {
     let config = KnowledgeConfigV2::read(request.repository_root)?;
     validate_asset_and_bundle(request.asset, request.bundle)?;
+    require_resolvable_extraction(request.repository_root, request.bundle)?;
     let domain_policy = config.domain_policies.default.clone();
     validate_knowledge_response(request.bundle, request.response, &domain_policy)?;
     let mut response = request.response.clone();
@@ -572,6 +584,16 @@ fn validate_bundle_self_digest(bundle: &PreparedContentV2) -> Result<(), MkoErro
         return Err(MkoError::new(
             "prepared_bundle_digest_mismatch",
             "prepared bundle ID or self-digest does not match its canonical semantic fields",
+        ));
+    }
+    if bundle
+        .extraction_digest
+        .as_deref()
+        .is_some_and(|digest| !valid_digest(digest))
+    {
+        return Err(MkoError::new(
+            "prepared_bundle_invalid",
+            "prepared bundle extraction digest is not a canonical sha256 digest",
         ));
     }
 
@@ -1292,7 +1314,22 @@ fn evidence_basis(bundle: &PreparedContentV2) -> EvidenceBasisV2 {
         asset_fingerprint: bundle.asset_fingerprint.clone(),
         extractor_name: bundle.extractor.name.clone(),
         extractor_version: bundle.extractor.version.clone(),
+        extraction_digest: bundle.extraction_digest.clone(),
     }
+}
+
+/// A revision may only cite stored text that is actually there (§6.2): a
+/// bundle naming an extraction digest that no store in the knowledge base
+/// resolves — or resolves to damaged bytes — must not become a revision
+/// whose evidence locators point at nothing.
+fn require_resolvable_extraction(
+    repository_root: &Path,
+    bundle: &PreparedContentV2,
+) -> Result<(), MkoError> {
+    if let Some(digest) = &bundle.extraction_digest {
+        read_extraction_text_v2(repository_root, digest)?;
+    }
+    Ok(())
 }
 
 fn block_id(block: &ContentBlockV2) -> &str {

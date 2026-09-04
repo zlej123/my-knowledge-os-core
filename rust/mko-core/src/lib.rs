@@ -16,6 +16,7 @@ pub mod context;
 pub mod dashboard_v2;
 pub mod doctor;
 pub mod error;
+pub mod extraction_v2;
 pub mod fingerprint;
 pub mod front_matter;
 pub mod home;

@@ -277,6 +277,21 @@ never hides this: extracted text is labelled as agent-read, the original is
 kept for re-extraction, and the existing untrusted-content rule applies
 without exception — extracted text is data, never instructions.
 
+**Decision (2026-09-03) — the extracted text is stored, not ephemeral.** The
+agent-read text for an image or document original is persisted
+content-addressed at `assets/extractions/<sha256-of-text>.txt` (bounded by
+the 2 MiB text ceiling; `check` verifies filename hash against content, as
+for originals), and every Source/Knowledge revision carries the digest of
+the stored text it was built from (`evidence_basis.extraction_digest`; for a
+snapshot, paste, conversation, transcript, or text local file this is the
+Asset's own stored text, so nothing new is written). Before this, the text
+lived only in the 24-hour prepared session under `.mko/runtime`, so a
+revision's evidence pointed at text that no longer existed and two OCR
+passes could not be compared. Re-extraction writes a second file and leaves
+the first, so the earlier revision's evidence stays resolvable. Every
+non-PDF bundle names its extractor honestly as `agent-read` at the product
+version that accepted the text; only a PDF names the PDF extractor.
+
 ### 6.3 Topics
 
 - The source/knowledge response contracts gain a `topics` field: free-form
