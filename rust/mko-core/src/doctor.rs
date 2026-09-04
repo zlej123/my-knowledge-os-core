@@ -161,6 +161,25 @@ impl DoctorReport {
 }
 
 pub fn diagnose(request: DoctorRequest, environment: &dyn DoctorEnvironment) -> DoctorReport {
+    let selected = select_personal_context(
+        request
+            .repository_root
+            .map_or_else(ResolveContextRequest::new, |repository| {
+                ResolveContextRequest::new().with_explicit_repository(repository)
+            }),
+        environment.platform(),
+    );
+
+    // Report the KB's own declared contract for a v3 (json-v2 config)
+    // repository — the legacy KNOWLEDGE_CONTRACT_VERSION otherwise (a v0.1
+    // repository, or no repository resolved at all). This runs before the
+    // repository is inspected below for its other checks, so it re-derives
+    // the candidate root from `selected` rather than the fuller
+    // `InspectedRepository` produced later.
+    let contract_version = repository_root_hint(&selected)
+        .and_then(|root| declared_contract_version_v2(&root))
+        .unwrap_or_else(|| KNOWLEDGE_CONTRACT_VERSION.to_string());
+
     let mut checks = vec![
         healthy(
             DiagnosticArea::Product,
@@ -171,20 +190,11 @@ pub fn diagnose(request: DoctorRequest, environment: &dyn DoctorEnvironment) -> 
         healthy(
             DiagnosticArea::Product,
             "contract_version",
-            KNOWLEDGE_CONTRACT_VERSION,
+            &contract_version,
             None,
         ),
     ];
     checks.push(profile_check(environment.platform()));
-
-    let selected = select_personal_context(
-        request
-            .repository_root
-            .map_or_else(ResolveContextRequest::new, |repository| {
-                ResolveContextRequest::new().with_explicit_repository(repository)
-            }),
-        environment.platform(),
-    );
 
     let mut provider = None;
     let repository = match selected {
@@ -396,6 +406,32 @@ fn profile_check(platform: &dyn PlatformEnvironment) -> DoctorCheck {
             RecoveryKind::Configure,
         ),
     }
+}
+
+/// The repository root `select_personal_context` resolved, before it is
+/// inspected further — used only to peek at the KB's declared contract
+/// version for the `contract_version` doctor check.
+fn repository_root_hint(selected: &Result<SelectedPersonalContext, MkoError>) -> Option<PathBuf> {
+    match selected {
+        Ok(SelectedPersonalContext::Repository {
+            repository_root, ..
+        }) => Some(repository_root.clone()),
+        Ok(SelectedPersonalContext::Profile { profile, .. }) => {
+            Some(profile.repository_root.clone())
+        }
+        _ => None,
+    }
+}
+
+/// The contract version a v3 (json-v2 config) repository declares on disk,
+/// or `None` for a legacy v0.1 repository, a damaged config, or a path that
+/// is not a repository at all — any of which fall back to the legacy
+/// `KNOWLEDGE_CONTRACT_VERSION` in the caller.
+fn declared_contract_version_v2(repository_root: &Path) -> Option<String> {
+    let canonical = fs::canonicalize(repository_root).ok()?;
+    KnowledgeConfigV2::read(&canonical)
+        .ok()
+        .map(|configuration| configuration.contract_version)
 }
 
 /// What diagnosis needs from a knowledge repository, whichever generation it is.

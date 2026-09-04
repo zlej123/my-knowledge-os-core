@@ -607,7 +607,8 @@
         "perspectives",
         "layer",
         "locators",
-        "confirmation"
+        "confirmation",
+        "authored_by"
       ],
       "properties": {
         "record_type": {
@@ -675,6 +676,12 @@
         },
         "confirmation": {
           "$ref": "#/$defs/find_confirmation"
+        },
+        "authored_by": {
+          "enum": [
+            "ai",
+            "human"
+          ]
         }
       }
     },
@@ -683,7 +690,8 @@
       "additionalProperties": false,
       "required": [
         "note_id",
-        "text"
+        "text",
+        "authored_by"
       ],
       "properties": {
         "note_id": {
@@ -693,6 +701,9 @@
         "text": {
           "type": "string",
           "maxLength": 32768
+        },
+        "authored_by": {
+          "const": "human"
         }
       }
     },

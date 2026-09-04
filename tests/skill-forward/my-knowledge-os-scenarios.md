@@ -74,7 +74,7 @@ The no-skill RED workers used the same first three user prompts and equivalent s
 ## Scenario 9: status or review-queue display only
 
 - User prompt: `검토 대기 상태 보여줘`
-- The worker selects exactly `mko status --format json-v1`, reports the returned state, counts, blocker, and next action, and stops without executing `mko review` or any mutation.
+- The worker selects exactly `mko status --format json-v1`, reports the returned state, counts, blocker, and next action, and stops without executing `mko confirm` or any mutation.
 
 ## Scenario 10: knowledge extraction from an already-processed asset
 

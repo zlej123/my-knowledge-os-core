@@ -22,7 +22,7 @@ use crate::{
     front_matter::parse_markdown,
     json_v2::{QueueDataV2, QueueItemStateV2, QueueItemTypeV2, QueueItemV2, QueueNextActionV2},
     judgment_v2::{JudgmentAnnotationV2, prepare_judgment_v2},
-    model_v2::{KnowledgeUnitKindV2, KnowledgeUnitV2, ReviewTargetTypeV2},
+    model_v2::{AuthoredByV2, KnowledgeUnitKindV2, KnowledgeUnitV2, ReviewTargetTypeV2},
     projection_v2::{
         ProjectionInputV2, ProjectionRecordTypeV2, ProjectionSnapshotStatusV2, ProjectionStateV2,
         projection_relative_path_v2, projection_snapshot_status_v2,
@@ -187,6 +187,7 @@ pub struct SearchMatchV2 {
     pub locators: Vec<String>,
     pub layer: SearchLayerV2,
     pub confirmation: ConfirmationLabelV2,
+    pub authored_by: AuthoredByV2,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -522,6 +523,7 @@ pub fn search_records_by_perspective_v2(
                             .collect(),
                         layer: search_layer(&unit.kind),
                         confirmation: label.clone(),
+                        authored_by: revision.authored_by.clone(),
                     })
                     .collect::<Vec<_>>()
             }
@@ -561,6 +563,7 @@ pub fn search_records_by_perspective_v2(
                         .collect(),
                     layer: SearchLayerV2::SourceOwnWords,
                     confirmation: confirmation_label_for_target(target),
+                    authored_by: revision.authored_by.clone(),
                 }]
             }
         })

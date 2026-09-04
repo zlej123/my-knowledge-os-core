@@ -24,6 +24,7 @@ fn product_version_does_not_change_the_knowledge_contract() {
     assert_eq!(mko_core::version::KNOWLEDGE_CONTRACT_VERSION, "0.1.0");
     assert!(mko_core::version::supports_contract("0.1.0"));
     assert!(!mko_core::version::supports_contract("0.2.0"));
+    assert_eq!(mko_core::config_v2::CONTRACT_VERSION_V2, "0.3.1");
 }
 
 #[test]
