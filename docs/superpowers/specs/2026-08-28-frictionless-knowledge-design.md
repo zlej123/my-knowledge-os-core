@@ -230,6 +230,10 @@ below are new behavior.
   - **Filters over data that exists today**: confirmation state and time
     range. Topic and origin-form filters arrive with the phases that create
     those fields.
+    **Status:** the time-range filter was descoped during Phase 1a delivery
+    — an unconfirmed revision carries no write timestamp to filter on — and
+    is not implemented; only confirmation-state filtering shipped. Revisit
+    once a revision write timestamp exists.
   - **Source-record search**, built new (no source search exists today). If
     its cost proves larger than planned, the plan may descope it to a
     follow-up, recorded with the reason.
@@ -373,6 +377,15 @@ Phase 3 defers `.hwp` to the backlog and keeps `.hwpx` as a candidate.
 - A semantic search engine, embeddings, or any nondeterministic index inside
   the Core.
 - Automatic storage without the owner's yes (store-on-miss always asks).
+  **Deliberate exception, inherited unchanged from the 2026-08-06
+  question-enrichment design** (`docs/superpowers/specs/
+  2026-08-06-mko-question-enrichment-design.md`): the Skill's
+  studying-by-asking flow and the web/video workflows register a page the
+  agent cites, or a video's transcript, as a snapshot *while answering* —
+  that registration is not store-on-miss and is not gated on a yes, because
+  a cited source is working evidence, not conversation content. The
+  owner's explicit yes is still required before any conversation content
+  itself is stored.
 
 ## 10. Testing
 

@@ -167,6 +167,25 @@ pub(crate) fn json_v2_next_action(code: &str) -> NextActionV2 {
         | "record_revision_stale"
         | "replacement_revision_required" => NextActionV2::Review,
         "skill_version_mismatch" | "schema_not_found" => NextActionV2::Reinstall,
+        // Append-only recall-log and kb-config writes: the observation was
+        // not recorded (or the config change did not land), and the same
+        // call is the way to record it — same shape as the write-path
+        // failures above.
+        "recall_log_write_failed" | "recall_log_unreadable" | "kb_config_write_failed" => {
+            NextActionV2::Retry
+        }
+        // Malformed on-disk state that a plain retry cannot fix: the log,
+        // its path, the dashboard projection, or the dashboard itself needs
+        // repair before the same call can succeed.
+        "recall_log_invalid"
+        | "recall_log_path_invalid"
+        | "projection_invalid"
+        | "dashboard_read_failed"
+        | "dashboard_repair_failed" => NextActionV2::Repair,
+        // Environment-level failures (a broken `mko check` run, or git being
+        // unavailable on this machine) are not answered by any of the typed
+        // recovery actions — the caller needs to look at the environment.
+        "check_failed" | "git_unavailable" => NextActionV2::None,
         _ => NextActionV2::None,
     }
 }
@@ -277,7 +296,9 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{emit_json_value_to, write_json_line};
+    use mko_core::json_v2::NextActionV2;
+
+    use super::{emit_json_value_to, json_v2_next_action, write_json_line};
 
     struct FlushFailure;
 
@@ -314,5 +335,45 @@ mod tests {
             output,
             b"{\"error\":{\"code\":\"usage\",\"message\":\"bad input\"},\"result\":\"error\"}\n"
         );
+    }
+
+    #[test]
+    fn json_v2_next_action_covers_recently_introduced_codes() {
+        let retry = [
+            "recall_log_write_failed",
+            "recall_log_unreadable",
+            "kb_config_write_failed",
+        ];
+        for code in retry {
+            assert_eq!(
+                json_v2_next_action(code),
+                NextActionV2::Retry,
+                "{code} should map to Retry"
+            );
+        }
+
+        let repair = [
+            "recall_log_invalid",
+            "recall_log_path_invalid",
+            "projection_invalid",
+            "dashboard_read_failed",
+            "dashboard_repair_failed",
+        ];
+        for code in repair {
+            assert_eq!(
+                json_v2_next_action(code),
+                NextActionV2::Repair,
+                "{code} should map to Repair"
+            );
+        }
+
+        let environment_level = ["check_failed", "git_unavailable"];
+        for code in environment_level {
+            assert_eq!(
+                json_v2_next_action(code),
+                NextActionV2::None,
+                "{code} is environment-level and should stay None"
+            );
+        }
     }
 }

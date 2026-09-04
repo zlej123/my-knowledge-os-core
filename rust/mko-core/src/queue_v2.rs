@@ -22,7 +22,7 @@ use crate::{
     front_matter::parse_markdown,
     json_v2::{QueueDataV2, QueueItemStateV2, QueueItemTypeV2, QueueItemV2, QueueNextActionV2},
     judgment_v2::{JudgmentAnnotationV2, prepare_judgment_v2},
-    model_v2::{KnowledgeUnitKindV2, KnowledgeUnitV2, ReviewTargetTypeV2},
+    model_v2::{AuthoredByV2, KnowledgeUnitKindV2, KnowledgeUnitV2, ReviewTargetTypeV2},
     projection_v2::{
         ProjectionInputV2, ProjectionRecordTypeV2, ProjectionSnapshotStatusV2, ProjectionStateV2,
         projection_relative_path_v2, projection_snapshot_status_v2,
@@ -187,6 +187,7 @@ pub struct SearchMatchV2 {
     pub locators: Vec<String>,
     pub layer: SearchLayerV2,
     pub confirmation: ConfirmationLabelV2,
+    pub authored_by: AuthoredByV2,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -211,6 +212,9 @@ pub struct ResurfacedKnowledgeV2 {
     /// callers can render unconfirmed resurfaced knowledge with the exact
     /// wording search already uses instead of inventing a second vocabulary.
     pub confirmation: ConfirmationLabelV2,
+    /// Who authored the current revision (§4.1), so the badge can say
+    /// "AI 작성" or "직접 작성" honestly instead of assuming AI.
+    pub authored_by: AuthoredByV2,
     /// Absent for knowledge no human has ever reviewed (§4.2: unconfirmed
     /// knowledge resurfaces too, but it has no review event to date).
     pub reviewed_at: Option<DateTime<Utc>>,
@@ -529,6 +533,7 @@ pub fn search_records_by_perspective_v2(
                             .collect(),
                         layer: search_layer(&unit.kind),
                         confirmation: label.clone(),
+                        authored_by: revision.authored_by.clone(),
                     })
                     .collect::<Vec<_>>()
             }
@@ -568,6 +573,7 @@ pub fn search_records_by_perspective_v2(
                         .collect(),
                     layer: SearchLayerV2::SourceOwnWords,
                     confirmation: confirmation_label_for_target(target),
+                    authored_by: revision.authored_by.clone(),
                 }]
             }
         })
@@ -674,6 +680,7 @@ fn resurface_knowledge_internal(
                     _ => ResurfacedKnowledgeStateV2::Confirmed,
                 },
                 confirmation: confirmation_label_for_target(target),
+                authored_by: revision.authored_by.clone(),
                 reviewed_at: history.current_reviewed_at,
                 last_opened_at: opened_at
                     .get(&(target.record_id.clone(), target.pointer.revision.clone()))
@@ -2220,6 +2227,7 @@ mod tests {
                 has_open_questions,
                 review_state: state,
                 confirmation,
+                authored_by: AuthoredByV2::Ai,
                 reviewed_at,
                 last_opened_at: last_opened_at.map(timestamp),
             }

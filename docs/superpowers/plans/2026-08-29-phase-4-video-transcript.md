@@ -188,7 +188,7 @@ This phase completes the frictionless-knowledge design (`docs/superpowers/specs/
 | Phase | Delivered | `workspace.package.version` | `CONTRACT_VERSION_V2` |
 |---|---|---|---|
 | 0 | Approval-as-badge semantics, confirmation rename, migration (clean-git-tree gated), reinterpreted home/unconfirmed-view surfaces, MKO↔Thesis contract-document revision | `0.3.25 → 0.4.0` | `0.3.0 → 0.3.1` |
-| 1a | Unconditional recall contract, recall log, query NFC normalization, whitespace-token AND matching, unconfirmed-inclusive search, confirmation/time filters, source search, `find` unification | `0.4.0 → 0.4.1` | unchanged (`0.3.1`) |
+| 1a | Unconditional recall contract, recall log, query NFC normalization, whitespace-token AND matching, unconfirmed-inclusive search, confirmation filter, source search, `find` unification | `0.4.0 → 0.4.1` | unchanged (`0.3.1`) |
 | 2 | Pasted text, Markdown/text local files, conversation capture, `topics` + `mko topics` + `--topic` filter, store-on-miss | `0.4.1 → 0.4.2` | unchanged (`0.3.1`) |
 | 3 | Images/screenshots + docx/hwpx originals (content-addressed sidecar store), `mko check`'s originals exemption, `--origin` filter (`pasted-text`/`local-file`/`image`/`document`/`web`/`conversation` live; `video` accepted but inert) | `0.4.2 → 0.4.3` | unchanged (`0.3.1`) |
 | 4 | YouTube/video via URL + transcript (snapshot-model, no original bytes), `--origin video` completing the filter vocabulary | `0.4.3 → 0.4.4` | unchanged (`0.3.1`) |

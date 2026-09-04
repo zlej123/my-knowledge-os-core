@@ -347,6 +347,64 @@ fn a_current_generation_repository_is_diagnosed_as_compatible() {
     assert_eq!(repository_check["status"], "healthy");
 }
 
+// A v3 repository's contract_version check must name the KB's own declared
+// contract, not the retired v0.1 KNOWLEDGE_CONTRACT_VERSION — otherwise an
+// owner running `mko doctor` on a current-generation KB sees a report that
+// looks stale even though nothing is wrong.
+#[test]
+#[allow(deprecated)]
+fn a_current_generation_repository_reports_its_own_declared_contract_version() {
+    let root = tempfile::tempdir().unwrap();
+    let repository = root.path().join("kb");
+    mko_core::scaffold_v2::scaffold_personal_kb_v2(&repository).unwrap();
+
+    let output = Command::cargo_bin("mko")
+        .unwrap()
+        .args(["doctor", "--repo"])
+        .arg(&repository)
+        .args(["--format", "json-v1"])
+        .assert()
+        .get_output()
+        .stdout
+        .clone();
+
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let contract_check = report["data"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["code"] == "contract_version")
+        .expect("doctor must report on the contract version");
+    assert_eq!(
+        contract_check["message"],
+        mko_core::config_v2::CONTRACT_VERSION_V2,
+        "a v3 repository must report the KB's own declared contract, not the legacy v0.1 value"
+    );
+}
+
+// A legacy v0.1 repository has no json-v2 config to declare a contract from,
+// so doctor must keep reporting the legacy KNOWLEDGE_CONTRACT_VERSION rather
+// than falling back to CONTRACT_VERSION_V2 or leaving the check off entirely.
+#[test]
+#[allow(deprecated)]
+fn a_legacy_repository_reports_the_legacy_contract_version() {
+    let fixture = Fixture::new();
+    fixture.make_healthy();
+
+    let output = fixture.json_output();
+    let report: Value = serde_json::from_slice(&output).unwrap();
+    let contract_check = report["data"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["code"] == "contract_version")
+        .expect("doctor must report on the contract version");
+    assert_eq!(
+        contract_check["message"], "0.1.0",
+        "a legacy v0.1 repository must keep reporting the legacy contract version"
+    );
+}
+
 // Accepting the flag and answering with a human line at exit 0 left an agent
 // parsing prose or, worse, treating a diagnosis as success.
 #[test]

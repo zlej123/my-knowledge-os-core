@@ -44,10 +44,10 @@ use mko_core::{
         AddOutcomeV2, AddSingleDataV2, AskedQuestionV2, DashboardCanonicalStateDataV2,
         DashboardDataV2, DashboardFileDataV2, DashboardFileKindDataV2, DashboardFileStateDataV2,
         DashboardProjectionStateDataV2, DoctorCheckDataV2, DoctorCheckStatusV2, DoctorDataV2,
-        FindConfirmationStatusV2, FindConfirmationV2, FindDataV2, FindLayerV2, FindMatchV2,
-        FindNoteV2, FindRecordTypeV2, HandshakeDataV2, JsonV2Command, JsonV2Success, NextActionV2,
-        PendingDraftReasonV2, PendingDraftV2, QuestionsAppendDataV2, QuestionsListDataV2,
-        QueueDraftsDataV2, SetupApplyDataV2, TopicsDataV2,
+        FindAuthoredByV2, FindConfirmationStatusV2, FindConfirmationV2, FindDataV2, FindLayerV2,
+        FindMatchV2, FindNoteV2, FindRecordTypeV2, HandshakeDataV2, JsonV2Command, JsonV2Success,
+        NextActionV2, PendingDraftReasonV2, PendingDraftV2, QuestionsAppendDataV2,
+        QuestionsListDataV2, QueueDraftsDataV2, SetupApplyDataV2, TopicsDataV2,
     },
     knowledge::{
         ConceptKind, KnowledgeSearchQuery, WriteKnowledgeRequest, approve_knowledge,
@@ -56,6 +56,7 @@ use mko_core::{
     local_file_v2::{RegisterLocalFileRequestV2, register_local_file_asset_v2},
     migrate_v2::migrate_v2,
     model::AssetStatus,
+    model_v2::AuthoredByV2,
     pdf::{ExtractionWorkerResponse, extract_pdf_pages_from_reader, worker_executable},
     perspective_v2::{prepare_perspective_confirmation_v2, publish_perspective_confirmation_v2},
     prepare::{PrepareRequest, prepare_source},
@@ -489,6 +490,13 @@ fn find_record_type_data(record_type: SearchRecordTypeV2) -> FindRecordTypeV2 {
     }
 }
 
+fn find_authored_by_data(authored_by: &AuthoredByV2) -> FindAuthoredByV2 {
+    match authored_by {
+        AuthoredByV2::Ai => FindAuthoredByV2::Ai,
+        AuthoredByV2::Human => FindAuthoredByV2::Human,
+    }
+}
+
 fn find_confirmation_data(label: ConfirmationLabelV2) -> FindConfirmationV2 {
     match label {
         ConfirmationLabelV2::Confirmed { at } => FindConfirmationV2 {
@@ -520,25 +528,44 @@ fn find_match_data(item: SearchMatchV2) -> FindMatchV2 {
         layer: find_layer_data(item.layer),
         locators: item.locators,
         confirmation: find_confirmation_data(item.confirmation),
+        authored_by: find_authored_by_data(&item.authored_by),
     }
 }
 
+// A stored quick note has no agent-drafted form (§4.1): it is always
+// owner-typed, so its `authored_by` is unconditionally `human` rather than
+// derived from a per-note field.
 fn find_note_data(note: QuickNoteV2) -> FindNoteV2 {
     FindNoteV2 {
         note_id: note.id,
         text: note.text,
+        authored_by: FindAuthoredByV2::Human,
     }
 }
 
-fn confirmation_label_text(label: &ConfirmationLabelV2) -> String {
+// Authorship prefix per §4.2's example labelling (`AI 작성 · 미검토`) —
+// `authored_by` (§4.1) says whose words they are, independent of whether a
+// human has since confirmed the exact revision.
+fn authored_by_label(authored_by: &AuthoredByV2) -> &'static str {
+    match authored_by {
+        AuthoredByV2::Ai => "AI 작성",
+        AuthoredByV2::Human => "사람 작성",
+    }
+}
+
+fn confirmation_label_text(label: &ConfirmationLabelV2, authored_by: &AuthoredByV2) -> String {
     match label {
         // Matches the vocabulary `mko queue`/`mko confirm` already use for
         // this state (cli_v2::state_label's `미확인`), prefixed with
         // authorship per §4.2's example labelling.
         ConfirmationLabelV2::Confirmed { at } => {
-            format!("확인됨 ({})", at.format("%Y-%m-%d"))
+            format!(
+                "{} · 확인됨 ({})",
+                authored_by_label(authored_by),
+                at.format("%Y-%m-%d")
+            )
         }
-        ConfirmationLabelV2::Unconfirmed => "AI 작성 · 미확인".to_owned(),
+        ConfirmationLabelV2::Unconfirmed => format!("{} · 미확인", authored_by_label(authored_by)),
     }
 }
 
@@ -1494,7 +1521,7 @@ fn find(arguments: FindArgs) -> Result<(), MkoError> {
                                 "[{}] {} · {}",
                                 find_layer_label(item.layer),
                                 item.title,
-                                confirmation_label_text(&item.confirmation)
+                                confirmation_label_text(&item.confirmation, &item.authored_by)
                             );
                             println!("  {}", compact_excerpt(&item.body, 140));
                             if !item.perspectives.is_empty() {
@@ -1725,7 +1752,7 @@ fn resurface(repository: &Path) -> Result<(), MkoError> {
             item.title,
             // Reuses `mko find`'s confirmation badge (§4.2) so unconfirmed
             // resurfaced knowledge reads the same way search results do.
-            confirmation_label_text(&item.confirmation),
+            confirmation_label_text(&item.confirmation, &item.authored_by),
             if item.review_state == ResurfacedKnowledgeStateV2::Deferred {
                 " · 나중에 보기"
             } else {
@@ -1780,7 +1807,7 @@ fn resurface(repository: &Path) -> Result<(), MkoError> {
     let status_label = match selected.review_state {
         ResurfacedKnowledgeStateV2::Deferred => "나중에 보기".to_owned(),
         ResurfacedKnowledgeStateV2::Confirmed | ResurfacedKnowledgeStateV2::Unconfirmed => {
-            confirmation_label_text(&selected.confirmation)
+            confirmation_label_text(&selected.confirmation, &selected.authored_by)
         }
     };
     let mut detail_line = status_label;
